@@ -1,4 +1,4 @@
-import init, { create_wasm_bridge, set_document_json } from "/pkg/caption_bridge.js";
+import init, { create_wasm_bridge, set_document_json, parse_subtitle, format_subtitle } from "/pkg/caption_bridge.js";
 
 const FPS = 30;
 
@@ -41,6 +41,10 @@ const els = {
   durationDisplay: $("duration-display"),
   themeToggle: $("theme-toggle"),
   exportBtn: $("export"),
+  importSubtitleBtn: $("import-subtitle"),
+  exportSrtBtn: $("export-srt"),
+  exportVttBtn: $("export-vtt"),
+  subtitleFile: $("subtitle-file"),
   editor: $("editor"),
   handle: $("resize-handle"),
   previewCol: $("preview-col"),
@@ -289,6 +293,53 @@ els.exportBtn.addEventListener("click", async () => {
     setStatus(String(err), true);
   }
 });
+
+// ── Subtitle file import/export (.srt / .vtt) ─────────────────────────
+// Parse/format happen in wasm (caption_core::srt) so the studio, headless
+// tests and export share one implementation. The textarea stays the single
+// editable source: import merges parsed cues into it, then re-applies.
+
+els.importSubtitleBtn.addEventListener("click", () => els.subtitleFile.click());
+
+els.subtitleFile.addEventListener("change", async () => {
+  const file = els.subtitleFile.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const format = file.name.toLowerCase().endsWith(".vtt") ? "vtt" : "srt";
+    const parsed = JSON.parse(parse_subtitle(text, format));
+    const doc = JSON.parse(els.doc.value);
+    doc.cues = parsed.cues;
+    doc.duration_frames = Math.max(doc.duration_frames || 0, parsed.duration_frames);
+    els.doc.value = JSON.stringify(doc, null, 2);
+    els.frame.value = 0;
+    await applyDocument();
+    setStatus(`imported ${parsed.cues.length} cues from ${file.name}`);
+  } catch (err) {
+    setStatus(String(err), true);
+  } finally {
+    els.subtitleFile.value = "";
+  }
+});
+
+function exportSubtitle(format) {
+  try {
+    const doc = JSON.parse(els.doc.value);
+    const text = format_subtitle(JSON.stringify(doc.cues), format);
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${$("project-name").value || "captions"}.${format}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    setStatus(`exported ${doc.cues.length} cues as .${format}`);
+  } catch (err) {
+    setStatus(String(err), true);
+  }
+}
+
+els.exportSrtBtn.addEventListener("click", () => exportSubtitle("srt"));
+els.exportVttBtn.addEventListener("click", () => exportSubtitle("vtt"));
 
 // Mode strip: Captions | divider | Timeline
 document.querySelectorAll(".mode-tab").forEach((tab) => {

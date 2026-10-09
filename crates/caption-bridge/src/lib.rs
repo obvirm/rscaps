@@ -20,3 +20,16 @@ pub fn set_document_json(json: &str) -> Result<(), JsValue> {
 pub fn replace_cues_json(json: &str) -> Result<(), JsValue> {
     caption_core::replace_cues_json(json).map_err(|err| JsValue::from_str(&err))
 }
+
+/// Parse an SRT/VTT file → JSON `{"duration_frames", "cues"}`. Pure; the
+/// caller merges the result into the document.
+#[wasm_bindgen]
+pub fn parse_subtitle(text: &str, format: &str) -> Result<String, JsValue> {
+    caption_core::parse_subtitle_json(text, format).map_err(|err| JsValue::from_str(&err))
+}
+
+/// Cues JSON (`[Cue, …]`) → subtitle file text (`format` is `"srt"`/`"vtt"`).
+#[wasm_bindgen]
+pub fn format_subtitle(cues_json: &str, format: &str) -> Result<String, JsValue> {
+    caption_core::format_subtitle_json(cues_json, format).map_err(|err| JsValue::from_str(&err))
+}

@@ -248,12 +248,34 @@ pub struct Measured {
     pub families: Vec<&'static str>,
 }
 
-/// Measure every word with the face its script resolves to. Widths keep
-/// the `DomProbeCanvasTextMeasurer` convention every template already
-/// uses: advance at size == unitsPerEm (exact font units through fframes'
-/// integer math) scaled back to px, plus one letter-spacing per UTF-16
-/// unit; words whose face is not loaded fall back to `utf16 * fs * 0.5`
-/// so plates still appear.
+/// Shaped advance of `text` in a script face, px at `fs`. Sums the
+/// harfbuzz x-advances of the *joined* glyphs — summing isolated
+/// per-char advances overcounts Arabic/Hebrew badly (cursive joining
+/// drops side bearings), which spread RTL words apart vs tscaps'
+/// canvas-measured layout.
+fn shaped_advance(family: &str, text: &str, fs: f32) -> Option<f32> {
+    script_ttf(family)?;
+    static FACES: OnceLock<[Option<rustybuzz::Face<'static>>; 6]> = OnceLock::new();
+    let faces = FACES.get_or_init(|| {
+        SCRIPT_FACES.map(|f| rustybuzz::Face::from_slice(script_ttf(f).unwrap(), 0))
+    });
+    let idx = SCRIPT_FACES.iter().position(|&f| f == family)?;
+    let face = faces[idx].as_ref()?;
+    let upem = face.units_per_em() as f32;
+    let mut buf = rustybuzz::UnicodeBuffer::new();
+    buf.push_str(text);
+    let out = rustybuzz::shape(face, &[], buf);
+    let units: i32 = out.glyph_positions().iter().map(|p| p.x_advance).sum();
+    Some(units as f32 * fs / upem)
+}
+
+/// Measure every word with the face its script resolves to. Script words
+/// (arabic/hebrew) are shaped with harfbuzz so cursive joining is
+/// accounted for; Latin words keep the `DomProbeCanvasTextMeasurer`
+/// per-char convention every template already uses: advance at size ==
+/// unitsPerEm (exact font units through fframes' integer math) scaled
+/// back to px, plus one letter-spacing per UTF-16 unit; words whose face
+/// is not loaded fall back to `utf16 * fs * 0.5` so plates still appear.
 pub fn measure_words<'a>(
     words: &[TimedWord],
     stack: &Stack,
@@ -308,15 +330,19 @@ pub fn measure_words<'a>(
         };
         let utf16 = display.encode_utf16().count() as f32;
         let fallback = utf16 * fs * 0.5;
-        let advance = match faces[slot].as_deref() {
-            Some(face) => match face.font_variant(upem) {
-                Some(variant) => {
-                    let units = layout::measure_units(face, variant, upem, &display);
-                    units as f32 * fs / upem as f32
-                }
+        let advance = if slot != 0 {
+            shaped_advance(family, &display, fs).unwrap_or(fallback)
+        } else {
+            match faces[slot].as_deref() {
+                Some(face) => match face.font_variant(upem) {
+                    Some(variant) => {
+                        let units = layout::measure_units(face, variant, upem, &display);
+                        units as f32 * fs / upem as f32
+                    }
+                    None => fallback,
+                },
                 None => fallback,
-            },
-            None => fallback,
+            }
         };
         widths.push(advance + utf16 * ls_px);
         word_families.push(family);
@@ -446,7 +472,9 @@ mod tests {
             .iter()
             .map(|t| word(t))
             .collect();
-        // font_source None -> utf16 * fs * 0.5 fallback per word.
+        // font_source None -> latin falls back to utf16 * fs * 0.5; the
+        // Arabic word ignores font_source and shapes with embedded Cairo
+        // (cursive joining — narrower than the per-char isolated sum).
         let m = measure_words(
             &words,
             &stack,
@@ -462,7 +490,17 @@ mod tests {
             vec!["Poppins", "Poppins", FONT_CAIRO]
         );
         assert!((m.widths[0] - 7.0 * 40.0 * 0.5).abs() < 1e-3);
-        assert!((m.widths[2] - 5.0 * 40.0 * 0.5).abs() < 1e-3);
+        let isolated_sum = 5.0 * 40.0 * 0.5; // old per-char fallback
+        assert!(m.widths[2] > 0.0 && m.widths[2] < isolated_sum);
+        assert_eq!(m.widths[2], shaped_advance(FONT_CAIRO, "مرحبا", 40.0).unwrap());
+    }
+
+    #[test]
+    fn shaped_arabic_matches_canvas_shaped_width() {
+        // Browser canvas measureText("بالعالم") @ 700 64.8px Vazirmatn
+        // returns 173.2px; the isolated per-char sum is 258.8px.
+        let w = shaped_advance(FONT_VAZIRMATN, "بالعالم", 64.8).unwrap();
+        assert!((w - 173.2).abs() < 2.0, "shaped={w}");
     }
 
     #[test]

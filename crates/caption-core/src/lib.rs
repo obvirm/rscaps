@@ -5,9 +5,10 @@ use fframes::{
 use serde::{Deserialize, Serialize};
 use std::sync::{OnceLock, RwLock};
 
+pub mod srt;
 pub mod templates;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cue {
     pub start_ms: u32,
     pub end_ms: u32,
@@ -151,6 +152,27 @@ pub fn replace_cues_json(json: &str) -> Result<(), String> {
         .map_err(|_| "document lock poisoned".to_string())?;
     guard.cues = cues;
     Ok(())
+}
+
+/// Parse a subtitle file (`.srt` / `.vtt`) → JSON
+/// `{"duration_frames": u32, "cues": [Cue, …]}` for the editor to merge.
+/// Pure: the live document is untouched, the caller decides.
+pub fn parse_subtitle_json(text: &str, format: &str) -> Result<String, String> {
+    let format = srt::Format::parse_str(format)?;
+    let parsed = srt::parse(text, format)?;
+    let value = serde_json::json!({
+        "duration_frames": parsed.duration_frames,
+        "cues": parsed.cues,
+    });
+    serde_json::to_string(&value).map_err(|err| format!("serialize cues: {err}"))
+}
+
+/// Cues JSON (`[Cue, …]`) → subtitle file text. `format` is `"srt"` or `"vtt"`.
+pub fn format_subtitle_json(cues_json: &str, format: &str) -> Result<String, String> {
+    let format = srt::Format::parse_str(format)?;
+    let cues: Vec<Cue> =
+        serde_json::from_str(cues_json).map_err(|err| format!("invalid cues: {err}"))?;
+    Ok(srt::format(&cues, format))
 }
 
 #[derive(Debug, Default)]

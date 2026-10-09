@@ -658,12 +658,20 @@
         </div>
         <div class="spacer"></div>
         <span id="status" class="status-pill">loading…</span>
+        <div class="toolbar-group">
+          <button class="btn" id="import-subtitle" title="Import captions from a .srt or .vtt file">Import</button>
+          <button class="btn" id="export-srt" title="Download captions as SubRip (.srt)">.srt</button>
+          <button class="btn" id="export-vtt" title="Download captions as WebVTT (.vtt)">.vtt</button>
+        </div>
         <button class="icon-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5" /><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" stroke="none" /></svg>
         </button>
         <button class="btn" id="save" disabled>Save</button>
         <button class="btn accent" id="export" title="Download current frame as PNG">Export</button>
       </header>
+
+      <!-- Subtitle file picker (Import toolbar button triggers it) -->
+      <input type="file" id="subtitle-file" accept=".srt,.vtt,application/x-subrip,text/vtt" hidden />
 
       <!-- Editor: preview + sidebar -->
       <div class="editor" id="editor">
