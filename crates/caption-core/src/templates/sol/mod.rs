@@ -10,18 +10,13 @@
 //! narration start (`tscaps-sol-pop-in`, 0.2s, `cubic-bezier(0.16, 1,
 //! 0.3, 1)`).
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes};
+use super::{effects, layout, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from sol's style.scss + template.json) ────────────────
 const FONT: &str = "Montserrat"; // fontStack montserrat (scss: 'Montserrat Variable')
-// Same fontsource packaging quirk as mira/rhea: the embedded Montserrat
-// reports `Montserrat Thin` as its family (name ID 16) — that is the
-// string fontdb resolves (`FONTDB_FAMILY`, used to measure), while the
-// SVG emits `FONT` to match the studio's @font-face family.
-const FONTDB_FAMILY: &str = "Montserrat Thin"; // TTF name-table family (measure)
 const FONT_WEIGHT: u16 = 300; // typography.fontWeight: 300
 // `.line + .line` font-family: var(--tscaps-tag-font-family, 'Kalam') —
 // Kalam is neither embedded here nor registered in the studio's
@@ -114,21 +109,17 @@ fn tag_metrics() -> (f32, f32, f32) {
     *METRICS.get_or_init(|| face_metrics(CAVEAT_700_TTF))
 }
 
-/// Raw word width: advance + one letter-spacing per UTF-16 unit (the
-/// `DomProbeCanvasTextMeasurer` replica; margins live in the placement).
-/// `ls_px` stays at the segment's letter-spacing — it inherits as a
-/// computed length — while `fs` is the line's own font-size.
-fn measure_word(face: &dyn fframes::FontFace, upem: f32, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let upem_usize = upem as usize;
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem_usize) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem_usize, text);
-            units as f32 * fs / upem
-        }
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment (main
+/// register: Montserrat; accent: Caveat — both go through the stack for
+/// script fallback).
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else if dominant == TAG_FONT {
+        tag_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 // ── keyframe ports ────────────────────────────────────────────────────────
@@ -237,38 +228,27 @@ pub fn render<'a>(
     let ls_px = LETTER_SPACING_EM * fs;
     let margin = WORD_SPACING_EM * fs;
 
-    let probe = FontQuery {
-        family: FONTDB_FAMILY,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face_main = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONTDB_FAMILY, probe.weight, probe.style, probe.stretch));
-    let tag_probe = FontQuery {
-        family: TAG_FONT,
-        size: 1,
-        weight: TAG_FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face_tag = ctx.font_source.and_then(|source| {
-        source.resolve_font(TAG_FONT, tag_probe.weight, tag_probe.style, tag_probe.stretch)
-    });
-
-    let (asc_ratio, desc_ratio, upem) = font_metrics();
-    let (tag_asc_ratio, tag_desc_ratio, tag_upem) = tag_metrics();
+    let main_stack = stack::Stack::for_latin(FONT);
+    let tag_stack = stack::Stack::for_latin(TAG_FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &main_stack));
+    let (tag_asc_ratio, tag_desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &tag_stack));
+    let rtl = segment.direction.is_rtl();
 
     // The splitter measures at the segment's typography — the accent
     // line's size/face only exist once lines do.
-    let mut widths = Vec::with_capacity(segment.words.len());
-    for word in &segment.words {
-        let width_px = match &face_main {
-            Some(face) => measure_word(face.as_ref(), upem, fs, ls_px, &word.display),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        };
-        widths.push(width_px);
-    }
+    let measured = stack::measure_words(
+        &segment.words,
+        &main_stack,
+        MONTSERRAT_300_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        ls_px,
+        false,
+    );
+    let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
         min_lines: MIN_LINES,
@@ -331,25 +311,27 @@ pub fn render<'a>(
         let (top, line_h, line_fs) = boxes[line_idx];
         let line_top = block_top + top;
         let is_tag = line_idx > 0;
-        let (face, line_upem, asc_ratio, desc_ratio, family, weight, fill) = if is_tag {
+        let (latin_ttf, latin_weight, asc_ratio, desc_ratio, family, weight, fill, line_stack) = if is_tag {
             (
-                face_tag.as_ref(),
-                tag_upem,
+                CAVEAT_700_TTF,
+                TAG_FONT_WEIGHT,
                 tag_asc_ratio,
                 tag_desc_ratio,
                 TAG_FONT,
                 TAG_FONT_WEIGHT,
                 HIGHLIGHT,
+                &tag_stack,
             )
         } else {
             (
-                face_main.as_ref(),
-                upem,
+                MONTSERRAT_300_TTF,
+                FONT_WEIGHT,
                 asc_ratio,
                 desc_ratio,
                 FONT,
                 FONT_WEIGHT,
                 PRIMARY,
+                &main_stack,
             )
         };
         let ascent = asc_ratio * line_fs;
@@ -358,32 +340,45 @@ pub fn render<'a>(
 
         let line_margin = WORD_SPACING_EM * line_fs;
         let line_words = &segment.words[start..end];
-        let line_widths: Vec<f32> = match &face {
-            Some(face) => line_words
-                .iter()
-                .map(|w| measure_word(face.as_ref(), line_upem, line_fs, ls_px, &w.display))
-                .collect(),
-            None => line_words
-                .iter()
-                .map(|w| w.display.encode_utf16().count() as f32 * line_fs * 0.5)
-                .collect(),
-        };
+        let line_measured = stack::measure_words(
+            line_words,
+            line_stack,
+            latin_ttf,
+            latin_weight,
+            ctx.font_source,
+            line_fs,
+            ls_px,
+            false,
+        );
+        let line_widths = &line_measured.widths;
         let line_split: Vec<f32> = line_widths
             .iter()
             .map(|w| w + 2.0 * line_margin)
             .collect();
         let line_w: f32 = line_split.iter().sum();
         let line_left = center_x - line_w / 2.0;
-        let xs = layout::word_x_positions(&line_widths, line_margin, line_left, line_w, false);
+        let xs = layout::word_x_positions(line_widths, line_margin, line_left, line_w, rtl);
 
         words_svg.push_str(&format!(
             "<g font-family=\"{family}\" font-weight=\"{weight}\" font-size=\"{line_fs}\" \
              fill=\"{fill}\">"
         ));
-        for (i, (x, word)) in xs.iter().zip(line_words).enumerate() {
+        for (i, ((x, word), word_family)) in xs
+            .iter()
+            .zip(line_words)
+            .zip(&line_measured.families)
+            .enumerate()
+        {
             let text = layout::escape_xml(&word.display);
+            let family_attr = if *word_family == family {
+                String::new()
+            } else {
+                format!(" font-family=\"{word_family}\"")
+            };
             if !is_tag {
-                words_svg.push_str(&format!("<text x=\"{x}\" y=\"{baseline}\">{text}</text>"));
+                words_svg.push_str(&format!(
+                    "<text x=\"{x}\" y=\"{baseline}\"{family_attr}>{text}</text>"
+                ));
                 continue;
             }
             // Only the accent line pops, anchored on the word's own start.
@@ -409,7 +404,7 @@ pub fn render<'a>(
             words_svg.push_str(&format!(
                 "<g opacity=\"{opacity}\" transform=\"translate({cx},{cy}) scale({scale}) \
                  translate(0,{ty}) translate({nx},{ny})\"{filter_attr}>\
-                 <text x=\"{x}\" y=\"{baseline}\" filter=\"url(#sol-glow)\">{text}</text></g>"
+                 <text x=\"{x}\" y=\"{baseline}\"{family_attr} filter=\"url(#sol-glow)\">{text}</text></g>"
             ));
         }
         words_svg.push_str("</g>");
@@ -468,7 +463,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(name.as_deref(), Some(FONTDB_FAMILY));
+        assert_eq!(name.as_deref(), Some("Montserrat Thin"));
         assert_eq!(montserrat.weight().to_number(), FONT_WEIGHT);
 
         // The accent face stands in for Kalam: handwriting, weight 700.

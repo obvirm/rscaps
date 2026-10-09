@@ -9,9 +9,9 @@
 //! of 48 chars (min 12), up to two rows of 0.78W, block bottom-anchored
 //! at 0.78H.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, state};
+use super::{effects, layout, pipeline, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from kel's style.scss + template.json) ────────────────
@@ -66,19 +66,13 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw word width: advance + one letter-spacing per UTF-16 unit (kel has
-/// no letter-spacing, so `ls_px` is always 0).
-fn measure_word(face: &dyn fframes::FontFace, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let upem = font_metrics().2 as usize;
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem, text);
-            units as f32 * fs / upem as f32
-        }
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 // ── narration state (`.word-not-narrated-yet` / `-being-` / `-already-`) ──
@@ -162,25 +156,23 @@ pub fn render<'a>(
     let pad_y = PAD_Y_EM * fs;
     let box_h = line_h + 2.0 * pad_y;
     let gap = LINE_SPACING_EM * fs;
-    let (asc_ratio, desc_ratio, _) = font_metrics();
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
-    let probe = FontQuery {
-        family: FONT,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONT, probe.weight, probe.style, probe.stretch));
-    let mut widths = Vec::with_capacity(segment.words.len());
-    for word in &segment.words {
-        let width_px = match &face {
-            Some(face) => measure_word(face.as_ref(), fs, 0.0, &word.display),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        };
-        widths.push(width_px);
-    }
+    // kel has no letter-spacing, so `ls_px` stays 0.
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        JETBRAINS_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        0.0,
+        false,
+    );
+    let widths = measured.widths;
 
     // Split on the *plate* widths: a line's budget counts the padding the
     // plates add on top of the glyphs.
@@ -214,7 +206,7 @@ pub fn render<'a>(
         let count = end - start;
         let line_w: f32 = box_widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
-        let xs = layout::word_x_positions(&box_widths[start..end], margin, line_left, line_w, false);
+        let xs = layout::word_x_positions(&box_widths[start..end], margin, line_left, line_w, rtl);
         for (j, x) in xs.iter().enumerate() {
             let (tl, tr, br, bl) = rounded_corners(j, count);
             let d = plate_path(*x, box_top, box_widths[start + j], box_h, tl, tr, br, bl);
@@ -224,10 +216,19 @@ pub fn render<'a>(
                 bg_at(now_ms, word.start_ms, word.end_ms)
             ));
         }
-        for (x, word) in xs.iter().zip(&segment.words[start..end]) {
+        for ((x, word), family) in xs
+            .iter()
+            .zip(&segment.words[start..end])
+            .zip(&measured.families[start..end])
+        {
             let text = layout::escape_xml(&word.display);
+            let family_attr = if *family == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
             words_svg.push_str(&format!(
-                "<text x=\"{}\" y=\"{baseline}\" fill=\"{}\">{text}</text>",
+                "<text x=\"{}\" y=\"{baseline}\" fill=\"{}\"{family_attr}>{text}</text>",
                 x + pad_x,
                 fill_at(now_ms, word.start_ms, word.end_ms)
             ));

@@ -7,9 +7,9 @@
 //! starts. Clause segments of 25 chars (no minimum), up to two rows of
 //! 0.56W, block top-anchored at 0.75H.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{layout, pipeline, recipes, state};
+use super::{layout, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from juno's style.scss + template.json) ───────────────
@@ -64,18 +64,12 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw word width. Bungee ships one upright face only (the template's
-/// `font-style: italic` is a synthetic browser oblique, which does not
-/// change advances), so the measurement stays upright; juno has no
-/// letter-spacing, so `ls_px` is always 0.
-fn measure_word(face: &dyn fframes::FontFace, fs: f32, text: &str) -> f32 {
-    let upem = font_metrics().2 as usize;
-    match face.font_variant(upem) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem, text);
-            units as f32 * fs / upem as f32
-        }
-        None => text.encode_utf16().count() as f32 * fs * 0.5,
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
     }
 }
 
@@ -103,28 +97,24 @@ pub fn render<'a>(
     let video_w = ctx.current_video_size.width;
     let video_h = ctx.current_video_size.height;
     let fs = FONT_SIZE_CQH * video_h as f32;
+    let ls_px = 0.0; // juno has no letter-spacing
     let margin = WORD_SPACING_EM * fs;
     let line_h = LINE_HEIGHT * fs;
-    let (asc_ratio, desc_ratio, _) = font_metrics();
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) = line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
-    let probe = FontQuery {
-        family: FONT,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONT, probe.weight, probe.style, probe.stretch));
-    let mut widths = Vec::with_capacity(segment.words.len());
-    for word in &segment.words {
-        let upper = uppercase(&word.display);
-        let width_px = match &face {
-            Some(face) => measure_word(face.as_ref(), fs, &upper),
-            None => upper.encode_utf16().count() as f32 * fs * 0.5,
-        };
-        widths.push(width_px);
-    }
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        BUNGEE_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        ls_px,
+        true,
+    );
+    let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
         min_lines: MIN_LINES,
@@ -180,18 +170,27 @@ pub fn render<'a>(
         let baseline = line_top + half_leading + ascent;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
-        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, false);
-        for (x, word) in xs.iter().zip(&segment.words[start..end]) {
+        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
+        for ((x, word), family) in xs
+            .iter()
+            .zip(&segment.words[start..end])
+            .zip(&measured.families[start..end])
+        {
             let fill = if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
                 HIGHLIGHT
             } else {
                 PRIMARY
             };
             let text = layout::escape_xml(&uppercase(&word.display));
+            let family_attr = if *family == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\" stroke=\"{SHADOW_COLOR}\" \
                  stroke-width=\"{stroke_px}\" paint-order=\"stroke\" \
-                 filter=\"url(#juno-shadow)\">{text}</text>"
+                 filter=\"url(#juno-shadow)\"{family_attr}>{text}</text>"
             ));
         }
     }

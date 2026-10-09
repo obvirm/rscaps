@@ -21,7 +21,7 @@
 
 use fframes::{FFramesContext, FontQuery, Svgr};
 
-use super::{effects, layout, pipeline};
+use super::{effects, layout, pipeline, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from pico's style.scss + template.json) ───────────────
@@ -117,6 +117,15 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
+}
+
 /// Same triple for the embedded Inter — the title bar only; it sets no
 /// line-height of its own, so it inherits the segment's `1.4` ratio.
 fn inter_metrics() -> (f32, f32, f32) {
@@ -134,8 +143,15 @@ fn inter_metrics() -> (f32, f32, f32) {
 
 /// Raw word width: advance + one letter-spacing per UTF-16 unit (the
 /// `DomProbeCanvasTextMeasurer` replica; margins live in the placement).
-fn measure_word(face: &dyn fframes::FontFace, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let upem = font_metrics().2 as usize;
+/// `upem` is the face's own units-per-em — the typewriter measures each
+/// letter against the face of the word's script.
+fn measure_word(
+    face: &dyn fframes::FontFace,
+    upem: usize,
+    fs: f32,
+    ls_px: f32,
+    text: &str,
+) -> f32 {
     let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
     let advance = match face.font_variant(upem) {
         Some(variant) => {
@@ -145,6 +161,43 @@ fn measure_word(face: &dyn fframes::FontFace, fs: f32, ls_px: f32, text: &str) -
         None => fallback,
     };
     advance + text.encode_utf16().count() as f32 * ls_px
+}
+
+/// The segment's three faces resolved once for the typewriter, paired
+/// with the upem each letter advances at — the per-letter mirror of
+/// [`stack::measure_words`], which serves the whole-word boxes.
+fn stack_faces<'a>(
+    s: &stack::Stack,
+    latin_ttf: &'static [u8],
+    latin_weight: u16,
+    source: Option<&'a dyn fframes::FontSource<'a>>,
+) -> ([Option<Box<dyn fframes::FontFace<'a> + 'a>>; 3], [usize; 3]) {
+    let upems = [
+        fframes::ttf_parser::Face::parse(latin_ttf, 0)
+            .expect("template font parses")
+            .units_per_em() as usize,
+        stack::script_metrics(s.arabic).unwrap().2 as usize,
+        stack::script_metrics(s.hebrew).unwrap().2 as usize,
+    ];
+    let families = [s.latin, s.arabic, s.hebrew];
+    let mut faces: [Option<Box<dyn fframes::FontFace<'a> + 'a>>; 3] = [None, None, None];
+    if let Some(source) = source {
+        for (i, family) in families.into_iter().enumerate() {
+            let weight = if i == 0 {
+                latin_weight
+            } else {
+                stack::native_weight(family)
+            };
+            let probe = FontQuery {
+                family,
+                size: 1,
+                weight,
+                ..Default::default()
+            };
+            faces[i] = source.resolve_font(family, probe.weight, probe.style, probe.stretch);
+        }
+    }
+    (faces, upems)
 }
 
 // ── typewriter (tscaps `_lib/animation/typewriter`) ───────────────────────
@@ -247,25 +300,26 @@ pub fn render<'a>(
     let ls_px = LETTER_SPACING_EM * fs;
     let margin = WORD_SPACING_EM * fs;
     let line_h = LINE_HEIGHT * fs;
-    let (asc_ratio, desc_ratio, _) = font_metrics();
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
-    let probe = FontQuery {
-        family: FONT,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONT, probe.weight, probe.style, probe.stretch));
-    let mut widths = Vec::with_capacity(segment.words.len());
-    for word in &segment.words {
-        let width_px = match &face {
-            Some(face) => measure_word(face.as_ref(), fs, ls_px, &word.display),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        };
-        widths.push(width_px);
-    }
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        JETBRAINS_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        ls_px,
+        false,
+    );
+    let widths = measured.widths;
+
+    // The typewriter walks letter by letter, so it needs the same faces
+    // (and upems) `measure_words` measured the word boxes with.
+    let (faces, upems) = stack_faces(&script_stack, JETBRAINS_TTF, FONT_WEIGHT, ctx.font_source);
 
     let splitter = layout::BalancedPixelWidth {
         min_lines: MIN_LINES,
@@ -382,20 +436,39 @@ pub fn render<'a>(
         let line_top = content_top + line_idx as f32 * (line_h + LINE_SPACING_EM * fs);
         let baseline = line_top + half_leading + ascent;
         let line_w: f32 = split_widths[start..end].iter().sum();
-        let xs = layout::word_x_positions(&widths[start..end], margin, content_left, line_w, false);
-        for (x, word) in xs.iter().zip(&segment.words[start..end]) {
+        let xs = layout::word_x_positions(&widths[start..end], margin, content_left, line_w, rtl);
+        for ((x, word), family) in xs
+            .iter()
+            .zip(&segment.words[start..end])
+            .zip(&measured.families[start..end])
+        {
+            let slot = if *family == script_stack.latin {
+                0
+            } else if *family == script_stack.arabic {
+                1
+            } else {
+                2
+            };
+            let family_attr = if slot == 0 {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
+            let face = faces[slot].as_deref();
+            let upem = upems[slot];
             let mut cursor = *x;
             let count = word.display.chars().count();
             for (i, ch) in word.display.chars().enumerate() {
                 let ch_str = ch.to_string();
-                let ch_w = match &face {
-                    Some(face) => measure_word(face.as_ref(), fs, ls_px, &ch_str),
+                let ch_w = match face {
+                    Some(face) => measure_word(face, upem, fs, ls_px, &ch_str),
                     None => ch.len_utf16() as f32 * fs * 0.5 + ch.len_utf16() as f32 * ls_px,
                 };
                 if letter_visible(now_ms, word.start_ms, word.end_ms, i, count) {
                     let text = layout::escape_xml(&ch_str);
                     words_svg.push_str(&format!(
-                        "<text x=\"{cursor}\" y=\"{baseline}\" fill=\"{PRIMARY}\">{text}</text>"
+                        "<text x=\"{cursor}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr}>\
+                         {text}</text>"
                     ));
                 }
                 // `$show-caret: false` keeps this dark by default; the

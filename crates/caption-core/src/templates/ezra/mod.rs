@@ -34,9 +34,9 @@
 //!   `0 0 0.5em rgba(0,0,0,0.2125)`; `big-word-italic` off → upright;
 //!   `big-word-font-family` `playfair-display` → "Playfair Display".
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes};
+use super::{effects, layout, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from ezra's style.scss + template.json) ───────────────
@@ -135,19 +135,15 @@ fn playfair_cap_ratio() -> f32 {
     })
 }
 
-/// Raw word width: advance + one letter-spacing per UTF-16 unit (the
-/// `DomProbeCanvasTextMeasurer` replica; margins live in the placement).
-/// ezra sets no letter-spacing, so `ls_px` is always 0.
-fn measure_word(face: &dyn fframes::FontFace, upem: f32, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem as usize) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem as usize, text);
-            units as f32 * fs / upem
-        }
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment (small
+/// register: Inter; big word: Playfair — both go through the stack for
+/// script fallback).
+fn line_metrics(latin: &str, dominant: &str) -> (f32, f32, f32) {
+    if dominant == latin {
+        inter_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 // ── easing + entrance recipes ─────────────────────────────────────────────
@@ -282,51 +278,39 @@ pub fn render<'a>(
     let block_left = ANCHOR_X_FRAC * w;
     let block_top = ANCHOR_Y_FRAC * video_h as f32;
 
-    let inter_query = FontQuery {
-        family: FONT,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let big_query = FontQuery {
-        family: BIG_FONT,
-        size: 1,
-        weight: BIG_FONT_WEIGHT,
-        ..Default::default()
-    };
-    let inter_face = ctx
-        .font_source
-        .and_then(|s| s.resolve_font(FONT, inter_query.weight, inter_query.style, inter_query.stretch));
-    let big_face = ctx
-        .font_source
-        .and_then(|s| {
-            s.resolve_font(
-                BIG_FONT,
-                big_query.weight,
-                big_query.style,
-                big_query.stretch,
-            )
-        });
-
-    let (asc_ratio, desc_ratio, upem) = inter_metrics();
+    let inter_stack = stack::Stack::for_latin(FONT);
+    let big_stack = stack::Stack::for_latin(BIG_FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(FONT, stack::dominant_family(&segment.words, &inter_stack));
+    let rtl = segment.direction.is_rtl();
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
 
-    let measure_small = |text: &str| -> f32 {
-        match &inter_face {
-            Some(face) => measure_word(face.as_ref(), upem, fs, 0.0, text),
-            None => text.encode_utf16().count() as f32 * fs * 0.5,
-        }
-    };
-    let widths: Vec<f32> = segment.words.iter().map(|w| measure_small(&w.display)).collect();
+    let measured = stack::measure_words(
+        &segment.words,
+        &inter_stack,
+        INTER_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        0.0,
+        false,
+    );
+    let widths = measured.widths;
 
     // A small word: scale-in about its own bottom-left corner. The box
     // left is the text's x (the margin sits outside the inline-block)
     // and the box bottom is baseline + descent + half-leading (the box
     // is one 1.1em line).
     let scale_in = scale_in();
-    let small_word = |body: &mut String, x: f32, baseline: f32, text: &str, start_ms: f32| {
+
+    let mut body = String::new();
+    let mut right_extent = block_left;
+    let bottom;
+
+    // small_word with optional family override for non-Latin words.
+    let small_word_with_family = |body: &mut String, x: f32, baseline: f32, text: &str, start_ms: f32, family: &str| {
         let (opacity, scale) = scale_in.eval((now_ms - start_ms) / 1000.0);
         let text = layout::escape_xml(text);
         let transform = if (scale - 1.0).abs() > 1e-4 {
@@ -345,15 +329,16 @@ pub fn render<'a>(
         } else {
             String::new()
         };
+        let family_attr = if family == FONT {
+            String::new()
+        } else {
+            format!(" font-family=\"{family}\"")
+        };
         body.push_str(&format!(
-            "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\" \
+            "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
              filter=\"url(#ezra-shadow)\"{transform}{opacity}>{text}</text>"
         ));
     };
-
-    let mut body = String::new();
-    let mut right_extent = block_left;
-    let bottom;
 
     let isolated = isolated_word_index(&segment.words, segment.end_ms);
     match isolated {
@@ -367,11 +352,11 @@ pub fn render<'a>(
             for (start, end) in wrap_rows(&widths, margin, max_row_w) {
                 let run: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
                 right_extent = right_extent.max(block_left + run);
-                let xs = layout::word_x_positions(&widths[start..end], margin, block_left, run, false);
+                let xs = layout::word_x_positions(&widths[start..end], margin, block_left, run, rtl);
                 let baseline = y + half_leading + ascent;
-                for (x, wi) in xs.iter().zip(start..end) {
+                for ((x, wi), family) in xs.iter().zip(start..end).zip(&measured.families[start..end]) {
                     let word = &segment.words[wi];
-                    small_word(&mut body, *x, baseline, &word.display, word.start_ms);
+                    small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family);
                 }
                 y += line_h;
             }
@@ -388,11 +373,11 @@ pub fn render<'a>(
             for (start, end) in wrap_rows(&widths[..iso], margin, max_row_w) {
                 let run: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
                 right_extent = right_extent.max(block_left + run);
-                let xs = layout::word_x_positions(&widths[start..end], margin, block_left, run, false);
+                let xs = layout::word_x_positions(&widths[start..end], margin, block_left, run, rtl);
                 let baseline = y + half_leading + ascent;
-                for (x, wi) in xs.iter().zip(start..end) {
+                for ((x, wi), family) in xs.iter().zip(start..end).zip(&measured.families[start..end]) {
                     let word = &segment.words[wi];
-                    small_word(&mut body, *x, baseline, &word.display, word.start_ms);
+                    small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family);
                 }
                 y += line_h;
             }
@@ -405,10 +390,18 @@ pub fn render<'a>(
             // ── line 2: the big word alone, Playfair, trimmed to its
             //    cap height, sliding in from off-frame left ──
             let big_word = &segment.words[iso];
-            let big_adv = match big_face.as_ref() {
-                Some(face) => measure_word(face.as_ref(), playfair_upem(), fs, 0.0, &big_word.display),
-                None => big_word.display.encode_utf16().count() as f32 * fs * 0.5,
-            };
+            let big_measured = stack::measure_words(
+                std::slice::from_ref(big_word),
+                &big_stack,
+                PLAYFAIR_TTF,
+                BIG_FONT_WEIGHT,
+                ctx.font_source,
+                fs,
+                0.0,
+                false,
+            );
+            let big_adv = big_measured.widths[0];
+            let big_family = big_measured.families[0];
             // The line's width includes the word's own margins, as the
             // DOM measurer's `getBoundingClientRect` would.
             let big_em = (big_adv + 2.0 * margin) / fs;
@@ -433,7 +426,7 @@ pub fn render<'a>(
             };
             body.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline_big}\" fill=\"{PRIMARY}\" \
-                 font-family=\"{BIG_FONT}\" font-weight=\"{BIG_FONT_WEIGHT}\" \
+                 font-family=\"{big_family}\" font-weight=\"{BIG_FONT_WEIGHT}\" \
                  font-size=\"{f_big}\" filter=\"url(#ezra-shadow)\"{transform}{opacity}>\
                  {text}</text>"
             ));
@@ -455,11 +448,11 @@ pub fn render<'a>(
                     let run: f32 = widths[abs_start..abs_end].iter().map(|w| w + 2.0 * margin).sum();
                     right_extent = right_extent.max(left3 + run);
                     let xs =
-                        layout::word_x_positions(&widths[abs_start..abs_end], margin, left3, run, false);
+                        layout::word_x_positions(&widths[abs_start..abs_end], margin, left3, run, rtl);
                     let baseline = y + half_leading + ascent;
-                    for (x, wi) in xs.iter().zip(abs_start..abs_end) {
+                    for ((x, wi), family) in xs.iter().zip(abs_start..abs_end).zip(&measured.families[abs_start..abs_end]) {
                         let word = &segment.words[wi];
-                        small_word(&mut body, *x, baseline, &word.display, word.start_ms);
+                        small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family);
                     }
                     y += line_h;
                 }

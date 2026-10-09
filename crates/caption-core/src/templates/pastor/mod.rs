@@ -34,16 +34,15 @@
 //! so the studio's @font-face ("Manrope") matches in the browser. The
 //! behind register measures against Anton's own face.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, state};
+use super::{effects, layout, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from pastor's style.scss + template.json) ─────────────
 /// `false` renders the quiet register; `true` the behind-actor one.
 const BEHIND_ACTOR: bool = false;
 const FONT: &str = "Manrope"; // fontStack manrope (browser @font-face)
-const FONTDB_FAMILY: &str = "Manrope ExtraLight"; // TTF name-table family (measure)
 const FONT_WEIGHT: u16 = 500; // typography.fontWeight: 500
 const FONT_SIZE_CQH: f32 = 0.036; // font-size: 3.6cqh
 const LETTER_SPACING_EM: f32 = 0.0; // typography.letterSpacing: 0
@@ -65,7 +64,6 @@ const SHADOW_DY_EM: f32 = 0.06;
 const SHADOW_BLUR_EM: f32 = 0.35;
 // ── behind register ──────────────────────────────────────────────────────
 const BEHIND_FONT: &str = "Anton"; // behind-font-family control default: "anton"
-const BEHIND_FONTDB_FAMILY: &str = "Anton"; // TTF name-table family (measure)
 const BEHIND_FONT_WEIGHT: u16 = 400; // Anton ships one static face
 const BEHIND_LINE_HEIGHT: f32 = 0.95; // line-height: 0.95
 const BEHIND_Y_FRAC: f32 = 0.08; // --tscaps-behind-y control default
@@ -130,21 +128,15 @@ fn behind_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw word width: advance + one letter-spacing per UTF-16 unit (the
-/// `DomProbeCanvasTextMeasurer` replica; margins live in the placement).
-fn measure_word(
-    face: &dyn fframes::FontFace,
-    upem: usize,
-    fs: f32,
-    ls_px: f32,
-    text: &str,
-) -> f32 {
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => layout::measure_units(face, variant, upem, text) as f32 * fs / upem as f32,
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment (quiet
+/// register: Manrope; behind: Anton — both go through the stack for
+/// script fallback).
+fn line_metrics(latin: &str, dominant: &str) -> (f32, f32, f32) {
+    if dominant == latin {
+        quiet_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 /// `clamp(4cqh, behind-fill × 100cqw / line-width-em, 30cqh)` — the line
@@ -189,16 +181,18 @@ pub fn render<'a>(
     let video_h = ctx.current_video_size.height;
 
     // The register picks the face, the case, the metrics and the anchor.
-    let (svg_font, db_family, font_weight) = if BEHIND_ACTOR {
-        (BEHIND_FONT, BEHIND_FONTDB_FAMILY, BEHIND_FONT_WEIGHT)
+    let (svg_font, font_weight) = if BEHIND_ACTOR {
+        (BEHIND_FONT, BEHIND_FONT_WEIGHT)
     } else {
-        (FONT, FONTDB_FAMILY, FONT_WEIGHT)
+        (FONT, FONT_WEIGHT)
     };
-    let (asc_ratio, desc_ratio, upem) = if BEHIND_ACTOR {
+    let script_stack = stack::Stack::for_latin(svg_font);
+    let (asc_ratio, desc_ratio, _) = if BEHIND_ACTOR {
         behind_metrics()
     } else {
-        quiet_metrics()
+        line_metrics(svg_font, stack::dominant_family(&segment.words, &script_stack))
     };
+    let rtl = segment.direction.is_rtl();
     // `text-transform: uppercase` is part of the behind register, and the
     // width the clamp solves against is measured after it.
     let display: Vec<String> = segment
@@ -213,26 +207,24 @@ pub fn render<'a>(
         })
         .collect();
 
-    let probe = FontQuery {
-        family: db_family,
-        size: 1,
-        weight: font_weight,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(db_family, probe.weight, probe.style, probe.stretch));
-
     // Measure at one em so the behind clamp can divide a target width by
     // the line's cost at that em; the quiet register scales the same
     // numbers by its fixed size.
-    let unit_widths: Vec<f32> = display
-        .iter()
-        .map(|text| match &face {
-            Some(face) => measure_word(face.as_ref(), upem as usize, 1.0, LETTER_SPACING_EM, text),
-            None => text.encode_utf16().count() as f32 * 0.5,
-        })
-        .collect();
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        if BEHIND_ACTOR {
+            ANTON_400_TTF
+        } else {
+            MANROPE_500_TTF
+        },
+        font_weight,
+        ctx.font_source,
+        1.0,
+        LETTER_SPACING_EM,
+        BEHIND_ACTOR,
+    );
+    let unit_widths: Vec<f32> = measured.widths;
 
     let fs = if BEHIND_ACTOR {
         let line_w_em: f32 = unit_widths
@@ -297,7 +289,7 @@ pub fn render<'a>(
         let baseline = line_top + half_leading + ascent;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
-        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, false);
+        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
 
         // Behind: the line rises in as its own narration starts (the
         // delay `--on-line-being-narrated-starts` resolves to); quiet
@@ -318,10 +310,19 @@ pub fn render<'a>(
         words_svg.push_str(&format!(
             "<g opacity=\"{opacity}\" transform=\"translate(0,{dy})\">"
         ));
-        for (x, text) in xs.iter().zip(&display[start..end]) {
+        for ((x, text), family) in xs
+            .iter()
+            .zip(&display[start..end])
+            .zip(&measured.families[start..end])
+        {
             let text = layout::escape_xml(text);
+            let family_attr = if *family == svg_font {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#pastor-word)\">{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#pastor-word)\"{family_attr}>{text}</text>"
             ));
         }
         words_svg.push_str("</g>");
@@ -374,7 +375,8 @@ mod tests {
     #[test]
     fn embedded_manrope_has_expected_identity() {
         let face = fframes::ttf_parser::Face::parse(MANROPE_500_TTF, 0).unwrap();
-        assert_eq!(family_of(MANROPE_500_TTF).as_deref(), Some(FONTDB_FAMILY));
+        // fontdb name ID 16 packaging quirk (the SVG emits "Manrope").
+        assert_eq!(family_of(MANROPE_500_TTF).as_deref(), Some("Manrope ExtraLight"));
         assert_eq!(face.weight().to_number(), FONT_WEIGHT);
         let (asc, desc, upem) = quiet_metrics();
         assert!(asc > 0.5 && asc < 1.5, "ascent {asc}");
@@ -385,7 +387,7 @@ mod tests {
     #[test]
     fn embedded_anton_is_the_behind_register_face() {
         let face = fframes::ttf_parser::Face::parse(ANTON_400_TTF, 0).unwrap();
-        assert_eq!(family_of(ANTON_400_TTF).as_deref(), Some(BEHIND_FONTDB_FAMILY));
+        assert_eq!(family_of(ANTON_400_TTF).as_deref(), Some("Anton"));
         // Single static face — what the weight-400 request resolves to.
         assert_eq!(face.weight().to_number(), 400);
         let (asc, desc, upem) = behind_metrics();

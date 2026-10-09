@@ -262,6 +262,7 @@ pub fn measure_words<'a>(
     font_source: Option<&'a dyn fframes::FontSource<'a>>,
     fs: f32,
     ls_px: f32,
+    uppercase: bool,
 ) -> Measured {
     let latin_upem = fframes::ttf_parser::Face::parse(latin_ttf, 0)
         .expect("template font parses")
@@ -300,12 +301,17 @@ pub fn measure_words<'a>(
             2
         };
         let upem = upems[slot] as usize;
-        let utf16 = word.display.encode_utf16().count() as f32;
+        let display: String = if uppercase {
+            word.display.to_uppercase()
+        } else {
+            word.display.clone()
+        };
+        let utf16 = display.encode_utf16().count() as f32;
         let fallback = utf16 * fs * 0.5;
         let advance = match faces[slot].as_deref() {
             Some(face) => match face.font_variant(upem) {
                 Some(variant) => {
-                    let units = layout::measure_units(face, variant, upem, &word.display);
+                    let units = layout::measure_units(face, variant, upem, &display);
                     units as f32 * fs / upem as f32
                 }
                 None => fallback,
@@ -449,6 +455,7 @@ mod tests {
             None,
             40.0,
             0.0,
+            false,
         );
         assert_eq!(
             m.families,

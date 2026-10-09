@@ -7,9 +7,9 @@
 //! soft drop shadow, primary and highlight both `#ffffff` in the default
 //! style.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, state};
+use super::{effects, layout, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (cqh/em values from elio's style.scss) ────────────────
@@ -43,7 +43,7 @@ const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
 };
 
 // ── fonts ─────────────────────────────────────────────────────────────────
-// Single-family stack (`fontStack: "bebas-neue"`) — no script fallback.
+// Latin face `fontStack: "bebas-neue"` plus the shared script stack.
 
 const BEBAS_TTF: &[u8] = include_bytes!("../../../assets/bebas-neue-latin-400-normal.ttf");
 
@@ -64,27 +64,13 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Word width exactly as tscaps' `DomProbeCanvasTextMeasurer.measure`:
-/// glyph advance (measured on the uppercased run — `text-transform`) +
-/// one letter-spacing after every UTF-16 code unit (last included) +
-/// padding (none). Margins are added by [`layout::word_x_positions`] /
-/// the line total — never baked into the width itself.
-fn measure_word(
-    face: &dyn fframes::FontFace,
-    fs: f32,
-    ls_px: f32,
-    display_text: &str,
-) -> f32 {
-    let upem = font_metrics().2 as usize;
-    let fallback = display_text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem, display_text);
-            units as f32 * fs / upem as f32
-        }
-        None => fallback,
-    };
-    advance + display_text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 // ── render ────────────────────────────────────────────────────────────────
@@ -108,31 +94,22 @@ pub fn render<'a>(
     let ls_px = LETTER_SPACING_EM * fs;
     let margin = WORD_SPACING_EM * fs; // one side of `.word` margin
     let line_h = LINE_HEIGHT * fs;
-    let (asc_ratio, desc_ratio, _) = font_metrics();
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
-    // Measure every word on the uppercased display run.
-    let probe = FontQuery {
-        family: FONT,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx.font_source.and_then(|source| {
-        source.resolve_font(FONT, probe.weight, probe.style, probe.stretch)
-    });
-    let display_texts: Vec<String> = segment
-        .words
-        .iter()
-        .map(|w| w.display.to_uppercase())
-        .collect();
-    let mut widths = Vec::with_capacity(segment.words.len());
-    for text in &display_texts {
-        let width_px = match &face {
-            Some(face) => measure_word(face.as_ref(), fs, ls_px, text),
-            None => text.encode_utf16().count() as f32 * fs * 0.5,
-        };
-        widths.push(width_px);
-    }
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        BEBAS_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        ls_px,
+        true,
+    );
+    let widths = measured.widths;
 
     // Line breaking: balanced-pixel-width with maxWidth = ratio × video.
     // The splitter measures lines with their word margins; positions and
@@ -171,12 +148,11 @@ pub fn render<'a>(
         let baseline = line_top + half_leading + ascent;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
-        // elio's scripts are all LTR (Bebas Neue has no RTL coverage).
-        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, false);
-        for ((x, word), text) in xs
+        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
+        for ((x, word), family) in xs
             .iter()
             .zip(&segment.words[start..end])
-            .zip(&display_texts[start..end])
+            .zip(&measured.families[start..end])
         {
             let (opacity, dy_em) = rise.eval((now_ms - word.start_ms) / 1000.0);
             let y = baseline + dy_em * fs;
@@ -185,9 +161,14 @@ pub fn render<'a>(
             } else {
                 PRIMARY
             };
-            let text = layout::escape_xml(text);
+            let family_attr = if *family == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
+            let text = layout::escape_xml(&word.display.to_uppercase());
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{y}\" fill=\"{fill}\" opacity=\"{opacity}\">{text}</text>"
+                "<text x=\"{x}\" y=\"{y}\" fill=\"{fill}\"{family_attr} opacity=\"{opacity}\">{text}</text>"
             ));
         }
     }

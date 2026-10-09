@@ -27,14 +27,13 @@
 //! - The `@container style(--tscaps-text-direction: rtl)` rules — only
 //!   `ada` implements bidirectional layout in this crate.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{layout, pipeline, recipes};
+use super::{layout, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from luna's style.scss + template.json) ───────────────
 const FONT: &str = "Poppins"; // fontStack poppins (scss: 'Poppins')
-const FONTDB_FAMILY: &str = "Poppins Black"; // TTF name-table family (measure)
 const FONT_WEIGHT: u16 = 900; // typography.fontWeight: 900
 const FONT_SIZE_CQH: f32 = 0.05; // font-size: 5.0cqh
 const LETTER_SPACING_EM: f32 = 0.0; // typography.letterSpacing: 0
@@ -90,15 +89,13 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw width of `text` in `face` at `fs`: advance + one letter-spacing per
-/// UTF-16 unit (the `DomProbeCanvasTextMeasurer` replica).
-fn measure(face: &dyn fframes::FontFace, upem: usize, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => layout::measure_units(face, variant, upem, text) as f32 * fs / upem as f32,
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 /// `text-transform: uppercase` — the uppercased form is what gets measured
@@ -157,36 +154,28 @@ pub fn render<'a>(
     let pad_x = PAD_X_EM * fs;
     let pad_y = PAD_Y_EM * fs;
     let line_spacing = LINE_SPACING_EM * fs;
-    let (asc_ratio, desc_ratio, upem) = font_metrics();
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
-    let probe = FontQuery {
-        family: FONTDB_FAMILY,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONTDB_FAMILY, probe.weight, probe.style, probe.stretch));
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        POPPINS_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        LETTER_SPACING_EM * fs,
+        true,
+    );
+    let widths = measured.widths;
 
     // Uppercased once, then measured and emitted in that same form.
     let texts: Vec<String> = segment
         .words
         .iter()
         .map(|word| uppercase(&word.display))
-        .collect();
-    let widths: Vec<f32> = texts
-        .iter()
-        .map(|text| match &face {
-            Some(face) => measure(
-                face.as_ref(),
-                upem as usize,
-                fs,
-                LETTER_SPACING_EM * fs,
-                text,
-            ),
-            None => text.encode_utf16().count() as f32 * fs * 0.5,
-        })
         .collect();
 
     // balanced-pixel-width: each width carries both of its word's margins,
@@ -233,7 +222,7 @@ pub fn render<'a>(
         let line_top = box_top + pad_y + i as f32 * (line_h + line_spacing);
         let baseline = line_top + half_leading + ascent;
         let line_w = widths[start..end].iter().sum::<f32>() + 2.0 * margin * (end - start) as f32;
-        let xs = layout::word_x_positions(&widths[start..end], margin, content_left, line_w, false);
+        let xs = layout::word_x_positions(&widths[start..end], margin, content_left, line_w, rtl);
 
         // One delay for the whole line: every word shares its narration start.
         let progress = pulse_progress(now_ms, segment.words[start].start_ms);
@@ -250,10 +239,19 @@ pub fn render<'a>(
                  width=\"{line_w}\" height=\"0\"/></clipPath>"
             ));
         }
-        for (offset, &x) in xs.iter().enumerate() {
+        for ((offset, &x), family) in xs
+            .iter()
+            .enumerate()
+            .zip(&measured.families[start..end])
+        {
             let text = layout::escape_xml(&texts[start + offset]);
+            let family_attr = if *family == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\">{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr}>{text}</text>"
             ));
         }
         if hidden {
@@ -304,7 +302,7 @@ mod tests {
     #[test]
     fn embedded_poppins_has_expected_identity() {
         let face = fframes::ttf_parser::Face::parse(POPPINS_TTF, 0).unwrap();
-        assert_eq!(family_name(&face).as_deref(), Some(FONTDB_FAMILY));
+        assert_eq!(family_name(&face).as_deref(), Some("Poppins Black"));
         assert_eq!(face.weight().to_number(), FONT_WEIGHT);
 
         let (asc, desc, upem) = font_metrics();

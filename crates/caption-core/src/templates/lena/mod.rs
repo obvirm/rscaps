@@ -9,9 +9,9 @@
 //! Sentence segments of 60 chars (min 30), three rows max of 0.5W, block
 //! bottom-left anchored at 0.85H / 0.06W.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, state};
+use super::{effects, layout, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from lena's style.scss + template.json) ───────────────
@@ -85,19 +85,13 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw word width: advance + one letter-spacing per UTF-16 unit (lena has
-/// no letter-spacing).
-fn measure_word(face: &dyn fframes::FontFace, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let upem = font_metrics().2 as usize;
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem, text);
-            units as f32 * fs / upem as f32
-        }
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 /// `rise-in` with lena's own overshooting curve (the mixin's default
@@ -173,25 +167,22 @@ pub fn render<'a>(
     let pad_y = PAD_Y_EM * fs;
     let box_h = line_h + 2.0 * pad_y;
     let gap = LINE_SPACING_EM * fs;
-    let (asc_ratio, desc_ratio, _) = font_metrics();
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
-    let probe = FontQuery {
-        family: FONT,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONT, probe.weight, probe.style, probe.stretch));
-    let mut widths = Vec::with_capacity(segment.words.len());
-    for word in &segment.words {
-        let width_px = match &face {
-            Some(face) => measure_word(face.as_ref(), fs, ls_px, &word.display),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        };
-        widths.push(width_px);
-    }
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        INTER_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        ls_px,
+        false,
+    );
+    let widths = measured.widths;
 
     let run_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let splitter = layout::BalancedPixelWidth {
@@ -228,7 +219,7 @@ pub fn render<'a>(
         let baseline = line_top + half_leading + ascent;
         let run: f32 = run_widths[start..end].iter().sum();
         let content_left = block_left + pad_x;
-        let xs = layout::word_x_positions(&widths[start..end], margin, content_left, run, false);
+        let xs = layout::word_x_positions(&widths[start..end], margin, content_left, run, rtl);
 
         // `rise-in` fires when the line's own narration starts.
         let span = state::LineSpan::of_words(&segment.words[start..end]);
@@ -258,10 +249,19 @@ pub fn render<'a>(
                 tail_points(block_left, box_bottom, fs)
             ));
         }
-        for (x, word) in xs.iter().zip(&segment.words[start..end]) {
+        for ((x, word), family) in xs
+            .iter()
+            .zip(&segment.words[start..end])
+            .zip(&measured.families[start..end])
+        {
             let text = layout::escape_xml(&word.display);
+            let family_attr = if *family == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
             lines_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\">{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr}>{text}</text>"
             ));
         }
         lines_svg.push_str("</g>");

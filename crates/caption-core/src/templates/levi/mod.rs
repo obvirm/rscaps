@@ -7,9 +7,9 @@
 //! keyed off when the line starts being narrated. `gap_free` keeps the
 //! block on screen between nearby segments.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, state};
+use super::{effects, layout, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from levi's style.scss + template.json) ───────────────
@@ -65,16 +65,12 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw word width (levi has no letter-spacing; uppercase measured as
-/// displayed).
-fn measure_word(face: &dyn fframes::FontFace, fs: f32, text: &str) -> f32 {
-    let upem = font_metrics().2 as usize;
-    match face.font_variant(upem) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem, text);
-            units as f32 * fs / upem as f32
-        }
-        None => text.encode_utf16().count() as f32 * fs * 0.5,
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
     }
 }
 
@@ -120,30 +116,26 @@ pub fn render<'a>(
     let margin = WORD_SPACING_EM * fs;
     let line_h = LINE_HEIGHT * fs;
     let line_gap = LINE_SPACING_EM * fs;
-    let (asc_ratio, desc_ratio, _) = font_metrics();
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) = line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
-    let probe = FontQuery {
-        family: FONT,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONT, probe.weight, probe.style, probe.stretch));
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        ANTON_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        0.0,
+        true,
+    );
+    let widths = measured.widths;
     let display_texts: Vec<String> = segment
         .words
         .iter()
         .map(|w| w.display.to_uppercase())
         .collect();
-    let mut widths = Vec::with_capacity(segment.words.len());
-    for text in &display_texts {
-        let width_px = match &face {
-            Some(face) => measure_word(face.as_ref(), fs, text),
-            None => text.encode_utf16().count() as f32 * fs * 0.5,
-        };
-        widths.push(width_px);
-    }
 
     let splitter = layout::BalancedPixelWidth {
         min_lines: MIN_LINES,
@@ -176,7 +168,7 @@ pub fn render<'a>(
         let line_top = block_top + line_idx as f32 * (line_h + line_gap);
         let baseline = line_top + half_leading + ascent;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
-        let xs = layout::word_x_positions(&widths[start..end], margin, block_left, line_w, false);
+        let xs = layout::word_x_positions(&widths[start..end], margin, block_left, line_w, rtl);
 
         // The line rises in when its own narration starts (first word).
         let line_span = state::LineSpan::of_words(&segment.words[start..end]);
@@ -197,10 +189,19 @@ pub fn render<'a>(
         lines_svg.push_str(&format!(
             "<g opacity=\"{line_opacity}\" filter=\"url(#levi-shadow)\">"
         ));
-        for (x, text) in xs.iter().zip(&display_texts[start..end]) {
+        for ((x, text), family) in xs
+            .iter()
+            .zip(&display_texts[start..end])
+            .zip(&measured.families[start..end])
+        {
             let text = layout::escape_xml(text);
+            let family_attr = if *family == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
             lines_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"url(#{grad_id})\">{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"url(#{grad_id})\"{family_attr}>{text}</text>"
             ));
         }
         lines_svg.push_str("</g>");

@@ -16,14 +16,13 @@
 //! the SVG emits `FONT` so the studio's @font-face ("Montserrat")
 //! matches in the browser.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{layout, pipeline, recipes, state};
+use super::{layout, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from rhea's style.scss + template.json) ───────────────
 const FONT: &str = "Montserrat"; // fontStack montserrat (browser @font-face)
-const FONTDB_FAMILY: &str = "Montserrat Thin"; // TTF name-table family (measure)
 const FONT_WEIGHT: u16 = 700; // fontWeight: 700 — the spoken line
 const RESTING_WEIGHT: u16 = 300; // --tscaps-resting-line-weight default
 const FONT_SIZE_CQH: f32 = 0.036; // font-size: 3.6cqh
@@ -56,6 +55,7 @@ const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
 // ── fonts ─────────────────────────────────────────────────────────────────
 
 const MONTSERRAT_700_TTF: &[u8] = include_bytes!("../../../assets/montserrat-latin-700-normal.ttf");
+const MONTSERRAT_300_TTF: &[u8] = include_bytes!("../../../assets/montserrat-latin-300-normal.ttf");
 
 /// `(ascent, descent, unitsPerEm)` as em ratios + upem, from the
 /// embedded Montserrat 700 (the line-splitting weight).
@@ -72,19 +72,13 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw word width: advance + one letter-spacing per UTF-16 unit (the
-/// `DomProbeCanvasTextMeasurer` replica; margins live in the placement).
-fn measure_word(face: &dyn fframes::FontFace, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let upem = font_metrics().2 as usize;
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem, text);
-            units as f32 * fs / upem as f32
-        }
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 /// The spoken line carries the segment's 700; every other line rests
@@ -136,56 +130,36 @@ pub fn render<'a>(
     let ls_px = LETTER_SPACING_EM * fs;
     let margin = WORD_SPACING_EM * fs;
     let line_h = LINE_HEIGHT * fs;
-    let (asc_ratio, desc_ratio, _) = font_metrics();
-
-    let probe_heavy = FontQuery {
-        family: FONTDB_FAMILY,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face_heavy = ctx.font_source.and_then(|source| {
-        source.resolve_font(
-            FONTDB_FAMILY,
-            probe_heavy.weight,
-            probe_heavy.style,
-            probe_heavy.stretch,
-        )
-    });
-    let probe_light = FontQuery {
-        family: FONTDB_FAMILY,
-        size: 1,
-        weight: RESTING_WEIGHT,
-        ..Default::default()
-    };
-    let face_light = ctx.font_source.and_then(|source| {
-        source.resolve_font(
-            FONTDB_FAMILY,
-            probe_light.weight,
-            probe_light.style,
-            probe_light.stretch,
-        )
-    });
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
     // The line splitter measures every line at the width it can reach —
     // the segment's heaviest weight (the spec comment's contract).
-    let widths_heavy: Vec<f32> = segment
-        .words
-        .iter()
-        .map(|word| match &face_heavy {
-            Some(face) => measure_word(face.as_ref(), fs, ls_px, &word.display),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        })
-        .collect();
+    let measured_heavy = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        MONTSERRAT_700_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        ls_px,
+        false,
+    );
+    let widths_heavy: Vec<f32> = measured_heavy.widths;
     // The light widths are what the resting lines actually paint.
-    let widths_light: Vec<f32> = segment
-        .words
-        .iter()
-        .map(|word| match &face_light {
-            Some(face) => measure_word(face.as_ref(), fs, ls_px, &word.display),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        })
-        .collect();
+    let measured_light = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        MONTSERRAT_300_TTF,
+        RESTING_WEIGHT,
+        ctx.font_source,
+        fs,
+        ls_px,
+        false,
+    );
+    let widths_light: Vec<f32> = measured_light.widths;
 
     let splitter = layout::BalancedPixelWidth {
         min_lines: MIN_LINES,
@@ -234,11 +208,21 @@ pub fn render<'a>(
         };
         let run: f32 = ws.iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - run / 2.0;
-        let xs = layout::word_x_positions(ws, margin, line_left, run, false);
-        for (x, word) in xs.iter().zip(words) {
+        let xs = layout::word_x_positions(ws, margin, line_left, run, rtl);
+        let families: &[&str] = if weight == FONT_WEIGHT {
+            &measured_heavy.families[start..end]
+        } else {
+            &measured_light.families[start..end]
+        };
+        for ((x, word), family) in xs.iter().zip(words).zip(families) {
             let text = layout::escape_xml(&word.display);
+            let family_attr = if *family == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
             body.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" font-weight=\"{weight}\">{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" font-weight=\"{weight}\"{family_attr}>{text}</text>"
             ));
         }
     }
@@ -289,7 +273,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(name.as_deref(), Some(FONTDB_FAMILY));
+        assert_eq!(name.as_deref(), Some("Montserrat Thin"));
         let (asc, desc, upem) = font_metrics();
         assert!(asc > 0.5 && asc < 1.5, "ascent {asc}");
         assert!(desc > 0.01 && desc < 1.0, "descent {desc}");

@@ -7,9 +7,9 @@
 //! so the baseline stays crisp. Clause-boundary segments with `gap_free`
 //! and `smart_punctuation`, block bottom-anchored at 0.72H.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes};
+use super::{effects, layout, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from enzo's style.scss + template.json) ───────────────
@@ -64,19 +64,13 @@ fn font_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw word width: advance + one letter-spacing per UTF-16 unit (the
-/// `DomProbeCanvasTextMeasurer` replica; margins live in the placement).
-fn measure_word(face: &dyn fframes::FontFace, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let upem = font_metrics().2 as usize;
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => {
-            let units = layout::measure_units(face, variant, upem, text);
-            units as f32 * fs / upem as f32
-        }
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment.
+fn line_metrics(dominant: &str) -> (f32, f32, f32) {
+    if dominant == FONT {
+        font_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 // ── render ────────────────────────────────────────────────────────────────
@@ -100,25 +94,22 @@ pub fn render<'a>(
     let ls_px = LETTER_SPACING_EM * fs;
     let margin = WORD_SPACING_EM * fs;
     let line_h = LINE_HEIGHT * fs;
-    let (asc_ratio, desc_ratio, _) = font_metrics();
+    let script_stack = stack::Stack::for_latin(FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(stack::dominant_family(&segment.words, &script_stack));
+    let rtl = segment.direction.is_rtl();
 
-    let probe = FontQuery {
-        family: FONT,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONT, probe.weight, probe.style, probe.stretch));
-    let mut widths = Vec::with_capacity(segment.words.len());
-    for word in &segment.words {
-        let width_px = match &face {
-            Some(face) => measure_word(face.as_ref(), fs, ls_px, &word.display),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        };
-        widths.push(width_px);
-    }
+    let measured = stack::measure_words(
+        &segment.words,
+        &script_stack,
+        INTER_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        ls_px,
+        false,
+    );
+    let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
         min_lines: MIN_LINES,
@@ -156,12 +147,21 @@ pub fn render<'a>(
         let baseline = line_top + half_leading + ascent;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
-        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, false);
-        for (x, word) in xs.iter().zip(&segment.words[start..end]) {
+        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
+        for ((x, word), family) in xs
+            .iter()
+            .zip(&segment.words[start..end])
+            .zip(&measured.families[start..end])
+        {
             let opacity = fade.eval((now_ms - word.start_ms) / 1000.0);
+            let family_attr = if *family == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{family}\"")
+            };
             let text = layout::escape_xml(&word.display);
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\" \
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
                  stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\" opacity=\"{opacity}\">{text}</text>"
             ));

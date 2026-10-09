@@ -18,8 +18,6 @@ use crate::CaptionDocument;
 
 // ── spec constants (cqh/em values from ada's style.scss) ──────────────────
 const FONT_POPPINS: &str = "Poppins";
-const FONT_CAIRO: &str = "Cairo";
-const FONT_ASSISTANT: &str = "Assistant";
 const FONT_WEIGHT: u16 = 700;
 const FONT_SIZE_CQH: f32 = 0.028; // font-size: 2.8cqh
 const LINE_HEIGHT: f32 = 1.16;
@@ -116,6 +114,7 @@ pub fn render<'a>(
         ctx.font_source,
         fs,
         0.0, // ada has no letter-spacing
+        false,
     );
     let widths = measured.widths;
 

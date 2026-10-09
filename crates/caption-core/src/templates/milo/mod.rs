@@ -29,20 +29,18 @@
 //! - The `@container style(--tscaps-text-direction: rtl)` rules — only
 //!   `ada` implements bidirectional layout in this crate.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes};
+use super::{effects, layout, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from milo's style.scss + template.json) ───────────────
 const FONT: &str = "Lobster"; // fontStack lobster (scss: 'Lobster')
-const FONTDB_FAMILY: &str = "Lobster"; // TTF name-table family (measure)
 // typography.fontWeight: 600, but the only Lobster in assets is 400
 // (`lobster-latin-400-normal.ttf`) — the query, the SVG and the embedded
 // face all speak 400 so the weight matches the glyphs actually measured.
 const FONT_WEIGHT: u16 = 400;
 const ANTON_FONT: &str = "Anton"; // --tscaps-big-word-font-family default
-const ANTON_FONTDB_FAMILY: &str = "Anton"; // TTF name-table family (measure)
 const ANTON_FONT_WEIGHT: u16 = 400; // font-weight: 400 on the anchor
 const FONT_SIZE_CQH: f32 = 0.035; // font-size: 3.5cqh
 const LETTER_SPACING_EM: f32 = 0.0; // typography.letterSpacing: 0
@@ -132,15 +130,17 @@ fn anton_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw width of `text` in `face` at `fs`: advance + one letter-spacing per
-/// UTF-16 unit (the `DomProbeCanvasTextMeasurer` replica).
-fn measure(face: &dyn fframes::FontFace, upem: usize, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => layout::measure_units(face, variant, upem, text) as f32 * fs / upem as f32,
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment (main
+/// register: Lobster; anchor: Anton — both go through the stack for
+/// script fallback).
+fn line_metrics(latin: &str, dominant: &str) -> (f32, f32, f32) {
+    if dominant == latin {
+        font_metrics()
+    } else if dominant == ANTON_FONT {
+        anton_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 /// `text-transform: uppercase` — the anchor measures and paints in this
@@ -260,49 +260,27 @@ pub fn render<'a>(
     let line_h = LINE_HEIGHT * fs;
     let pad_x = PAD_X_EM * fs;
     let pad_y = PAD_Y_EM * fs;
-    let (asc_ratio, desc_ratio, upem) = font_metrics();
-    let (anton_asc, anton_desc, anton_upem) = anton_metrics();
 
-    let probe = FontQuery {
-        family: FONTDB_FAMILY,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONTDB_FAMILY, probe.weight, probe.style, probe.stretch));
-    let anton_probe = FontQuery {
-        family: ANTON_FONTDB_FAMILY,
-        size: 1,
-        weight: ANTON_FONT_WEIGHT,
-        ..Default::default()
-    };
-    let anton_face = ctx.font_source.and_then(|source| {
-        source.resolve_font(
-            ANTON_FONTDB_FAMILY,
-            anton_probe.weight,
-            anton_probe.style,
-            anton_probe.stretch,
-        )
-    });
+    let main_stack = stack::Stack::for_latin(FONT);
+    let anton_stack = stack::Stack::for_latin(ANTON_FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(FONT, stack::dominant_family(&segment.words, &main_stack));
+    // Media exception: word_x positions are cumulative from the padded
+    // left edge; RTL v1 deviation — the flex-row placement stays LTR.
 
     // Measured once at the segment size: what the plain flex row paints
     // and what the balanced splitter sees.
-    let widths: Vec<f32> = segment
-        .words
-        .iter()
-        .map(|word| match &face {
-            Some(face) => measure(
-                face.as_ref(),
-                upem as usize,
-                fs,
-                LETTER_SPACING_EM * fs,
-                &word.display,
-            ),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        })
-        .collect();
+    let measured = stack::measure_words(
+        &segment.words,
+        &main_stack,
+        LOBSTER_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        LETTER_SPACING_EM * fs,
+        false,
+    );
+    let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
         min_lines: MIN_LINES,
@@ -363,32 +341,32 @@ pub fn render<'a>(
             // column-gap: 0 }` — the width is the largest item's own
             // nowrap width, the small words share row 1 out to both
             // edges, the anchor owns row 2 (`order: 1`, `flex-basis: 100%`).
-            let anchor_text = uppercase(&segment.words[end - 1].display);
+            let anchor_word = &segment.words[end - 1];
             let big_fs = big_font_size(fs, last_word_chars);
             let big_ls = BIG_LETTER_SPACING_EM * big_fs;
-            let big_w = match &anton_face {
-                Some(face) => measure(
-                    face.as_ref(),
-                    anton_upem as usize,
-                    big_fs,
-                    big_ls,
-                    &anchor_text,
-                ),
-                None => anchor_text.encode_utf16().count() as f32 * big_fs * 0.5,
-            };
-            let mut small_widths = Vec::with_capacity(end - start - 1);
-            for word in &segment.words[start..end - 1] {
-                small_widths.push(match &face {
-                    Some(face) => measure(
-                        face.as_ref(),
-                        upem as usize,
-                        plain_fs,
-                        LETTER_SPACING_EM * plain_fs,
-                        &word.display,
-                    ),
-                    None => word.display.encode_utf16().count() as f32 * plain_fs * 0.5,
-                });
-            }
+            let anton_measured = stack::measure_words(
+                std::slice::from_ref(anchor_word),
+                &anton_stack,
+                ANTON_TTF,
+                ANTON_FONT_WEIGHT,
+                ctx.font_source,
+                big_fs,
+                big_ls,
+                true,
+            );
+            let big_w = anton_measured.widths[0];
+            let (anton_asc, anton_desc, _) = anton_metrics();
+            let small_measured = stack::measure_words(
+                &segment.words[start..end - 1],
+                &main_stack,
+                LOBSTER_TTF,
+                FONT_WEIGHT,
+                ctx.font_source,
+                plain_fs,
+                LETTER_SPACING_EM * plain_fs,
+                false,
+            );
+            let small_widths = &small_measured.widths;
             let widest_small = small_widths.iter().cloned().fold(0.0, f32::max);
             let width = big_w.max(widest_small);
 
@@ -496,8 +474,13 @@ pub fn render<'a>(
                  transform=\"translate({tx} {ty})\">{text}</text>"
             ));
         } else {
+            let family_attr = if measured.families[i] == FONT {
+                String::new()
+            } else {
+                format!(" font-family=\"{}\"", measured.families[i])
+            };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{y}\" fill=\"{PRIMARY}\" font-size=\"{wfs}\" \
+                "<text x=\"{x}\" y=\"{y}\" fill=\"{PRIMARY}\"{family_attr} font-size=\"{wfs}\" \
                  filter=\"url(#milo-shadow)\" opacity=\"{opacity}\" \
                  transform=\"translate({tx} {ty})\">{text}</text>"
             ));
@@ -548,11 +531,11 @@ mod tests {
     #[test]
     fn embedded_fonts_have_expected_identity() {
         let lobster = fframes::ttf_parser::Face::parse(LOBSTER_TTF, 0).unwrap();
-        assert_eq!(family_name(&lobster).as_deref(), Some(FONTDB_FAMILY));
+        assert_eq!(family_name(&lobster).as_deref(), Some(FONT));
         assert_eq!(lobster.weight().to_number(), FONT_WEIGHT);
 
         let anton = fframes::ttf_parser::Face::parse(ANTON_TTF, 0).unwrap();
-        assert_eq!(family_name(&anton).as_deref(), Some(ANTON_FONTDB_FAMILY));
+        assert_eq!(family_name(&anton).as_deref(), Some(ANTON_FONT));
         assert_eq!(anton.weight().to_number(), ANTON_FONT_WEIGHT);
 
         for (asc, desc, upem) in [font_metrics(), anton_metrics()] {

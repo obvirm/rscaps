@@ -16,17 +16,15 @@
 //! - The `@container style(--tscaps-text-direction: rtl)` rules — only
 //!   `ada` implements bidirectional layout in this crate.
 
-use fframes::{FFramesContext, FontQuery, Svgr};
+use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes};
+use super::{effects, layout, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from luca's style.scss + template.json) ───────────────
 const FONT: &str = "Caveat"; // fontStack caveat (scss: 'Caveat Variable')
-const FONTDB_FAMILY: &str = "Caveat"; // TTF name-table family (measure)
 const FONT_WEIGHT: u16 = 600; // typography.fontWeight: 600
 const ANTON_FONT: &str = "Anton"; // --tscaps-big-word-font-family default
-const ANTON_FONTDB_FAMILY: &str = "Anton"; // TTF name-table family (measure)
 const ANTON_FONT_WEIGHT: u16 = 400; // font-weight: 400 on the anchor word
 const FONT_SIZE_CQH: f32 = 0.04; // font-size: 4cqh
 const LETTER_SPACING_EM: f32 = 0.0; // typography.letterSpacing: 0
@@ -109,15 +107,17 @@ fn anton_metrics() -> (f32, f32, f32) {
     })
 }
 
-/// Raw width of `text` in `face` at `fs`: advance + one letter-spacing per
-/// UTF-16 unit (the `DomProbeCanvasTextMeasurer` replica).
-fn measure(face: &dyn fframes::FontFace, upem: usize, fs: f32, ls_px: f32, text: &str) -> f32 {
-    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
-    let advance = match face.font_variant(upem) {
-        Some(variant) => layout::measure_units(face, variant, upem, text) as f32 * fs / upem as f32,
-        None => fallback,
-    };
-    advance + text.encode_utf16().count() as f32 * ls_px
+/// Baseline metrics for whichever family dominates the segment (main
+/// register: Caveat; anchor: Anton — both go through the stack for
+/// script fallback).
+fn line_metrics(latin: &str, dominant: &str) -> (f32, f32, f32) {
+    if dominant == latin {
+        font_metrics()
+    } else if dominant == ANTON_FONT {
+        anton_metrics()
+    } else {
+        stack::script_metrics(dominant).expect("script face")
+    }
 }
 
 /// `text-transform: uppercase` — the uppercased form is what gets measured
@@ -210,48 +210,26 @@ pub fn render<'a>(
     let pad_x = PAD_X_EM * fs;
     let pad_y = PAD_Y_EM * fs;
     let line_spacing = LINE_SPACING_EM * fs;
-    let (asc_ratio, desc_ratio, upem) = font_metrics();
-    let (anton_asc, anton_desc, anton_upem) = anton_metrics();
 
-    let probe = FontQuery {
-        family: FONTDB_FAMILY,
-        size: 1,
-        weight: FONT_WEIGHT,
-        ..Default::default()
-    };
-    let face = ctx
-        .font_source
-        .and_then(|source| source.resolve_font(FONTDB_FAMILY, probe.weight, probe.style, probe.stretch));
-    let anton_probe = FontQuery {
-        family: ANTON_FONTDB_FAMILY,
-        size: 1,
-        weight: ANTON_FONT_WEIGHT,
-        ..Default::default()
-    };
-    let anton_face = ctx.font_source.and_then(|source| {
-        source.resolve_font(
-            ANTON_FONTDB_FAMILY,
-            anton_probe.weight,
-            anton_probe.style,
-            anton_probe.stretch,
-        )
-    });
+    let main_stack = stack::Stack::for_latin(FONT);
+    let anton_stack = stack::Stack::for_latin(ANTON_FONT);
+    let (asc_ratio, desc_ratio, _) =
+        line_metrics(FONT, stack::dominant_family(&segment.words, &main_stack));
+    // Media exception: word_x positions are cumulative from the padded
+    // left edge; RTL v1 deviation — the flex-row placement stays LTR.
 
     // Every word measured once in Caveat at the segment size.
-    let widths: Vec<f32> = segment
-        .words
-        .iter()
-        .map(|word| match &face {
-            Some(face) => measure(
-                face.as_ref(),
-                upem as usize,
-                fs,
-                LETTER_SPACING_EM * fs,
-                &word.display,
-            ),
-            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
-        })
-        .collect();
+    let measured = stack::measure_words(
+        &segment.words,
+        &main_stack,
+        CAVEAT_TTF,
+        FONT_WEIGHT,
+        ctx.font_source,
+        fs,
+        LETTER_SPACING_EM * fs,
+        false,
+    );
+    let widths = measured.widths;
 
     let lines = fixed_tail_lines(segment.words.len());
     let anchor = is_anchor_line(&lines);
@@ -265,10 +243,17 @@ pub fn render<'a>(
         // length, so count the pre-transform text.
         let fs_big = anchor_font_size(fs, word.display.chars().count());
         let ls_px = ANCHOR_LETTER_SPACING_EM * fs_big;
-        let width = match &anton_face {
-            Some(face) => measure(face.as_ref(), anton_upem as usize, fs_big, ls_px, &text),
-            None => text.encode_utf16().count() as f32 * fs_big * 0.5,
-        };
+        let anton_measured = stack::measure_words(
+            std::slice::from_ref(word),
+            &anton_stack,
+            ANTON_TTF,
+            ANTON_FONT_WEIGHT,
+            ctx.font_source,
+            fs_big,
+            ls_px,
+            true,
+        );
+        let width = anton_measured.widths[0];
         Some((text, fs_big, ls_px, width))
     } else {
         None
@@ -308,6 +293,7 @@ pub fn render<'a>(
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
+    let (anton_asc, anton_desc, _) = anton_metrics();
 
     // Entrance: `--on-segment-starts`, 0.25s (0.4s at a breathing point).
     let elapsed_s = (now_ms - segment.start_ms) / 1000.0;
@@ -355,10 +341,19 @@ pub fn render<'a>(
             ));
             let baseline = line_top + half_leading + ascent;
             let mut x = content_left;
-            for (word, &width) in segment.words[start..end].iter().zip(&widths[start..end]) {
+            for ((word, &width), family) in segment.words[start..end]
+                .iter()
+                .zip(&widths[start..end])
+                .zip(&measured.families[start..end])
+            {
                 let text = layout::escape_xml(&word.display);
+                let family_attr = if *family == FONT {
+                    String::new()
+                } else {
+                    format!(" font-family=\"{family}\"")
+                };
                 words_svg.push_str(&format!(
-                    "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\" \
+                    "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
                      filter=\"url(#luca-shadow)\">{text}</text>"
                 ));
                 x += width + gap;
@@ -386,14 +381,22 @@ pub fn render<'a>(
                      opacity=\"{opacity}\">{escaped}</text>"
                 ));
                 let col2_x = content_left + big_w + gap;
-                for (offset, word_index) in (start + 1..end).enumerate() {
+                for ((offset, word_index), family) in (start + 1..end)
+                    .enumerate()
+                    .zip(&measured.families[start + 1..end])
+                {
                     let row_top = line_top + offset as f32 * row;
                     let small_top = row_top + (row - line_h) / 2.0;
                     let baseline = small_top + half_leading + ascent;
                     let (opacity, dx_em) = word_slide.eval(elapsed_s);
                     let text = layout::escape_xml(&segment.words[word_index].display);
+                    let family_attr = if *family == FONT {
+                        String::new()
+                    } else {
+                        format!(" font-family=\"{family}\"")
+                    };
                     words_svg.push_str(&format!(
-                        "<text x=\"{col2_x}\" y=\"{baseline}\" fill=\"{PRIMARY}\" \
+                        "<text x=\"{col2_x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
                          opacity=\"{opacity}\" transform=\"translate({})\" \
                          filter=\"url(#luca-shadow)\">{text}</text>",
                         dx_em * fs
@@ -403,11 +406,20 @@ pub fn render<'a>(
             None => {
                 let baseline = line_top + half_leading + ascent;
                 let mut x = content_left;
-                for (word, &width) in segment.words[start..end].iter().zip(&widths[start..end]) {
+                for ((word, &width), family) in segment.words[start..end]
+                    .iter()
+                    .zip(&widths[start..end])
+                    .zip(&measured.families[start..end])
+                {
                     let (opacity, dx_em) = word_slide.eval(elapsed_s);
                     let text = layout::escape_xml(&word.display);
+                    let family_attr = if *family == FONT {
+                        String::new()
+                    } else {
+                        format!(" font-family=\"{family}\"")
+                    };
                     words_svg.push_str(&format!(
-                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\" \
+                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
                          opacity=\"{opacity}\" transform=\"translate({})\" \
                          filter=\"url(#luca-shadow)\">{text}</text>",
                         dx_em * fs
@@ -462,11 +474,11 @@ mod tests {
     #[test]
     fn embedded_fonts_have_expected_identity() {
         let caveat = fframes::ttf_parser::Face::parse(CAVEAT_TTF, 0).unwrap();
-        assert_eq!(family_name(&caveat).as_deref(), Some(FONTDB_FAMILY));
+        assert_eq!(family_name(&caveat).as_deref(), Some(FONT));
         assert_eq!(caveat.weight().to_number(), FONT_WEIGHT);
 
         let anton = fframes::ttf_parser::Face::parse(ANTON_TTF, 0).unwrap();
-        assert_eq!(family_name(&anton).as_deref(), Some(ANTON_FONTDB_FAMILY));
+        assert_eq!(family_name(&anton).as_deref(), Some(ANTON_FONT));
         assert_eq!(anton.weight().to_number(), ANTON_FONT_WEIGHT);
 
         for (asc, desc, upem) in [font_metrics(), anton_metrics()] {

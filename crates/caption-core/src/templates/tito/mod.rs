@@ -108,6 +108,7 @@ pub fn render<'a>(
         ctx.font_source,
         fs,
         ls_px,
+        false,
     );
     let widths = measured.widths;
 
