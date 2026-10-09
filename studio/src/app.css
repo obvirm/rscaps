@@ -1,0 +1,114 @@
+/* ── Design tokens: "precision instrument" ─────────────────────────────── */
+:root,
+[data-theme="dark"] {
+  --bg-0: 12 12 14;
+  --bg-1: 20 20 22;
+  --bg-2: 28 28 31;
+  --bg-3: 38 38 42;
+
+  --fg-0: 232 232 234;
+  --fg-1: 160 160 168;
+  --fg-2: 108 108 116;
+  --fg-on-accent: 255 255 255;
+
+  --border: 42 42 46;
+  --border-strong: 64 64 70;
+
+  --accent: 232 93 60;
+  --accent-hi: 240 110 77;
+  --success: 90 143 123;
+  --warning: 212 168 67;
+  --error: 212 83 67;
+
+  --scene-1: 212 120 70;
+  --scene-2: 190 140 70;
+  --scene-3: 170 110 90;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --tick: 18 18 20;
+}
+
+[data-theme="light"] {
+  --bg-0: 245 245 243;
+  --bg-1: 255 255 255;
+  --bg-2: 240 240 238;
+  --bg-3: 228 228 226;
+
+  --fg-0: 26 26 28;
+  --fg-1: 90 90 96;
+  --fg-2: 138 138 144;
+  --fg-on-accent: 255 255 255;
+
+  --border: 224 224 222;
+  --border-strong: 200 200 198;
+
+  --accent: 201 74 44;
+  --accent-hi: 180 64 38;
+  --success: 70 120 100;
+  --warning: 160 120 40;
+  --error: 180 60 50;
+
+  --scene-1: 190 110 70;
+  --scene-2: 170 130 70;
+  --scene-3: 150 100 85;
+
+  --shadow-sm: 0 1px 2px rgba(60, 50, 40, 0.08);
+  --shadow-md: 0 8px 24px rgba(60, 50, 40, 0.12);
+  --tick: 235 235 232;
+}
+
+:root {
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --motion: 150ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --font-ui: "Space Grotesk", system-ui, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html,
+body {
+  height: 100%;
+}
+body {
+  font-family: var(--font-ui);
+  letter-spacing: -0.01em;
+  background: rgb(var(--bg-0));
+  color: rgb(var(--fg-0));
+  overflow: hidden;
+  transition: background-color var(--motion) var(--ease);
+  -webkit-font-smoothing: antialiased;
+}
+::selection {
+  background: rgb(var(--accent) / 0.28);
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+  background: none;
+  border: none;
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+:focus-visible {
+  outline: none;
+}
+svg {
+  display: block;
+}

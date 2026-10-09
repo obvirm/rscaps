@@ -3,5 +3,6 @@ verifyDepsBeforeRun: false
 allowBuilds:
   '@parcel/watcher': false
   bsdoc: false
+  esbuild: true
   gentype: false
   protobufjs: false
