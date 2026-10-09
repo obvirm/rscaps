@@ -2,6 +2,7 @@
   "name": "rscaps",
   "private": true,
   "type": "module",
+  "license": "SEE LICENSE IN README.md",
   "scripts": {
     "studio": "node studio/server.mjs",
     "build:wasm": "node scripts/build-wasm.mjs"
