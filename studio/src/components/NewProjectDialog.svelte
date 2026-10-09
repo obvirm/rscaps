@@ -2,7 +2,13 @@
   import { store } from "../lib/state.svelte";
   import { router } from "../lib/router.svelte";
   import { TEMPLATES } from "../lib/templates";
-  import { formatTimeShort, type Direction } from "../lib/types";
+  import {
+    WHISPER_MODELS,
+    formatTimeShort,
+    type Direction,
+    type WhisperBackend,
+    type WhisperModel,
+  } from "../lib/types";
   import type { VideoProbe } from "../lib/video";
 
   let {
@@ -15,30 +21,62 @@
   let name = $state(initialName);
   let template = $state("luna");
   let direction = $state<Direction>("auto");
+  let backend = $state<WhisperBackend>("cpu");
+  let model = $state<WhisperModel>("base");
   let advancedOpen = $state(false);
   let creating = $state(false);
   let nameInput: HTMLInputElement;
+  let subtitleInput: HTMLInputElement;
 
   $effect(() => {
     nameInput?.focus();
     nameInput?.select();
   });
 
-  async function onCreate() {
+  async function createProject(): Promise<string> {
+    return store.createProject({
+      name: name.trim() || "Untitled",
+      template,
+      direction,
+      backend,
+      model,
+      video,
+      videoName: video.name,
+      durationSec: probe.durationSec,
+      fps: probe.fps,
+      width: probe.width,
+      height: probe.height,
+    });
+  }
+
+  async function onStart() {
     if (creating) return;
     creating = true;
     try {
-      const id = await store.createProject({
-        name: name.trim() || "Untitled",
-        template,
-        direction,
-        video,
-        videoName: video.name,
-        durationSec: probe.durationSec,
-        fps: probe.fps,
-        width: probe.width,
-        height: probe.height,
-      });
+      const id = await createProject();
+      onclose();
+      router.openProject(id);
+    } catch (err) {
+      store.setStatus(String(err), true);
+    } finally {
+      creating = false;
+    }
+  }
+
+  function onUseSubtitleFile() {
+    subtitleInput?.click();
+  }
+
+  async function onSubtitleChosen(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file || creating) return;
+    creating = true;
+    try {
+      const id = await createProject();
+      await store.importSubtitleFile(file);
+      await store.saveCurrent();
       onclose();
       router.openProject(id);
     } catch (err) {
@@ -99,6 +137,29 @@
     {#if advancedOpen}
       <div class="advanced">
         <div class="field">
+          <label class="label" for="np-backend">Backend</label>
+          <select id="np-backend" class="select" bind:value={backend}>
+            <option value="cpu">CPU</option>
+            <option value="webgpu">WebGPU</option>
+          </select>
+          <p class="hint">
+            {backend === "cpu"
+              ? "Default — works on every device."
+              : "Faster on supported GPUs. Falls back to CPU when unavailable."}
+          </p>
+        </div>
+
+        <div class="field">
+          <label class="label" for="np-model">Model</label>
+          <select id="np-model" class="select" bind:value={model}>
+            {#each WHISPER_MODELS as m (m.id)}
+              <option value={m.id}>{m.label}</option>
+            {/each}
+          </select>
+          <p class="hint">Larger models give better accuracy but take longer to download and run.</p>
+        </div>
+
+        <div class="field">
           <label class="label" for="np-direction">Direction</label>
           <select id="np-direction" class="select" bind:value={direction}>
             <option value="auto">Auto</option>
@@ -111,13 +172,26 @@
     {/if}
 
     <div class="actions">
-      <button class="btn secondary" type="button" onclick={onclose}>Cancel</button>
-      <button class="btn primary" type="button" onclick={onCreate} disabled={creating}>
-        {creating ? "Creating…" : "Create"}
+      <button class="link" type="button" onclick={onUseSubtitleFile} disabled={creating}>
+        Use subtitle file instead
       </button>
+      <div class="actions-right">
+        <button class="btn secondary" type="button" onclick={onclose}>Cancel</button>
+        <button class="btn primary" type="button" onclick={onStart} disabled={creating}>
+          {creating ? "Starting…" : "Start"}
+        </button>
+      </div>
     </div>
   </div>
 </div>
+
+<input
+  class="visually-hidden"
+  type="file"
+  accept=".srt,.vtt,application/x-subrip,text/vtt"
+  bind:this={subtitleInput}
+  onchange={onSubtitleChosen}
+/>
 
 <style>
   .backdrop {
@@ -238,9 +312,39 @@
   }
   .actions {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    justify-content: space-between;
     gap: 8px;
     padding-top: 6px;
+  }
+  .actions-right {
+    display: flex;
+    gap: 8px;
+  }
+  .link {
+    font-size: 12.5px;
+    color: rgb(var(--fg-1));
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    padding: 4px 0;
+    transition: color var(--motion) var(--ease);
+  }
+  .link:hover:not(:disabled) {
+    color: rgb(var(--fg-0));
+  }
+  .link:disabled {
+    opacity: 0.5;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   .btn {
     padding: 8px 14px;

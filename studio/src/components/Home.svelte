@@ -13,10 +13,25 @@
   let pendingProbe = $state<VideoProbe | null>(null);
   let probing = $state(false);
   let probeError = $state<string | null>(null);
+  let openMenuId = $state<string | null>(null);
 
   onMount(() => {
     store.refreshProjects();
   });
+
+  function closeMenu() {
+    openMenuId = null;
+  }
+
+  function toggleMenu(e: MouseEvent, id: string) {
+    e.stopPropagation();
+    openMenuId = openMenuId === id ? null : id;
+  }
+
+  function onExport(id: string, name: string) {
+    closeMenu();
+    store.setStatus(`Export “${name}” — burn-in video not yet available (Phase E)`, false);
+  }
 
   function pickVideo() {
     fileInput?.click();
@@ -57,6 +72,7 @@
 
   async function onDelete(e: MouseEvent, id: string, name: string) {
     e.stopPropagation();
+    closeMenu();
     if (!confirm(`Delete “${name}”? This cannot be undone.`)) return;
     await store.deleteProjectById(id);
   }
@@ -65,6 +81,8 @@
     router.openProject(id);
   }
 </script>
+
+<svelte:window onclick={closeMenu} />
 
 <div class="home">
   <header class="chrome">
@@ -131,9 +149,31 @@
                 <div class="card-name" title={p.name}>{p.name}</div>
                 <div class="card-meta">
                   <span class="card-date">{relativeDate(p.updatedAt)}</span>
-                  <button class="delete" title="Delete" aria-label="Delete project" onclick={(e) => onDelete(e, p.id, p.name)}>
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7" /></svg>
-                  </button>
+                  <div class="menu-anchor">
+                    <button
+                      class="dots"
+                      title="Project menu"
+                      aria-label="Project menu"
+                      aria-haspopup="menu"
+                      aria-expanded={openMenuId === p.id}
+                      onclick={(e) => toggleMenu(e, p.id)}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><circle cx="7" cy="3" r="1.3" /><circle cx="7" cy="7" r="1.3" /><circle cx="7" cy="11" r="1.3" /></svg>
+                    </button>
+                    {#if openMenuId === p.id}
+                      <!-- svelte-ignore a11y_no_static_element_interactions -->
+                      <div class="menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+                        <button class="menu-item" role="menuitem" onclick={() => onExport(p.id, p.name)}>
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 1.5v7M4 5.5 7 8.5l3-3" /><path d="M2 9.5v2a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-2" /></svg>
+                          <span>Export</span>
+                        </button>
+                        <button class="menu-item danger" role="menuitem" onclick={(e) => onDelete(e, p.id, p.name)}>
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 3.5h9M5.5 3.5V2.5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1M4 3.5l.5 7a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1l.5-7" /></svg>
+                          <span>Delete</span>
+                        </button>
+                      </div>
+                    {/if}
+                  </div>
                 </div>
               </div>
             </div>
@@ -395,22 +435,62 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .delete {
+  .menu-anchor {
+    position: relative;
+    display: inline-flex;
+  }
+  .dots {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     border-radius: 4px;
     color: rgb(var(--fg-2));
     opacity: 0;
     transition: opacity var(--motion) var(--ease), color var(--motion) var(--ease), background-color var(--motion) var(--ease);
   }
-  .card:hover .delete {
+  .card:hover .dots,
+  .dots[aria-expanded="true"] {
     opacity: 1;
   }
-  .delete:hover {
+  .dots:hover {
+    color: rgb(var(--fg-0));
+    background: rgb(var(--bg-2));
+  }
+  .menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 4px);
+    z-index: 20;
+    min-width: 148px;
+    padding: 4px;
+    background: rgb(var(--bg-1));
+    border: 1px solid rgb(var(--border-strong));
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-md);
+    display: flex;
+    flex-direction: column;
+  }
+  .menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 9px;
+    font-size: 12.5px;
+    color: rgb(var(--fg-0));
+    border-radius: var(--r-sm);
+    text-align: left;
+    transition: background-color var(--motion) var(--ease);
+  }
+  .menu-item:hover {
+    background: rgb(var(--bg-2));
+  }
+  .menu-item.danger {
     color: rgb(var(--error));
+  }
+  .menu-item.danger:hover {
     background: rgb(var(--error) / 0.12);
   }
   .empty {

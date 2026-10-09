@@ -8,6 +8,8 @@ import {
   type Direction,
   type ProjectMetadata,
   type RscapsProject,
+  type WhisperBackend,
+  type WhisperModel,
 } from "./types";
 import {
   deleteProject as dbDelete,
@@ -23,6 +25,8 @@ export interface NewProjectOptions {
   name: string;
   template: string;
   direction: Direction;
+  backend: WhisperBackend;
+  model: WhisperModel;
   video: Blob;
   videoName: string;
   durationSec: number;
@@ -65,6 +69,8 @@ class StudioState {
   videoHeight = $state(1080);
   videoUrl = $state<string | null>(null);
   videoName = $state<string | null>(null);
+  backend = $state<WhisperBackend>("cpu");
+  model = $state<WhisperModel>("base");
   status = $state("idle");
   statusIsError = $state(false);
   docText = $state("");
@@ -209,12 +215,20 @@ class StudioState {
       createdAt: now,
       updatedAt: now,
       doc: buildDoc(opts),
-      settings: { fps: opts.fps, width: opts.width, height: opts.height },
+      settings: {
+        fps: opts.fps,
+        width: opts.width,
+        height: opts.height,
+        backend: opts.backend,
+        model: opts.model,
+      },
       videoName: opts.videoName,
     };
     this.currentId = project.id;
     this.projectName = project.name;
     this.applyVideoMeta(opts.fps, opts.width, opts.height, opts.videoName);
+    this.backend = opts.backend;
+    this.model = opts.model;
     this.setVideoBlob(opts.video);
     if (this.videoEl) {
       this.videoEl.src = this.videoUrl!;
@@ -244,6 +258,8 @@ class StudioState {
       project.settings.height || 1080,
       project.videoName || null,
     );
+    this.backend = project.settings.backend || "cpu";
+    this.model = project.settings.model || "base";
     this.docText = JSON.stringify(project.doc, null, 2);
     this.frame = 0;
     this.stopPlay();
@@ -271,7 +287,13 @@ class StudioState {
       createdAt: existing?.createdAt || now,
       updatedAt: now,
       doc,
-      settings: { fps: this.fps, width: this.videoWidth, height: this.videoHeight },
+      settings: {
+        fps: this.fps,
+        width: this.videoWidth,
+        height: this.videoHeight,
+        backend: this.backend,
+        model: this.model,
+      },
       videoName: this.videoName ?? undefined,
       thumbnail: await this.makeThumbnail(),
     };

@@ -70,10 +70,23 @@ export const FPS = 30;
 
 // ── Project model ─────────────────────────────────────────────────────────
 
+export type WhisperBackend = "cpu" | "webgpu";
+export type WhisperModel = "tiny" | "base" | "small" | "medium" | "large";
+
+export const WHISPER_MODELS: { id: WhisperModel; label: string }[] = [
+  { id: "tiny", label: "Tiny — ~39 MB" },
+  { id: "base", label: "Base — ~75 MB" },
+  { id: "small", label: "Small — ~244 MB" },
+  { id: "medium", label: "Medium — ~769 MB" },
+  { id: "large", label: "Large — ~1.5 GB" },
+];
+
 export interface ProjectSettings {
   fps: number;
   width: number;
   height: number;
+  backend: WhisperBackend;
+  model: WhisperModel;
 }
 
 export interface RscapsProject {
