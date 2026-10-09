@@ -1,0 +1,17 @@
+[package]
+name = "caption-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+caption-core = { path = "../caption-core" }
+fframes-editor-controller = "1.2.0"
+wasm-bindgen = "0.2.100"
+console_error_panic_hook = "0.1"
+# ahash (via usvgr) pulls getrandom 0.3; wasm needs its wasm_js backend.
+# The feature must be unified here while .cargo/config.toml sets the cfg.
+getrandom = { version = "0.3", features = ["wasm_js"] }

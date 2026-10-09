@@ -1,0 +1,306 @@
+//! Native port of the tscaps `cleo` template.
+//!
+//! Visual spec source of truth: `E:\project\tscaps\templates\cleo\{style.scss,template.json}`.
+//! Lora Medium at 4.3cqh that *grows for short captions*
+//! (`dynamic-font-size` 0.06 under a 12-character threshold); the whole
+//! segment settles in (0.35s, from 80% opacity, 0.06em of travel) and a
+//! four-layer black shadow — one tight, three soft — sits behind the
+//! line. Clause-boundary segments with `gap_free`, `carry_quotes`,
+//! `smart_punctuation` and `smart_lowercase`; block bottom-anchored at
+//! 0.65H.
+
+use fframes::{FFramesContext, FontQuery, Svgr};
+
+use super::{effects, layout, pipeline, recipes};
+use crate::CaptionDocument;
+
+// ── spec constants (from cleo's style.scss + template.json) ───────────────
+const FONT: &str = "Lora"; // fontStack lora ('Lora Variable' in scss)
+const FONT_WEIGHT: u16 = 500; // fontWeight: 500
+const FONT_SIZE_CQH: f32 = 0.043; // font-size: 4.3cqh
+const LETTER_SPACING_EM: f32 = 0.0; // letterSpacing: 0
+const LINE_HEIGHT: f32 = 1.2; // line-height: 1.2 (mixin default)
+const WORD_SPACING_EM: f32 = 0.13; // .word margin: 0 0.13em
+const ANCHOR_Y_FRAC: f32 = 0.65; // alignment.verticalOffset (bottom)
+const ANCHOR_X_FRAC: f32 = 0.5; // alignment.horizontalOffset (center)
+const MAX_CHARS: usize = 18; // boundary_score_limit_by_chars.maxChars
+const MIN_CHARS: usize = 7; // boundary_score_limit_by_chars.minChars
+const MIN_LINES: usize = 1; // lineSplitter.minLines
+const MAX_LINES: usize = 1; // lineSplitter.maxLines
+const MAX_WIDTH_RATIO: f32 = 0.73; // lineSplitter.maxWidthRatio
+const SETTLE_DISTANCE_EM: f32 = 0.06; // settle-in($distance: 0.06em)
+const DYN_THRESHOLD: f32 = 12.0; // dynamic-font-size valueOn ('12')
+const DYN_STRENGTH: f32 = 0.06; // dynamic-font-size(0.06)
+const PRIMARY: &str = "#ffffff"; // --tscaps-primary-color default
+// text-shadow: 0 0 0.15em $shadow, then three soft-drop-shadow(0.06, 1.2)
+const TIGHT_BLUR_EM: f32 = 0.15;
+const SOFT_DY_EM: f32 = 0.06;
+const SOFT_BLUR_EM: f32 = 1.2;
+const SHADOW_COLOR: &str = "#000000"; // --tscaps-shadow-color default
+// -webkit-text-stroke: var(--tscaps-outline-thickness, 0em) $outline-color
+const OUTLINE_THICKNESS_EM: f32 = 0.0;
+const OUTLINE_COLOR: &str = "#000000"; // --tscaps-outline-color default
+
+/// cleo's `effects` array: `gap_free`, `carry_quotes`,
+/// `smart_punctuation`, `smart_lowercase` — declaration order is the
+/// application order.
+const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
+    boundary: pipeline::Boundary::Clause,
+    max_chars: MAX_CHARS,
+    min_chars: MIN_CHARS,
+    max_gap_ms: 1000.0,
+    effects: &[
+        effects::Effect::GapFree,
+        effects::Effect::CarryQuotes,
+        effects::Effect::SmartPunctuation,
+        effects::Effect::SmartLowercase,
+    ],
+};
+
+// ── fonts ─────────────────────────────────────────────────────────────────
+
+const LORA_TTF: &[u8] = include_bytes!("../../../assets/lora-latin-500-normal.ttf");
+
+/// `(ascent, descent, unitsPerEm)` as em ratios + upem, from the embedded
+/// Lora.
+fn font_metrics() -> (f32, f32, f32) {
+    static METRICS: std::sync::OnceLock<(f32, f32, f32)> = std::sync::OnceLock::new();
+    *METRICS.get_or_init(|| {
+        let face = fframes::ttf_parser::Face::parse(LORA_TTF, 0).expect("Lora parses");
+        let upem = face.units_per_em() as f32;
+        (
+            face.ascender() as f32 / upem,
+            face.descender().abs() as f32 / upem,
+            upem,
+        )
+    })
+}
+
+/// Raw word width: advance + one letter-spacing per UTF-16 unit (the
+/// `DomProbeCanvasTextMeasurer` replica; margins live in the placement).
+fn measure_word(face: &dyn fframes::FontFace, fs: f32, ls_px: f32, text: &str) -> f32 {
+    let upem = font_metrics().2 as usize;
+    let fallback = text.encode_utf16().count() as f32 * fs * 0.5;
+    let advance = match face.font_variant(upem) {
+        Some(variant) => {
+            let units = layout::measure_units(face, variant, upem, text);
+            units as f32 * fs / upem as f32
+        }
+        None => fallback,
+    };
+    advance + text.encode_utf16().count() as f32 * ls_px
+}
+
+// ── dynamic font size ─────────────────────────────────────────────────────
+
+/// `--segment-char-count`: the segment's raw texts joined by single
+/// spaces, measured in UTF-16 units (JS `Segment.getText().length` —
+/// effects rewrite `display`, never `text`).
+fn segment_char_count(words: &[pipeline::TimedWord]) -> usize {
+    let utf16: usize = words.iter().map(|w| w.text.encode_utf16().count()).sum();
+    utf16 + words.len().saturating_sub(1)
+}
+
+/// `max(1, 1 + (threshold - char_count) * strength)` — short captions
+/// grow, twelve characters and up render at the plain 4.3cqh.
+fn font_size_scale(char_count: usize) -> f32 {
+    (1.0 + (DYN_THRESHOLD - char_count as f32) * DYN_STRENGTH).max(1.0)
+}
+
+// ── render ────────────────────────────────────────────────────────────────
+
+pub fn render<'a>(
+    doc: &CaptionDocument,
+    now_ms: f32,
+    ctx: &FFramesContext<'a, '_>,
+) -> Svgr<'a> {
+    let segments = pipeline::collect_segments(doc, &SPLIT);
+    let Some(segment) = segments
+        .iter()
+        .find(|s| now_ms >= s.start_ms && now_ms < s.end_ms)
+    else {
+        return Svgr::empty();
+    };
+
+    let video_w = ctx.current_video_size.width;
+    let video_h = ctx.current_video_size.height;
+    // The whole segment — type, metrics, shadows — scales with the count.
+    let fs = FONT_SIZE_CQH * video_h as f32 * font_size_scale(segment_char_count(&segment.words));
+    let ls_px = LETTER_SPACING_EM * fs;
+    let margin = WORD_SPACING_EM * fs;
+    let line_h = LINE_HEIGHT * fs;
+    let (asc_ratio, desc_ratio, _) = font_metrics();
+
+    let probe = FontQuery {
+        family: FONT,
+        size: 1,
+        weight: FONT_WEIGHT,
+        ..Default::default()
+    };
+    let face = ctx
+        .font_source
+        .and_then(|source| source.resolve_font(FONT, probe.weight, probe.style, probe.stretch));
+    let mut widths = Vec::with_capacity(segment.words.len());
+    for word in &segment.words {
+        let width_px = match &face {
+            Some(face) => measure_word(face.as_ref(), fs, ls_px, &word.display),
+            None => word.display.encode_utf16().count() as f32 * fs * 0.5,
+        };
+        widths.push(width_px);
+    }
+
+    let splitter = layout::BalancedPixelWidth {
+        min_lines: MIN_LINES,
+        max_lines: MAX_LINES,
+        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+    };
+    let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
+    let lines = splitter.split(&split_widths);
+
+    // Bottom-aligned block: the block's bottom edge sits at 0.65H; lines
+    // center horizontally. lineSpacing is 0, so lines stack at line_h.
+    let block_h = lines.len() as f32 * line_h;
+    let block_top = ANCHOR_Y_FRAC * video_h as f32 - block_h;
+    let center_x = ANCHOR_X_FRAC * video_w as f32;
+
+    let ascent = asc_ratio * fs;
+    let descent = desc_ratio * fs;
+    let half_leading = (line_h - (ascent + descent)) / 2.0;
+
+    // Shadow geometry (px from em ratios): one tight layer, three soft
+    // ones (soft-drop-shadow(0.06, 1.2) repeated).
+    let tight_std = TIGHT_BLUR_EM * fs / 2.0;
+    let soft_dy = SOFT_DY_EM * fs;
+    let soft_std = SOFT_BLUR_EM * fs / 2.0;
+    let stroke_px = OUTLINE_THICKNESS_EM * fs;
+
+    // The segment settles in as a whole: `--on-segment-starts`.
+    let settle = recipes::SettleIn::with(SETTLE_DISTANCE_EM);
+    let (opacity, ty_em) = settle.eval((now_ms - segment.start_ms) / 1000.0);
+    let ty = ty_em * fs;
+
+    let mut words_svg = format!(
+        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\" transform=\"translate(0,{ty})\" opacity=\"{opacity}\" \
+         filter=\"url(#cleo-shadow)\">"
+    );
+    for (line_idx, &(start, end)) in lines.iter().enumerate() {
+        let line_top = block_top + line_idx as f32 * line_h;
+        let baseline = line_top + half_leading + ascent;
+        let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
+        let line_left = center_x - line_w / 2.0;
+        let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, false);
+        for (x, word) in xs.iter().zip(&segment.words[start..end]) {
+            let text = layout::escape_xml(&word.display);
+            words_svg.push_str(&format!(
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\" \
+                 stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
+                 paint-order=\"stroke\">{text}</text>"
+            ));
+        }
+    }
+    words_svg.push_str("</g>");
+
+    fframes::svgr!(
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 1920 1080"
+            width={video_w}
+            height={video_h}
+        >
+            <defs>
+                <filter id="cleo-shadow" x="-150%" y="-250%" width="400%" height="600%">
+                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={tight_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="t"/>
+                    <feDropShadow in="t" dx={0.0} dy={soft_dy} stdDeviation={soft_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="s1"/>
+                    <feDropShadow in="s1" dx={0.0} dy={soft_dy} stdDeviation={soft_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="s2"/>
+                    <feDropShadow in="s2" dx={0.0} dy={soft_dy} stdDeviation={soft_std} flood-color={SHADOW_COLOR} flood-opacity={1.0}/>
+                </filter>
+            </defs>
+            {words_svg}
+        </svg>
+    )
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_lora_has_expected_identity() {
+        let face = fframes::ttf_parser::Face::parse(LORA_TTF, 0).unwrap();
+        // fontdb's rule (parse_names): typographic family (name ID 16)
+        // when present, else the legacy family (ID 1) — this is the
+        // string `resolve_font` matches, and the TTF ships ID 1 as
+        // "Lora Medium".
+        let mut name = None;
+        for n in face.names() {
+            if n.name_id == 16 {
+                name = n.to_string();
+                break;
+            }
+        }
+        if name.is_none() {
+            for n in face.names() {
+                if n.name_id == 1 {
+                    name = n.to_string();
+                    break;
+                }
+            }
+        }
+        assert_eq!(name.as_deref(), Some(FONT));
+        let (asc, desc, upem) = font_metrics();
+        assert!(asc > 0.5 && asc < 1.5, "ascent {asc}");
+        assert!(desc > 0.01 && desc < 1.0, "descent {desc}");
+        assert!(upem >= 16.0, "upem {upem}");
+    }
+
+    #[test]
+    fn short_captions_grow_and_long_ones_stay_put() {
+        // Twelve characters is the threshold: at or above, scale is 1.
+        assert_eq!(font_size_scale(12), 1.0);
+        assert_eq!(font_size_scale(30), 1.0);
+        // Below it every missing character adds 6%: 5 chars → 1.42.
+        assert!((font_size_scale(5) - 1.42).abs() < 1e-6);
+        assert!((font_size_scale(2) - 1.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn char_count_is_the_raw_text_joined_by_spaces() {
+        let doc = CaptionDocument {
+            duration_frames: 3000,
+            cues: vec![crate::Cue {
+                start_ms: 0,
+                end_ms: 3000,
+                text: "Hi ok.".into(),
+            }],
+            ..Default::default()
+        };
+        let segments = pipeline::collect_segments(&doc, &SPLIT);
+        assert_eq!(segments.len(), 1);
+        // "Hi ok." = 6 UTF-16 units.
+        assert_eq!(segment_char_count(&segments[0].words), 6);
+        // …so the segment renders 36% larger than the 4.3cqh base.
+        assert!((font_size_scale(6) - 1.36).abs() < 1e-6);
+    }
+
+    #[test]
+    fn smart_lowercase_lowers_but_keeps_the_pronoun_i() {
+        let doc = CaptionDocument {
+            duration_frames: 3000,
+            cues: vec![crate::Cue {
+                start_ms: 0,
+                end_ms: 3000,
+                text: "Hello THERE I am fine.".into(),
+            }],
+            ..Default::default()
+        };
+        let segments = pipeline::collect_segments(&doc, &SPLIT);
+        let displays: Vec<&str> = segments
+            .iter()
+            .flat_map(|s| s.words.iter().map(|w| w.display.as_str()))
+            .collect();
+        assert_eq!(displays, vec!["hello", "there", "I", "am", "fine."]);
+    }
+}

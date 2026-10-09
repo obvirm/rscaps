@@ -1,0 +1,6 @@
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+
+[env]
+FFMPEG_DIR = 'E:\temp\opencode\ffmpeg-9.0.2-full_build-shared'
+PROTOC = 'E:\temp\opencode\protoc\bin\protoc.exe'

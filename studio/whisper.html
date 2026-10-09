@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>rscaps · whisper spike</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        font: 14px/1.5 system-ui, sans-serif;
+        background: #14161a;
+        color: #e8eaed;
+        padding: 24px;
+      }
+      h1 { font-size: 16px; }
+      #log {
+        white-space: pre-wrap;
+        font: 12px/1.6 ui-monospace, monospace;
+        background: #0e1013;
+        border: 1px solid #2a2e35;
+        border-radius: 8px;
+        padding: 12px;
+        min-height: 200px;
+      }
+      .error { color: #f28b82; }
+      a { color: #8ab4f8; }
+    </style>
+  </head>
+  <body>
+    <h1>whisper-spike · ort-web encoder probe</h1>
+    <div id="log">loading…</div>
+    <p><a href="/">← studio</a></p>
+    <script>
+      // Capture everything (including onnxruntime-web internals) before the module runs.
+      window.__logs = [];
+      for (const m of ["log", "warn", "error", "info"]) {
+        const orig = console[m].bind(console);
+        console[m] = (...a) => {
+          window.__logs.push(m + ": " + a.map((x) => (x && x.stack) || String(x)).join(" "));
+          orig(...a);
+        };
+      }
+      window.addEventListener("unhandledrejection", (e) =>
+        window.__logs.push("rejection: " + ((e.reason && e.reason.stack) || e.reason))
+      );
+      window.addEventListener("error", (e) =>
+        window.__logs.push("error: " + (e.error && e.error.stack ? e.error.stack : e.message))
+      );
+    </script>
+    <script type="module" src="/whisper.js"></script>
+  </body>
+</html>

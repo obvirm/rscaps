@@ -1,0 +1,757 @@
+PROJECT: rscaps — editor subtitle/caption animasi berbasis BROWSER, meniru fitur tscaps
+(tapi ditulis ulang dengan Rust + render engine fframes). File ini catatan durable
+biar tidak hilang saat context compaction. Terakhir diperbarui: 2026-10-07.
+
+===============================================================================
+1. REFERENSI
+================================================================---------------
+- E:\project\tscaps  -> produk acuan (read-only, JANGAN ditiru lisensinya):
+    * packages/engine  : MIT  (boleh diport dengan atribusi LICENSE)
+    * apps/studio      : AGPL-3.0 (JANGAN disalin kodenya; hanya boleh meniru ide/layout)
+    * templates/       : MIT, 44 template caption (template.json + style.scss)
+    * packages/engine/src/modules/rendering/BrowserSubtitleFrameRenderer.ts :
+        -> pola rasterisasi tscaps: bangun SVG berisi <foreignObject> per state,
+           decode lewat <img> (data URI) -> bitmap -> canvas, ada sprite-sheet
+           batch + SpriteSheetSizeProbe; font di-embed base64 via
+           CssResourceEmbedder supaya <img> bisa render (img tidak pakai font dokumen).
+    * packages/engine/src/modules/video/mediabunny/* : pola export WebCodecs + mux.
+    * packages/engine/src/modules/transcription/* : ~50 file, pipeline Whisper in-browser
+      (transformers.js + onnxruntime-web, word-level timing, cache model, SRT/VTT).
+
+- fframes (https://github.com/dmtrKovalenko/fframes) : v1.2.0, MIT, 2.1k stars.
+    * Rust programmatic video renderer. render_frame(&self, frame, ctx) -> Svgr
+      via macro svgr!. Backend native: Skia GPU/CPU + FFmpeg/libav untuk encode.
+    * CRITICAL — fframes/src/svgr.rs: pada target wasm32 (dan saat feature
+      compile-time-svgtree OFF) struct Svgr hanya { pub value: String } dengan
+      impl From<String> dan From<&str>. => Template runtime bisa dibuat tanpa macro:
+      parse SVG+ekspresi -> evaluasi per frame -> Svgr::from(string).
+      Macro svgr! hanya sugar untuk template bawaan (tetap dipakai, type-safe).
+    * fframes-editor-controller: macro impl_wasm_bridge_for!($Video, $StaticMedia)
+      -> WasmBridge (wasm-bindgen). Contoh glue cuma ~20 baris:
+      examples/hello-world/editor/editor-bridge/lib.rs
+        use fframes_editor_controller::prelude::*;
+        impl_wasm_bridge_for!(HelloWorldVideo<'static>, HelloWorldMedia);
+        #[wasm_bindgen] pub fn create_wasm_bridge() -> WasmBridge { ... }
+      Cargo bridge: hanya wasm-bindgen + fframes-editor-controller + crate template
+      dengan default-features = false (TANPA FFmpeg/Skia => build browser murni).
+    * API WASM bridge (fframes-editor-controller/src/wasm_editor.rs):
+        render_frame(frame: i64) -> String          (mode FFramesMode::Editor, SYNC)
+        render_preview_frame(frame) -> String        (mode EditorTimelinePreview,
+          set IS_PREVIEW_RENDERING=true -> gambar di-embed base64 / pakai posterUrl)
+        prepare(fps) -> VideoMetadata, replace(video),
+        add_audio_source(file, sample_rate, &[f32]), add_subtitles_source(file, content) -> cues,
+        add_image_source, add_video_source_placeholder, ingest_font(bytes) -> face info,
+        get_static_font_data_by_index / get_static_audio_data_by_index,
+        populate_static_fonts_db_with_static_fonts.
+      Host JS WAJIB mengimplementasi callback global:
+        __fframes_get_video_frame(filename, pts, preview)
+          -> { url, width, height, posterUrl? }   (dipakai efek yang butuh piksel video;
+          fframes::set_video_frame_resolver(resolve_video_frame) dipanggil di ctor bridge;
+          ada juga VideoDecodersWorker di dalam wasm.)
+    * Text layout: frame.text_width(ctx, FontQuery, s), text_fit, text_break_lines
+      -> ukuran teks dihitung di Rust pakai font yang di-ingest => PARITAS preview/export.
+    * Animasi: timeline!/frame.animate/animate_loop/animate_runtime (bukan CSS keyframes),
+      Easing, Transform, Color::hex.
+    * Media: frame.get_synced_video_frame(ctx, file, &SyncVideoFrameInput{..}) (butuh
+      feature compile-time-svgtree), ctx.get_subtitles("x.vtt") + frame.get_subtitle_phrase,
+      ctx.get_image, frame.visualize_audio_frame (spectrum), Shader (SkSL/GLSL, GPU only).
+    * npm @fframes/editor (ReScript, React 19, MIT) = editor shell resmi: Player, Timeline,
+      MediaList, renderEditor(bridge, opts). Dipakai html-react-parser untuk render string
+      SVG ke DOM, mediabunny untuk metadata video, minimp3-wasm. Hanya PREVIEW — TIDAK ada
+      tombol export. => export harus kita bangun sendiri.
+      Player state: { frame, svg: option<string>, ... }; seek -> render_frame(frame) -> svg.
+    * MediaResolvers.ts = referensi cara host: font via FontFace+document.fonts.add lalu
+      ingest ke wasm; audio via AudioContext.decodeAudioData lalu add_audio_source;
+      video metadata via <video> element fallback mediabunny Input.
+    * Build native Windows butuh FFmpeg 9.0 shared + LLVM (winget install LLVM.LLVM),
+      FFMPEG_DIR + LIBCLANG_PATH, matikan codec feature. TAPI untuk target browser
+      kita TIDAK perlu itu semua (wasm tanpa libav).
+
+===============================================================================
+2. KEPUTUSAN USER (dari question tool — SUDAH FINAL, jangan ditanya ulang)
+================================================================---------------
+1. Template engine = "Opsi 2 langsung": Rust + param JSON + RUNTIME SVG template
+   parser + mini bahasa ekspresi ({lerp(a,b,wordProgress)}, progress, dst) sebagai
+   escape hatch setara tab CSS tscaps, DARI HARI PERTAMA (bukan fase 2).
+   Konsekuensi: animasi digerakkan frame.animate(timeline!(...)) / ekspresi per frame,
+   bukan @keyframes; perlu cache runtime (hash source -> SVG/evaluator); ikut API Svgr.
+2. Scope fase 1 = SEMUA fitur tscaps: transkripsi otomatis, import subtitle +
+   burn-in + preview, galeri template, editor penuh (timeline + per-element).
+3. Porting 44 template tscaps (SCSS+keyframes -> Rust/SVG): SEMUA sejak awal.
+4. UI studio = React custom (Vite + React + TS) — user sempat ragu mau "Rust total",
+   tapi disepakati: view tetap React; Rust hanya utk logika. (Alasan: fframes saja
+   menulis editornya pakai React/ReScript; timeline editor UI paling sulit.)
+5. Transkripsi = ONNX Runtime (crate `ort`) wasm dari Rust, model Whisper ONNX.
+   FALLBACK jika spike gagal: transformers.js + onnxruntime-web (pola tscaps MIT).
+6. Export = lapisan TS tipis: Rust menghasilkan string SVG per frame -> rasterisasi
+   <img>+canvas (paritas dengan preview karena sama-sama Blink) -> VideoFrame ->
+   WebCodecs VideoEncoder -> mux MP4 via mediabunny. Audio: remux/decode dari source.
+   (Alternatif "resvg-wasm di Rust" DITOLAK karena bisa beda hasil render dari preview.)
+7. Keputusan arsitektur preview: BACKGROUND VIDEO TIDAK digambar fframes.
+   preview = <video> HTML + overlay SVG caption transparan di atasnya;
+   export  = drawImage(decoded VideoFrame) + overlay SVG caption di atasnya.
+   => SVG caption selalu mandiri/tanpa href eksternal -> rasterisasi <img> aman.
+   __fframes_get_video_frame baru dibutuhkan untuk efek yang sampling piksel video
+   (blur/backdrop) — fase lanjutan.
+8. Referensi produk lain yang DITOLAK user: subtitler (dmtrKovalenko) — "sudah mati
+   dua tahun", beda jauh dari tscaps.
+
+===============================================================================
+3. TAB / PANEL (FAKTA tscaps — koreksi asumsi user)
+===============================================================================
+Sidebar tab Captions di tscaps (apps/studio/src/presentation/editor/stores/
+CaptionsTabStore.ts):
+  'templates' | 'transcript' | 'typography' | 'style' | 'position' |
+  'motion' | 'effects' | 'layout' | 'code'
+- Tab 'code' (CodeTab.tsx) = editor CODEMIRIRROR untuk 2 bahasa saja:
+  CSS (cssExtensions) dan XML/SVG filter (xmlExtensions). BUKAN JavaScript, BUKAN HTML.
+- Ada juga ElementCodePanel.tsx: editor CSS per-element (deklarasi saja, selector
+  ditambahkan saat stylesheet disusun; @keyframes milik elemen itu; animasi wajib
+  pakai var(--timing) sebagai delay).
+- Jadi tscaps TIDAK punya tab script JS / HTML. Escape hatch-nya = CSS (+ filters.svg).
+- PRODUK KITA: tab sama (templates, transcript, typography, style, position, motion,
+  effects, layout, code), tapi tab 'code' berisi SUMBER TEMPLATE kita
+  (SVG + ekspresi mini) menggantikan CSS, karena engine kita SVG/Rust bukan DOM/CSS.
+  Editor memakai CodeMirror (@uiw/react-codemirror) persis pola CodeEditorField
+  (debounce 250ms, validator sync, dialog maximize, height 60vh).
+
+===============================================================================
+4. ARSITEKTUR YANG DIBANGUN (repo E:\project\rscaps, sekarang masih kosong)
+===============================================================================
+crates/
+  caption-core/    # document model (cues, styles/params, sheet/element),
+                   #   ekspresi mini language (parser+evaluator),
+                   #   runtime SVG template parser -> Svgr::from(String),
+                   #   44 template bawaan (pakai svgr!),
+                   #   layout text via fframes helpers (text_width/break_lines)
+  caption-bridge/  # cdylib wasm32: impl_wasm_bridge_for!(CaptionVideo, CaptionMedia),
+                   #   host API: set_document(json), ingest_font, add_subtitles_source,
+                   #   setters param; dipakai oleh apps/studio
+packages/
+  engine-ts/       # lapisan TS: export (WebCodecs + mediabunny) — diadaptasi dari
+                   #   engine MIT tscaps (atribusi LICENSE), util WebAudio, dsb.
+apps/
+  studio/          # Vite + React + TS: preview (<video> + overlay SVG), timeline,
+                   #   galeri template, inspector per-element, transkripsi UI, export UI
+                   #   pola: store ala CaptionsTabStore/CodeEditorField
+
+Catatan lisensi: fframes MIT, engine tscaps MIT (port ok + atribusi),
+studio tscaps AGPL (tidak disalin), template tscaps MIT (44 folder).
+
+===============================================================================
+5. TAHAPAN KERJA
+===============================================================================
+Fase 0 (SPIKE, 1-2 hari):
+  - cargo workspace + caption-bridge wasm + Vite app terhubung
+  - render 1 frame SVG -> <img> data URI -> canvas, font di-inject @font-face base64
+  - uji crate `ort` wasm dengan Whisper ONNX kecil (kalau gagal -> fallback transformers.js)
+  - cek dukungan RTL/Arabic di text layout fframes (tscaps punya modul bidi besar)
+  - ukur waktu render_frame sync per frame (untuk keputusan render di Worker)
+Fase 1 (preview inti): import video, playback/seek, 1 template, edit params -> live preview
+  via set_document; verifikasi paritas ukuran/posisi teks wasm vs layar.
+Fase 2 (konten): transkripsi ONNX-Whisper di Worker, import SRT/VTT, word timing,
+  split/merge cue, transcript tab.
+Fase 3 (export): burn caption -> MP4 (decode video -> drawImage -> overlay SVG ->
+  VideoEncoder -> mediabunny mux), audio remux, progress bar.
+Fase 4 (editor penuh): timeline drag/resize cue, inspector per-element, tab-panel lengkap.
+Fase 5: port 44 template + polish.
+
+===============================================================================
+6. RISIKO / TODO VERIFIKASI
+===============================================================================
+- [x] `ort` di wasm32 + Whisper ONNX benar-benar jalan -> TERBUKTI (ort-web,
+      lihat §7; fallback transformers.js TIDAK perlu)
+- [x] Paritas rasterisasi <img> vs inline SVG -> TERBUKTI (frame 10 EN + frame
+      150 AR identik; raster 5-6ms utk 1920x1080)
+- [x] render_frame SYNC -> TIDAK perlu Worker (rata-rata 0.01ms/frame, p95 0.02ms)
+- [x] RTL/bidi di fframes text layout -> engine fframes TANPA bidi; wrap RTL
+      benar SELAMA font punya glyph Arab/Hebrow (lihat §7); keputusan port
+      bidi tscaps masih terbuka utk Fase 2
+- [ ] Kebutuhan embed font base64 tiap export (ukuran, kecepatan)
+- [ ] Efek yang butuh piksel video (blur) -> butuh __fframes_get_video_frame nanti
+
+===============================================================================
+7. STATUS FASE 0 — SPIKE (update 2026-10-07): SEMUA ITEM SELESAI
+===============================================================================
+Sudah jalan (verified di browser Chrome + headless Node):
+- Workspace cargo: crates/caption-core (model doc + CaptionVideo render) dan
+  crates/caption-bridge (cdylib wasm, impl_wasm_bridge_for!(CaptionVideo)).
+- Build: `pnpm build:wasm` (scripts/build-wasm.mjs -> wasm-pack build --target web)
+  menghasilkan crates/caption-bridge/pkg (wasm ~326KB).
+- Studio spike: `pnpm studio` -> http://localhost:5177 (studio/server.mjs tanpa
+  framework; index.html + main.js). Verified: teks caption tampil (Arial Black
+  kuning, center, y=0.78), Apply+prepare OK, Play -> playback rAF live render
+  frame per frame OK. test-node.mjs = smoke test headless tanpa browser.
+- Host API yang dipakai: init() -> create_wasm_bridge() -> ingest_font(ttf) ->
+  set_document_json(doc) -> prepare(30) -> render_frame(BigInt(n)) : string SVG.
+  URUTAN PENTING: set_document_json SEBELUM prepare (duration diambil waktu prepare).
+- Import map di studio/index.html: "@fframes/editor" -> /nm/... (bundle ESM
+  self-contained, export load_audio_wasm_callback + renderEditor).
+
+HASIL SPIKE FASE 0 (2026-10-07):
+1. Benchmark render (studio/bench.mjs + studio/lib.mjs): render_frame avg
+   0.01ms, p50 0.01, p95 0.02, max 0.04ms; 300 frame total 2ms; preview frame
+   0.01ms; SVG 376 byte (text) / 0 (kosong). KEPUTUSAN: render di main thread,
+   TIDAK perlu Web Worker.
+2. Raster export (tombol Raster di studio): SVG -> data URI -> img.decode() ->
+   canvas 1920x1080 butuh 5.3-5.6ms. Paritas inline-SVG vs raster TERBUKTI sama
+   utk frame 10 (EN) dan frame 150 (Arabic 3 baris, bidi benar) via screenshot.
+3. RTL: fframes text.rs TANPA bidi/direction handling; unicode-bidi masuk hanya
+   via usvgr. LTR wrap normal (6-8 baris). RTL TIDAK wrap di ariblk.ttf karena
+   glyph coverage nol (char width 0 -> line_width 0 -> dx=748=width/2, bukan
+   bug engine). Dgn font ber-glyph Arab (arial/tahoma/calibri/segoeui/times)
+   RTL wrap benar jadi 3 baris. Implikasi: butuh font multi-script utk konten
+   Arab/Hebrow + keputusan port bidi reordering (tscaps punya modul besar).
+4. Whisper ONNX (crates/whisper-spike) — DUA BACKEND TERBUKTI:
+   a) Native (ort-candle): cargo run -p whisper-spike --example smoke ->
+      session load OK, encoder 17.5s (DEBUG), out [1,1500,384] mean=0.0288
+      absmax=17.922.
+   b) Browser (ort-web + onnxruntime-web@1.27 self-host): studio/whisper.html
+      -> init OK, session create 773ms, encoder run 501ms utk 30s audio
+      (release, ~60x RT), output 576000 float mean=0.0328 absmax=18.232,
+      tanpa error. Model: models/encoder_model.onnx (Xenova/whisper-tiny,
+      fp32, 32.9MB). Fallback transformers.js TIDAK diperlukan.
+   Export wasm: init(dist_url) -> load_model(bytes) -> encode(240000 f32 =
+   80x3000) -> Vec<f32> 576000 (1500x384). Build: wasm-pack build --release
+   --target web -d pkg crates/whisper-spike.
+
+JEBAKAN BUILD (jangan lupa):
+- Pakai crates.io fframes 1.2.0, BUKAN git (clone repo fframes 609MB, lambat).
+  Registry sudah resolve [lints] jadi aman.
+- .cargo/config.toml: (a) rustflags wasm32 `--cfg getrandom_backend="wasm_js"`
+  + dep getrandom 0.3 features=["wasm_js"] (ahash/usvgr butuh); (b) FFMPEG_DIR
+  -> E:\temp\opencode\ffmpeg-9.0.2-full_build-shared (di-download dari
+  https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z, 57MB,
+  extract 272MB). WAJIB: proc-macro fframes-media-dir-macro tetap dibuild untuk
+  HOST saat compile fframes -> butuh header+lib FFmpeg (FFMPEG_DIR) meski target
+  wasm. Kalau folder ini hilang, download ulang lalu update FFMPEG_DIR.
+- av*-61.dll harus terlihat saat rustc load proc-macro dylib (errornya membingungkan:
+  "can't find crate for fframes_media_dir_macro"). Fix: (1) scripts/build-wasm.mjs
+  me-prepend PATH; (2) utk `cargo check` debug biasa, DLL sudah dicopy ke
+  target\debug\deps (hilang kalau cargo clean -> jalankan build script dulu).
+- BreakLinesOpts butuh &'a str (family, fill) -> tidak boleh pinjam dari guard
+  doc; caption-core menyimpan family/color di static RwLock hasil Box::leak saat
+  set_document_json.
+- Nama font: ariblk.ttf ter-ingest sebagai family "Arial" (weight 900), BUKAN
+  "Arial Black". family tak match -> text_break_lines return None + log
+  "ERROR breaking lines: font is not resolved" (SVG kosong, tanpa <text>).
+- Node test: caption_bridge.js import '@fframes/editor' (butuh AudioContext) ->
+  test-node.mjs menulis caption_bridge.node.js dengan shim (jangan dipakai di
+  browser; browser pakai caption_bridge.js asli + import map).
+- pnpm 11: `pnpm install` gagal ERR_PNPM_IGNORED_BUILDS sampai
+  `pnpm approve-builds '!@parcel/watcher' '!bsdoc' '!gentype'` menulis
+  allowBuilds:false ke pnpm-workspace.yaml; verifyDepsBeforeRun:false supaya
+  `pnpm <script>` tidak auto-install dulu. Untuk postinstall protobufjs
+  (onnxruntime-web): `pnpm approve-builds '!protobufjs'` (sama saja).
+- ORT BACKEND MATRIX (jangan salah pilih):
+    ort-candle  native  ✓ (backend encoder native, PROVEN utk whisper)
+    ort-candle  wasm    ✗ E0308 (ort-sys wasm: CreateSession* async
+                        Pin<Box<dyn Future>>, backend kasih fn sync — upstream
+                        TIDAK punya fix; sama utk ort-tract)
+    ort-tract   native  ✗ gagal parse whisper ("Failed analyse for node #68
+                        /conv1/Conv ConvHir")
+    ort-web     wasm    ✓ satu-satunya jalur browser (bridge onnxruntime-web)
+- ort rc.13 API: path `ort::session::Session` / `ort::value::Value` (bukan
+  re-export root); akses pakai method `.inputs()` `.outputs()` `.name()`
+  `.dtype()` (field private); `session.run` butuh &mut; wasm: `run_async(inputs,
+  &RunOptions)`; sync tensor web via `ort_web::ValueExt::sync(SyncDirection::Rust)`.
+- JANGAN naikkan feature api-ort ke api-22+ utk jalur ort-web: api-22 meng-
+  enable Outlet::make_value_info -> SetSymbolicDimensions, fungsi itu TIDAK
+  diimplement ort-web -> jatuh ke stub "Unimplemented" -> panic
+  `.expect("infallible")` di ort value/type.rs:164 saat session commit.
+  ort-web & ort-candle cuma minta api-17 -> pakai "api-17". (Debugging: pasang
+  panic hook di init() yang print ke console utk lihat pesan panic di wasm.)
+- ndarray harus 0.17 (versi ort); pakai 0.16 -> duplikat crate + trait error.
+- PROTOC dibutuhkan candle-onnx (build native): protoc-29.3-win64.zip dari
+  github protobuf releases -> E:\temp\opencode\protoc\bin, daftarkan di
+  .cargo/config.toml [env] PROTOC.
+- ort-web Dist::new butuh URL ABSOLUT (kode JS-nya `new URL(...)` tanpa base)
+  -> init(dist_url) diisi dari JS: location.origin + "/nm/onnxruntime-web/dist/".
+- Studio server harus kirim header COOP/COEP (crossOriginIsolated=true) —
+  onnxruntime-web pakai ort-wasm-simd-threaded (SharedArrayBuffer/worker);
+  tanpa itu session create bisa hang. Dist self-host: /nm/ (ort.min.js +
+  ort-wasm-simd-threaded.jsep.wasm ~26MB), /wpkg/ (pkg whisper-spike),
+  /models/ (encoder_model.onnx), /pkg/ (caption-bridge).
+- Server studio: restart harus kill BY PORT (Get-NetTCPConnection -LocalPort
+  5177) — instance lama masih bisa hidup memegang port dengan kode lama
+  (kelihatan sebagai 404 route baru; Start-Process baru gagal diam-diam EADDRINUSE).
+
+Dokument (JSON) v0 — schema caption-core:
+  { duration_frames, cues: [{start_ms, end_ms, text}],
+    params: {font_family, font_size, font_weight, color, y_frac, width_frac,
+             pop_in_ms, travel_px} }
+  animasi v0: pop-in cubic-out (pop_in_ms) + travel dari bawah (travel_px).
+
+Studio UI restyle (2026-10-07) — tiru tampilan studio tscaps (reimplementasi
+kode sendiri, TIDAK salin kode AGPL):
+- Layout: toolbar (back, nama project, undo/redo decorative, status pill,
+  theme toggle, Save disabled, Export accent) | kiri: video-box 16:9
+  (checkerboard alpha + stage SVG) + playbar (play, time, scrub, frame,
+  Render, Raster) + strip raster/compare + thumbs 3 | drag-handle resize
+  (45%..) | kanan: mode-strip [Captions | divider | Timeline] + sub-tab strip
+  9 tab (Templates..Code; Code aktif = editor JSON + Apply; lainnya placeholder
+  "Fase 1") + panel Timeline (ruler adaptif niceStep, cue-chip scene-color,
+  playhead, klik cue = seek).
+- Token diikuti dari tscaps tokens.css (RGB channel + alpha; surface-0..3,
+  edge tint/alpha, fg-*, accent 91 123 230, scene-1..3); dark default, light
+  via [data-theme="light"] + localStorage "rscaps:theme" (inline script sebelum
+  paint); font system-ui (Inter Variable tidak ada offline).
+- Keyboard (gaya tscaps): Space=play/pause, ←/→=frame step (Shift=10),
+  abaikan saat fokus di input/textarea. Export = download PNG frame skrg.
+- ID elemen lama DIPERTAHAN semua (doc/apply/play/frame/render/status/stage/
+  stage-caption/raster/raster-stage/raster-caption/thumbs) — test & main.js
+  tetap jalan. Catatan: rAF berhenti saat tab hidden (visibilityState) — test
+  play harus Page.bringToFront dulu (bukan bug app).
+
+SISA FASE 0 (tersisa):
+  - [ ] integrasi @fframes/editor renderEditor(bridge) sbg player resmi (opsional
+        utk spike; sekarang pakai player manual di main.js)
+  - [ ] keputusan port bidi reordering utk RTL penuh (tscaps modul bidi) — di
+        jadwalkan Fase 2; utk spike cukup dgn font multi-script
+
+PORT TEMPLATE — REVISI 2026-10-08 (arah user, MENANG ATAS CATATAN SEBELUMNYA):
+- PERINTAH USER: "kita fokus fframes dari semua segi render maupun front end;
+  tampilan di browser pakai fframes bukan CSS. Hapus, template buat ulang."
+  Artinya: SEMUA render caption/template = fframes (Rust/wasm) → SVG. CSS
+  template di foreignObject = SHORTCUT = tidak taat = DIBUANG. Port 41 template
+  harus NATIVE di atas fframes, bukan CSS jalan di browser.
+- Konteks: tscaps dibuat krn Remotion berat; prinsip user tscaps harus Rust;
+  susah → fframes lahir sbg alternatif cepat; belum ada yg spt tscaps di fframes
+  → rscaps = hadirkan tscaps di atas fframes.
+- YANG SUDAH DIHAPUS (2026-10-08):
+  * templates/ (diuser) — aset css+manifest porting.
+  * studio/templates.js (saya) — CSS runtime foreignObject (~1000 baris).
+  * scripts/build-templates.mjs (sass pipeline) + dep bidi-js & sass di
+    package.json.
+  * main.js: import tpl* + semua branch tplActive/tplShow/tplSvg/tplSetDoc +
+    buildTplGrid/selectTemplate (galeri).
+  * index.html: CSS .tpl-grid/.tpl-card, subpanel templates, importmap bidi-js.
+  * server.mjs: route /templates/.
+  Studio diverify: status "prepared · duration=300 frames", svg stage ✓ (jalur
+  wasm murni).
+- YANG DIPERTAHANKAN (dipakai lagi saat port native):
+  * studio/tplfonts/ (52 families woff2 + registry.json + stacks.json) + dep
+    fontsource — font utk template native (cek dulu apakah fframes ingest_font
+    terima woff2; kalau tidak, build ttf dari fontsource).
+  * Spesifikasi visual: CSS tscaps asli tetap di E:\project\tscaps (read-only,
+    MIT) sbg ground truth timing/efek — direplikasi per-frame di Rust.
+  * Algoritma terpetakan (tetap harus diport ke Rust): 4 line splitter, word
+    timing distribusi, tagger, deteksi arah (strong-majority), padding 4
+    template, letter-mode (nyx/pico), video-layer (luca/luna/milo), filter
+    materialisasi (freya/iris/kai/loki/naya).
+- LANGKAH BERIKUT: audit primitive fframes 1.2.0 (src: animation/,
+  svgr.rs, text.rs, scenes.rs, shader.rs, transform.rs, color.rs,
+  time_spec.rs, font_data.rs) → tentukan primitive apa yg tersedia utk
+  keyframe/efek → rencana port per-template native → implementasi per grup
+  template → bandingkan frame dgn hasil tscaps asli.
+- STATUS 2026-10-08 (malam): TEMPLATE PERTAMA `ada` SELESAI + TERVERIFIKASI.
+  * Rust: crates/caption-core/src/templates/{mod.rs,ada.rs}. Pipeline
+    tokenize (strip <tag>/{override} spt JS MARKUP: closing char wajib ada)
+    → spread timing (bobot = UTF-16 code units, JS .length) → boundary
+    split (10 basis × bare/basis+quote = 50 separator) → char-limit split
+    (max 26/min 8, greedy kHigh + tail-aware, TANPA skor = kandidat
+    TERAKHIR) → sort by start → gap_free (gap ≤1s bridge ke segmen
+    berikutnya; else word_end+1s; segmen terakhir +1s clamp video_end) →
+    pilih 1 segmen aktif (start ≤ t < end) → layout 1 baris.
+  * Layout ada: fs=0.028×H; margin kata 0.11em/sisi; line-height 1.16;
+    y_bottom=0.78×H; x tengah; baseline = seg_top + 0.93×fs (half-leading
+    dgn hhea asc 1.05/desc 0.35 Poppins, lineGap diabaikan); plate inset
+    (0.2em,1.3em) radius 0.3em bg #e7e5e7; shadow feDropShadow dy 0.03em
+    σ=0.055em opacity .12 filter id "ada-plate-shadow"; kata: #1c1e1d jika
+    now ≥ word.start else #a6a6a6. Ukur lebar: resolve_font pub →
+    measure di size=unitsPerEm (advance per char integer = unit font
+    eksak) × fs/upem; repliche calc_text_width lokal (Frame::text_width
+    ikat value ke lifetime ctx → TIDAK bisa utk string lokal!). Font
+    belum ke-ingest → fallback lebar 0.5em/UTF-16 (plate tetap muncul).
+  * lib.rs: field CaptionDocument.template (serde default "") + dispatch
+    templates::render SEBELUM cue lookup (gap_free lintas cue) → id
+    tak dikenal/kosong = jatuh ke v0 (LAMA) utuh.
+  * Test: 11/11 lolos (cargo test -p caption-core). WASM build ✓
+    (node scripts/build-wasm.mjs).
+  * Studio: main.js ingest Poppins 400/700 TTF (tplfonts/ttf, hasil
+    konversi woff2 via `pnpm add -D wawoff2`) + bangun @font-face base64
+    → inject <style> head + EMBED ke SVG raster (SVG-as-image tak lihat
+    doc CSS); prewarm document.fonts.load + repaint on fonts.ready;
+    picker template di subtab Templates (select: Default v0 / Ada).
+  * Verifikasi browser (browser-harness): SVG = defs+filter+rect plate
+    (x768.13 y801.27 w383.75 h47.17 = line 35.08+2×6.05 ✓, bottom
+    848.45=842.4+6.05 ✓) + per-word <text> Poppins 700 fs30.24, baseline
+    835.44 (=seg_top+0.93fs ✓); frame10: 1 kata primary + 2 abu ✓;
+    frame60: semua primary ✓; screenshot visual plate+Poppins ✓; thumb ✓;
+    raster canvas paint dgn @font-face embedded ✓; GAP-FREE CROSS-CUE:
+    cue2.start digeser ke 3200 → frame80 (t=2.67s > cue1 end 2500)
+    plate "Welcome to rscaps" MASIH TEREnder ✓ lalu t=3.33s swap ke
+    segmen-2 ✓; template="" → v0 utuh ✓; picker visible ✓.
+  * Batasan v1 (sengaja): tanpa kerning/ligature (px drift ratusan kecil
+    vs canvas tscaps); tanpa animasi masuk (ada memang tanpa); varian
+    Light/Dark/Blue/Yellow/Red + styleControls belum.
+- STATUS 2026-10-08 (malam, lanjutan): FIX ARABIC/HEBREW (script stack +
+  arah RTL) SELESAI + TERVERIFIKASI.
+  * Font statis — fframes TANPA dukungan variable font (tak ada kode
+    gvar/wght/axis → tak bisa di-instance) → `pnpm add -D @fontsource/
+    cairo @fontsource/assistant` (paket STATIS per-weight) → wawoff2 →
+    studio/tplfonts/ttf/{cairo-arabic-700,assistant-hebrew-700}-normal.ttf
+    + salinan ke crates/caption-core/assets/ (embed utk metrics/identity
+    test). CATATAN: file Assistant fontsource punya name ID1 "Assistant
+    ExtraLight" (quirks upstream) → resolve_font("Assistant") gagal →
+    di-patch biner name table (record p3/e1/lang1033/id1: length
+    40→18 byte UTF-16BE, string tetap berawalan "Assistant"; ID4/ID6
+    tak dibaca siapa pun, dibiarkan). Cairo ID1="Cairo" ✓ Poppins ✓.
+  * ada.rs: deteksi script per char (Hebrew 0590-05FF & FB1D-FB4F →
+    Assistant; Arabic 0600-06FF, 0750-077F, 08A0-08FF, FB50-FDFF,
+    FE70-FEFF → Cairo; else Poppins — ikut stacks.json entry "Poppins")
+    → family per KATA (char pertama ber-script; kata praktis mono-script)
+    → ukur dgn face keluarga tsb (resolve_font per keluarga, measure
+    size = upem PER KELUARGA) + override atribut font-family per <text>.
+    Direction: unicode-bidi 0.3.18 (bidi_class → L / R / AL) = port
+    StrongCharacterMajorityTextDirectionDetector (majoritas kuat atas
+    SELURUH text cue dokumen; seri/netral = LTR) + LineBaseDirectionResolver
+    (baris single-arah doang yg flip; baris campur pakai arah dokumen)
+    → RTL = posisi kata di-mirror (kata logis pertama di ujung kanan;
+    shaping browser utuh per <text>, tanpa pecah per huruf); baseline
+    metrics pakai keluarga DOMINAN segmen (seri → Poppins, spt strut
+    browser). UBA penuh (fragment per level, Nastaliq) = milestone berikut.
+  * Test 17/17 lolos (6 baru: script family, majority direction, line
+    resolver, rtl word positions, identity+metrics 3 font (weight 700 +
+    family name), dominant family). WASM build ulang ✓.
+  * main.js: FONT_SOURCES += Cairo/Assistant TTF (@font-face base64 ikut)
+    + prewarm document.fonts.load keduanya.
+  * Verifikasi browser (browser-harness): frame90 (Arabic, doc majority
+    → RTL): 5 <text>, x turun 1081→755 (kata logis di kanan ✓),
+    font-family="Cairo" utk kata Arab + tak ada attr (grup Poppins) utk
+    "rscaps"/"—", timing 2 primary + 3 abu (persis word spread) ✓, plate
+    x712.8 w494.4 (lebar Cairo NYATA, center 960 ✓); frame180 (Hebrew):
+    6 kata Assistant ✓ x turun ✓ timing 2+4 ✓; RASTER canvas sample
+    piksel region plate: bg 16634 + dark 941 (Assistant terpaint via
+    @font-face embedded) ✓; thumbs: frame150 Cairo ✓ frame10/65 Poppins
+    ✓; template="" → v0 utuh (tanpa filter ada, teks kuning) ✓;
+    screenshot visual plate Arab RTL ✓.
+  * Batasan v1 tetap: mixed-run UBA penuh (kata latin dlm baris RTL
+    umumnya aman krn UBA browser per <text>), Urdu/Nastaliq → Cairo
+    (glyph dasar; Noto Nastaliq belum), stack Cyrillic/Greek (Nunito/
+    Comfortaa) belum, kerning/ligature.
+- AUDIT PRIMITIVE fframes + MODEL tscaps + GROUPING (2026-10-08; sumber
+  fakta: registry fframes-1.2.0/src + templates/_docs/*.md + scan scss/json):
+  * Primitif fframes 1.2.0 YANG TERSEDIA:
+    - Animasi: macro timeline!(at X => Y | duration D, animate from => to,
+      easing) + Frame::animate/animate_loop (eval dlm DETIK absolut,
+      frame.seconds()=index/fps) + animate_runtime (dynamic). Easing:
+      Linear, EaseIn/Out/InOut, CubicBezier(x1,y1,x2,y2), Spring{mass,
+      stiffness,damping}. Animatable: f32/f64, tuple 2-4, Transform.
+      KeyFramesAnimation: gap antar keyframe di-fill otomatis, keyframe
+      terakhir = final_value.
+    - Transform struct {translate_x/y, rotate+origin, scale, skew_x/y}
+      → SvgAttributeValue / Display string; Animatable ✓ (urutan:
+      translate→rotate→scale→skew).
+    - Svgr di wasm32 = String murni (From<String>) → bebas format elemen
+      SVG: filter, gradient, clipPath, blend, caret/pill manual.
+    - Teks: text_break_lines(_structure) [wrap per font + LRU cache],
+      text_width (FontQuery+cache), text_fit (ellipsis); FontSource/
+      FontFace pub → resolve+ukur (cara ada). get_subtitle_phrase/cue/
+      get_cue_stack. get_synced_video_frame (decoder video utk layer
+      video), visualize_audio_frame. Shader(sksl/shadertoy) — TIDAK
+      dipakai template tscaps (semua efek = SVG filter). Color const
+      hex/rgb/rgba; time_spec (TimelineIndex, range frame); Scenes/
+      Overlap/Duration (multi-scene + audio/video file refs).
+  * MODEL tscaps (fakta _docs/css-contract.md + animation.md):
+    - Frozen-frame: engine inject animation-play-state:paused + fill-mode
+      both di SEMUA elemen; visible state = f(delay, keyframe%) saja.
+      delay = --on-X-starts = (X.start − now) dtk (negatif = sudah jalan)
+      → di Rust: setiap animasi = timeline absolut dibangun per frame.
+      transition DILARANG (export = SVG per frame, tanpa frame prev).
+    - 4 pola: A animasi di elemen anchor ke state start; B satu animasi
+      span seluruh state (duration = --X-duration, utk highlight cycle);
+      C di state class (delay tetap wajib); D per-letter (delay =
+      word.start + word.dur*idx/count). Semua bisa → timeline! absolut.
+    - Element tree: .segment > .line > .word > (.letter|.word-decoration);
+      + segment-decorations-above/below; + tscaps-video-frame-layer
+      (rendering.videoFrame.required); TANPA .section (section hanya
+      pengelompok splitter/tagger).
+    - State classes per frame, tepat 1 per .word/.line: {word,line} ×
+      {not-narrated-yet, being-narrated, already-narrated}; state TIDAK
+      BOLEH ubah layout (hanya color/bg/shadow/transform).
+    - Structural metadata: --segment-index, --segment-char-count,
+      --line-char-count, --line-width-em (lebar TERUKUR, utk auto-shrink),
+      --previous-line-width-em, --segment-anchor-y, --segment-anchor-
+      origin-y (0/50/100%), --word-index, --word-count, --word-char-count,
+      --last-word-char-count; pseudo switch: calc(min(1,max(0,...))).
+    - Letter mode (rendering.splitWordsIntoLetters): split per GRAPHEME
+      (butuh unicode-segmentation; emoji ZWJ = 1); kerning/ligature hilang
+      (by design); skrip cursive (Arabic/Syriac/N'Ko) OTOMATIS skip →
+      word dicat utuh + fallback .word:not(:has(.letter)).
+    - RTL: engine sudah emit .word dlm urutan PAINTED (mirror di DOM);
+      structure tag class (first-word-in-line dkk) tetap LOGICAL;
+      word bisa pecah jadi >1 elemen (punctuation level beda) + class
+      detached-word-fragment; --tscaps-text-direction utk @container
+      style query (desain yang "menunjuk sisi").
+    - Splitter = ordered pipeline per config: boundary{mode: none|
+      sentence|clause|custom(chars,extends)}, limit_by_chars,
+      boundary_score_limit_by_chars, limit_by_words, pause_based;
+      lineSplitter: balanced | balanced-pixel-width (pakai text measurer)
+      | fixed-tail (reserved tail words) | isolated-word (big-word) +
+      maxLines/minLines/maxWidthRatio/minCharsPerLine. mode default saat
+      field absen = FAKTA BELUM KETEMU (cek source tscaps saat port).
+    - 15 resep animasi _lib/animation/: fade-in, rise-in, slide-in,
+      scale-in, pop-in, snap-in, wobble-in, settle-in, glitch-in,
+      flash-in (entrance) + bob, jitter, shimmer, highlight-pulse,
+      typewriter (emphasis/loop). Param via custom property; entrance
+      umum baca --entrance-duration.
+  * GAP (fframes tak punya → DIY di caption-core):
+    1. steps() easing (glitch/jitter/declared) + multi-stop keyframe %
+      (pola B) → helper progress lokal (tak wajib lewat fframes easing).
+    2. Animatable<Color> (highlight-pulse/fade warna) → lerp RGBA lokal.
+    3. Grapheme segmentation (letter mode) → crate unicode-segmentation.
+    4. State machine + timing-var model → modul shared templates/state.rs.
+    5. 15 resep → templates/recipes.rs (param → timeline! builder per
+      elemen: segment/line/word/letter).
+    6. Pseudo ::before/::after (plate, pill, caret, flash plate) → elemen
+      SVG manual (precedent: plate ada).
+    7. CSS→SVG: text-stroke → stroke attr + paint-order; gradient/
+      background-clip:text → fill url(#grad); box-shadow → feDropShadow;
+      clip-path → clipPath; blur → feGaussianBlur; blend → resvg
+      perlu diverifikasi PER GROUP saat port; shimmer → gradient offset.
+    8. Line splitters 4 tipe (ada baru: 1 baris) + auto-shrink
+      dynamic-font-size (baca --line-width-em → pakai text_width).
+    9. Emoji .word-decoration (butuh font emoji berwarna) + shared asset
+      (_assets/marker-stroke.png dipakai iris via mask-image url(asset:)).
+  * GROUPING 41 template (urut port):
+    - G1 — engine animasi + resep entrance (paling banyak): kelompok
+      entrance sederhana + static: elio, ezra, ivo, remi, rhea, tito,
+      sara, yuki, enzo, lewis, hugo, cleo, mira, juno, anya, kai(jitter),
+      zara(glitch), lena(clip+plate), levi, lyra(shimmer), noor, kel,
+      theo, vera, tala, otto(blend), selene(gradient+plate) — tanpa
+      filters.svg/video/letter. Total ~27 siap dgn G1+CSS→SVG dasar.
+    - G2 — animasi custom OWN keyframes (declared): freya, luna, nova,
+      naya, pepper, sol (beberapa juga css-filter/blur/transform).
+    - G3 — letter mode + typewriter: nyx, pico.
+    - G4 — filters.svg (inline filter XML + variable substitution):
+      freya, iris, kai, loki, naya; iris juga mask asset.
+    - G5 — media: video layer (luca, luna, milo, selene →
+      get_synced_video_frame + blend) + behindActor pastor
+      (rendering.md "Text behind the actor").
+    - Urutan: G1 (bangun state.rs + recipes.rs, port batch) → G2 → G3
+      → G4 → G5. Baca docs relevan dulu per group.
+  * Peta docs fakta: templates/_docs/{css-contract,animation,filters,
+    rendering,library,template-json,style-controls,checklist}.md +
+    templates/AUTHORING.md. BELUM dibaca detail: library.md (glow,
+    soft-drop-shadow, dynamic-font-size, control.field), filters.md
+    (variable substitution), rendering.md (line splitter measurement,
+    video-frame layer, behind actor), style-controls.md (tipe kontrol
+    utk UI), checklist.md (quality bar).
+- STRUKTUR DIRECTORY TEMPLATE (2026-10-08, arah user — pola tscaps):
+  crates/caption-core/src/templates/<id>/ berisi { mod.rs (render
+  logic), template.json (data config: variants/typography/
+  segmentSplitters/lineSplitter/alignment/effects — di-copy dari
+  templates/tscaps/<id>/template.json = fakta/data, BUKAN kode AGPL) }.
+  Shared state.rs/recipes.rs nanti tetap di level templates/. `ada`
+  sudah direstrukturisasi (include_bytes → ../../../assets/; 17/17 test
+  lolos; wasm rebuild ✓). template.json ada sudah jadi source of truth
+  utk milestone varian+styleControls (5 varian warna + 6 kontrol di
+  dalamnya; default = value di styleControls).
+- LANGKAH BERIKUT: G1 — (1) baca library.md + rendering.md bagian
+  line-splitter, (2) tulis templates/state.rs (state classes + timing
+  vars + structural metadata) + templates/recipes.rs (15 resep →
+  timeline!), (3) port template ke-2 (kandidat: elio = rise-in, pola
+  paling dekat dgn ada) + verifikasi browser, (4) lanjut batch G1;
+  setelah itu: UBA penuh/Nastaliq, varian warna + styleControls,
+  banding frame vs tscaps asli, G2-G5.
+- CATATAN LAMA (masih berlaku): fframes text layout TANPA bidi — RTL perlu
+  penanganan terpisah; jebakan build wasm (FFMPEG_DIR/protoc/av dll) lihat
+  bagian atas.
+
+- STATUS 2026-10-08 (G1 batch 1): MODUL BERSAMA + TEMPLATE `elio`
+  SELESAI + TERVERIFIKASI. 38/38 test caption-core lolos; wasm rebuilt.
+  * Modul baru di crates/caption-core/src/templates/:
+    - pipeline.rs: tokenize, spread (UTF-16), split_boundary (Sentence
+      preset 10 basis x (bare+quote) | None), split_char_limit
+      (parametrized maxChars/minChars, pick_cut tanpa skor = kandidat
+      terakhir dgn tail >= min), collect_segments (gap_free: gap<=maxGap
+      bridge ke next.start; else word_end+maxGap; terakhir +maxGap clamp
+      video_end; gap<=0 tanpa padding) + SplitConfig. 10 test.
+    - layout.rs: escape_xml, measure_units (replica calc_text_width),
+      word_x_positions (LTR/RTL), BalancedPixelWidth — port penuh
+      BalancedPixelWidthLineSplitter.ts: greedy linesNeeded -> target =
+      min(needed, maxLines) -> splitRecursive (cut di prefix terdekat
+      total/linesLeft, tie = pertama) -> adjustToMinLines (halve line
+      terpanjang, mid=floor(n/2), stop bila n<=1); adjust SELALU jalan
+      walau target<=1 (jebakan: early-return = bug, sudah difix). 9 test.
+    - state.rs: Narration {NotYet,Being,Already} = jendela half-open
+      [start,end); LineSpan = first.start..last.end. 3 test.
+    - recipes.rs: cubic_bezier (bisection 40 iter), ease_entrance =
+      cubic-bezier(0.22,1,0.36,1), RiseIn {distance_em, from_opacity,
+      duration 0.32} -> (opacity, translateY_em); elapsed<0 = keyframe
+      from (fill both). 5 test.
+  * ada direfaktor memakai pipeline+layout (kode test pindah; render/
+    fonts/direction tetap di ada/mod.rs).
+  * elio (template ke-2) di templates/elio/{mod.rs, template.json}:
+    Bebas Neue 400 6.0cqh, ls 0.04em (setelah tiap char termasuk
+    terakhir), lh 1.0, UPPERCASE (measure di text hasil uppercase),
+    word margin 0.13em (line_w = sum(w+2m)), rise-in 0.29em/0.32s
+    delay=word.start, text-shadow 0 0.06em 0.25em #000 -> feDropShadow
+    pada group (σ=blur/2), fill primary/hIGHLIGHT keduanya #ffffff
+    (being = highlight), block center 0.5/0.5 (top = 0.5H - n*lh/2),
+    splitters boundary (default = SENTENCE, terkonfirmasi dari engine)
+    + boundary_score_limit_by_chars 80/4, lineSplitter
+    balanced-pixel-width minLines 2 maxLines 6 maxWidth = round(0.77*W),
+    effects gap_free. LTR-only (Bebas tanpa cakupan RTL).
+  * Fakta baru dari sumber tscaps: DomProbeCanvasTextMeasurer.measure =
+    measureText(uppercase) + utf16len*letterSpacingPx + paddingL+R +
+    marginL+R (DUA margin per kata; marginX = kiri+kanan); gap_free rule
+    eksak; boundary default mode = sentence; rise-in defaults 0.32s +
+    cubic-bezier(0.22,1,0.36,1) + fill both.
+  * Font: bebas-neue-latin-400-normal.ttf (pnpm @fontsource/bebas-neue
+    -> wawoff2) di studio/tplfonts/ttf/ DAN caption-core/assets/;
+    identity 400/Bebas Neue di-assert di test. Studio: FONT_SOURCES +
+    document.fonts.load('400 40px "Bebas Neue"') + <option elio>.
+  * Verifikasi browser (bukti): frame 45 = 2 baris spacing 64.8px,
+    WELCOME/TO opacity 1, RSCAPS 1, STUDIO opacity 0 + y +18.8px (rise
+    sebelum narrasi), block center y 540; frame 34 = RSCAPS opacity
+    0.66 (eased) y+6.4, TO 0.99996 (durasi anim 0.32s > window), STUDIO
+    0; frame 200 = "SHORT." 1 kata 1 baris center cy=540; frame 75 =
+    awal segmen semua opacity 0; fontsReady true; raster PNG OK
+    (170ms); thumbs 10/65/150 benar; regresi v0 (Arial #ffdd57) dan
+    ada (plate+state) tetap jalan. Screenshot tersimpan.
+  * Catatan harness: tab studio lama bisa wedge (Runtime.evaluate
+    timeout) -> list_tabs + close_tab(targetId) lalu new_tab; bisa juga
+    capture_screenshot antrian lama -> retry. Bukan bug app (wasm
+    sehat: readyState complete, apply elio mulus).
+- LANGKAH BERIKUT: batch G1 lanjut — port template berikut dari grouping
+  (kandidat: ezra/ivo/remi/rhea/tito — pola entrance+warna; tambah
+  recipe fade/slide/scale/pop ke recipes.rs per kebutuhan; pisahkan
+  per-family font kunci). Setelah G1: varian warna + styleControls dari
+  template.json, banding frame vs tscaps asli, UBA penuh/Nastaliq,
+  G2 (keyframes sendiri: freya/luna/nova/naya/pepper/sol), G3 letter
+  (butuh unicode-segmentation), G4 filters.svg, G5 media.
+
+- STATUS 2026-10-08 (G1 batch 2): EFFECTS + RECIPES + FONTS + TEMPLATE
+  `tito`/`yuki`/`levi` SELESAI + TERVERIFIKASI. 70/70 test caption-core
+  lolos, 0 warning; wasm rebuilt; 5 template.json (ada, elio, tito,
+  yuki, levi) = copy fakta tscaps (verbatim).
+  * templates/effects.rs (baru): enum Effect {RemovePunctuation,
+    SmartPunctuation, SmartLowercase, CarryQuotes, GapFree} + parse
+    (snake_case type, enabled!=false) + apply urut array. PUNCT(6)=
+    "... . , ; : …", TRAILING_QUOTES(6); regex (?:punct)+(?=(?:quote)*$)
+    end-anchored. SmartPunctuation: ...->…, --->—, quote kontekstual
+    ("->"/" pada batas kata), '->’ (5 titik -> "….."; test expectation
+    di-fix). SmartLowercase: skor1x I+I' uppercase. CarryQuotes 3 pair
+    regex (?:left)([^ ]+) (?:left)(?!$), run >=2. GapFree:
+    maxGapMs=1000. 12 test.
+  * pipeline.rs: TimedWord.display (hasil text-effect), Boundary::Clause
+    (9 basis CLAUSE_ONLY_BASES -> total 95 utk char-limit), SplitConfig.
+    effects (di-parse dari doc; layout pake display; collect_segments
+    gap window CUMA bila GapFree aktif - tscaps mount rule).
+  * recipes.rs (port fakta easing): cubic_bezier bisection + endpoint
+    early-return (x<=0->0, x>=1->1; fix selisih 1.4e-12); easings
+    entrance/DEFAULT ease/ease_out/ease_in_out/scale/snap/settle;
+    helpers interval/which_interval/lerp/progress(f32); resep: RiseIn
+    {dist, from_opacity, duration, ease fn, with()/custom()}, FadeIn,
+    ScaleIn+peak, SlideIn, PopIn, SnapIn, WobbleIn, SettleIn,
+    Bob {0.19em/1.6s ease-in-out, stops 0/-d/0}. 16 test.
+  * elio DOUBLE-MARGIN FIX: measure_word tanpa margin (raw = advance +
+    ls); split_widths (w+2m) utk splitter; word_x_positions/line_w pake
+    raw - keputusan konsistensi: posisi & total line TANPA margin,
+    splitter DENGAN margin.
+  * Font: pnpm add @fontsource/inter; scripts/woff2-to-ttf.mjs (JOBS
+    list); 6 TTF x 2 lokasi: inter 400/600/700/900, anton 400, bungee
+    400 di studio/tplfonts/ttf/ + caption-core/assets/
+    (inter-latin-700-normal.ttf dll). FONT_SOURCES + document.fonts.load
+    (400/600/700/900 Inter, Anton, Bungee) di main.js.
+  * templates/tito/{mod.rs,template.json}: bungee400 3.5cqh ls.02 lh1.55
+    ws.14 char30/7 maxLines2 top/.75, segment fade-in 0.25s + bob word
+    (dist .19em, delay line-local x0.10s), cast-shadow 0.06em/0.11em
+    (tito-cast) + glow rgba(0,0,0,.45) 0.28em (tito-cast-glow), being =
+    #00ffb3, narrated+already=#fff, No effects.
+  * templates/yuki/{mod.rs,template.json}: inter700 2.7cqh lh1.3 ws.13
+    char42/12 top/.75, segment fade-in 0.18s default, outline
+    stroke 0.1em #000 paint-order=stroke, yuki-shadow
+    drop-shadow(0.08em,0.25em, blur/2), fill #fff, No effects.
+  * templates/levi/{mod.rs,template.json}: anton (JSON weight 800 ->
+    embed 400, dicatat di kode), 6.0cqh lh1.0 lineSpacing .09 antar
+    baris, UPPERCASE, textAlign left (center .4/left .04), min4 max8
+    ratio.49 char80/40, effects [GapFree], rise-in PER BARIS
+    0.28s ease-out dist0 from0 delay=LineSpan.start, gradient
+    userSpaceOnUse primary -> primary*0.82 (#d1d1d1 bila #fff) per baris
+    (levi-grad-N), levi-shadow dy.03em s.06em; raw-vs-split width
+    convention sama elio.
+  * templates/mod.rs: modules + dispatch "levi"/"tito"/"yuki";
+    index.html options (urut: ada, elio, levi, tito, yuki).
+  * Verifikasi browser (bukti): fonts check true (Bungee/Inter700/Anton);
+    tito: fade .8336@f4 -> 1.0@f45, url(#tito-cast-glow)+fill #00ffb3,
+    bob y 850.80->847.39 (f45 vs f100); yuki: fade .852@f3, stroke #000
+    w 2.9160001 paint-order stroke, url(#yuki-shadow); levi: opacitas
+    f10 [1,0,0] -> f45 [1,1,0] (line2 mulai tepat 1500ms = token-based
+    spread, opacity 0 di trigger = benar) -> f50 [1,1,.7807],
+    WELCOME/RSCAPS uppercase, url(#levi-grad-0), #d1d1d1, Anton; gap_free
+    probe: doc custom cue 0-1000/2000-3000 di f45 levi MENAMPILKAN teks
+    di gap, tito tidak (mount rule benar); boundary cue elio f74 penuh
+    -> f75 cue2 op0 -> f76 .415 -> f80 .967 (end-exclusive + fade-in).
+    Regresi v0/ada/elio: semua render, 0 NaN. Screenshot: verify-tito/
+    verify-yuki/verify-levi/verify-elio.png (E:\temp\opencode\).
+  * Jebakan harness baru: js() satu global scope -> bungkus IIFE (const
+    f ganda = SyntaxError); capture_screenshot SELALU tulis shot.png
+    (copy dulu sebelum capture berikutnya); stage bisa kosong di screenshot
+    krn race apply+prepare (verify innerHTML dulu, 1s); location.reload
+    utk segarkan options index.html.
+- LANGKAH BERIKUT: batch G1 lanjut - port template berikut dari grouping
+  PLAN (kandidat: ezra/ivo/remi/rhea - pola entrance+warna; tambah
+  recipe per kebutuhan); font berikut via pnpm @fontsource +
+  woff2-to-ttf.mjs (montserrat, caveat, lora, playfair, bricolage,
+  jetbrains-mono, gabarito). Setelah G1: varian warna + styleControls
+  (milestone pakai template.json), banding frame vs tscaps asli, UBA
+  penuh/Nastaliq, G2-G5.
+
+- STATUS 2026-10-09: 41/41 TEMPLATE SELESAI + TERVERIFIKASI BROWSER.
+  * Batch A-D: ivo,remi,rhea,sara,enzo,cleo,hugo,juno,kel,lena,lewis,
+    lyra,mira,noor,otto,tala,theo,vera,anya,zara,nova,pepper,sol;
+    Batch E: kai,loki,naya,freya,iris; F: nyx,pico; G1: luca,luna,milo;
+    G2: selene,pastor; ezra (self-port, unit+render test).
+  * templates/mod.rs: 41 modul + 41 match arm (audit programmatis: select
+    options == match arms, urut alfabet iris<ivo benar, nova kembali).
+  * cargo test -p caption-core: 231 passed / 0 failed; cargo build: 0
+    warning; wasm rebuild `node scripts/build-wasm.mjs` OK.
+  * Browser smoke 13 template tersisa (frame 60 / t=2.00s, doc default):
+    freya texts=3 len=2355; iris texts=1 len=29991 (mask base64);
+    kai 1/1352; loki 3/1743; naya 3/1320; nyx 14/3179 (terminal);
+    pico 15/2740 (editor); luca 3/737; luna 3/508; milo 3/822;
+    selene 3/2453; pastor 1/594; ezra 3/887 -> SEMUA tanpa NaN/undef.
+  * ezra di browser: families [Inter, Playfair Display], font-size
+    38.88 (small) + 81.65 = 2.1x clamp tepat; big word trigger jalan
+    (isolated_word_index pakai leavesScreenAt - word.start, cocok
+    dgn tscaps canStandAlone; cue0 "Welcome to rscaps" -> "rscaps"
+    di layar 833ms >= 800ms pass1).
+  * Screenshot bukti (E:\temp\opencode\): verify-ezra.png (kata besar
+    Playfair), verify-nyx.png (terminal hijau+kursor), verify-pico.png
+    (editor hijau), verify-selene.png (plate+dots).
+  * Deviasi terdokumentasi: emoji effect freya/naya skip (tidak ada font
+    emoji warna); mix-blend difference luca/luna/milo/selene/pastor ->
+    flat white (previewMode omit); .tscaps-video-frame-layer omitted;
+    Anton 800/900 -> 400, lobster 600 -> 400 (face tidak ada).
+  * Jebakan harness M144: chrome default profile butuh klik popup "Allow
+    remote debugging" PER KONEKSI (retry justru membatalkan popup).
+    Solusi tanpa user: dedicated automation Chrome
+    `chrome.exe --remote-debugging-port=9333 --user-data-dir=E:\temp\
+    opencode\chrome-bh-profile` + env BU_CDP_URL=http://127.0.0.1:9333
+    pada tiap panggilan browser-harness (fitur resmi, hindari dialog).
+    Chrome windowless (MainWindowHandle=0) = popup tak muncul sama sekali.
+- LANGKAH BERIKUT: varian warna + styleControls dari template.json;
+    banding frame-by-frame vs tscaps asli (diff gambar); fix script
+    non-Latin (Arabic Nastaliq / Chinese / Hebrew) yg ditunda; export
+    video end-to-end via fframes-native.
+
+- STATUS 2026-10-09 (ezra filter-region spot-check): SELESAI, AMAN.
+  * Pertanyaan: apakah <filter filterUnits="userSpaceOnUse"> pada <text>
+    yang punya transform (slide-in big word translate -1920) ikut
+    bergerak atau tetap di root space (bila tetap = shadow ter-clip)?
+  * Bukti Chrome (canvas pixel probe via browser-harness): teks lokal
+    x=210 dalam region 200..300, transform translate(-200,0) ->
+    left_5_80=1901 px (posisi bergerak), region_200_300=0 (posisi
+    statis kosong) => region IKUT transform.
+  * Bukti engine export (scratch crate E:\temp\opencode\usvg-probe,
+    usvgr+svgr 0.46.1 = versi persis di Cargo.lock fframes):
+    left_5_80=2527, region_200_300=0 => SAMA, region ikut transform.
+  * Struktur ezra di browser terverifikasi: filter+transform di elemen
+    text yang sama; slide big word aktif frame ~44-51 (f48 tx=-440
+    op=.77, f50 tx=-65.6 op=.966, f51 tx=-0.42 settled); screenshot
+    verify-ezra-slide.png.
+  * Kesimpulan: TIDAK perlu ubah kode ezra. Jebakan rust: raw string
+    r#"..."# terpotong oleh sequence "#000 (pakai r##"..."##).

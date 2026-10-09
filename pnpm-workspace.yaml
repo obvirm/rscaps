@@ -1,0 +1,7 @@
+verifyDepsBeforeRun: false
+
+allowBuilds:
+  '@parcel/watcher': false
+  bsdoc: false
+  gentype: false
+  protobufjs: false
