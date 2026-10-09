@@ -50,7 +50,7 @@ pub struct Parsed {
 const FPS: f64 = 30.0;
 const MIN_DURATION_FRAMES: u32 = 900;
 
-pub fn parse(text: &str, format: Format) -> Result<Parsed, String> {
+pub fn parse(text: &str, _format: Format) -> Result<Parsed, String> {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut cues = Vec::new();
     let mut saw_timestamp = false;

@@ -300,9 +300,16 @@ pub fn split_char_limit(
 /// exactly the word span (a frame between two segments renders nothing —
 /// `BatchPlanner` only mounts a segment whose window contains `t`).
 pub fn collect_segments(doc: &crate::CaptionDocument, cfg: &SplitConfig) -> Vec<WindowedSegment> {
-    use crate::templates::stack::{detect_document_direction, resolve_line_direction};
+    use crate::templates::stack::{detect_document_direction, resolve_line_direction, Direction};
 
-    let doc_direction = detect_document_direction(doc);
+    // `params.direction` wins when the user forces LTR/RTL; `"auto"` (the
+    // default) falls back to the strong-char majority vote over the whole
+    // document — matching tscaps' `StrongCharacterMajorityTextDirectionDetector`.
+    let doc_direction = match doc.params.direction.as_str() {
+        "ltr" => Direction::Ltr,
+        "rtl" => Direction::Rtl,
+        _ => detect_document_direction(doc),
+    };
     let mut groups: Vec<Vec<TimedWord>> = Vec::new();
     for cue in &doc.cues {
         let tokens = tokenize(&cue.text);
@@ -607,5 +614,56 @@ mod tests {
             .iter()
             .flat_map(|s| &s.words)
             .all(|w| w.display == w.text));
+    }
+
+    fn mixed_doc(direction: &str) -> crate::CaptionDocument {
+        crate::CaptionDocument {
+            duration_frames: 300,
+            cues: vec![crate::Cue {
+                start_ms: 0,
+                end_ms: 1000,
+                // Latin majority over the whole doc → majority vote would say LTR.
+                text: "hello world rscaps مرحبا".into(),
+            }],
+            params: crate::CaptionParams {
+                direction: direction.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn direction_override_rtl_wins_over_majority_vote() {
+        let doc = mixed_doc("rtl");
+        let segments = collect_segments(&doc, &cfg());
+        assert!(segments.iter().all(|s| s.direction.is_rtl()));
+    }
+
+    #[test]
+    fn direction_override_ltr_wins_over_majority_vote() {
+        // Arabic majority so auto would say RTL; the override forces LTR.
+        let doc = crate::CaptionDocument {
+            cues: vec![crate::Cue {
+                start_ms: 0,
+                end_ms: 1000,
+                text: "مرحبا بالعالم مرحبا hello".into(),
+            }],
+            params: crate::CaptionParams {
+                direction: "ltr".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let segments = collect_segments(&doc, &cfg());
+        assert!(segments.iter().all(|s| !s.direction.is_rtl()));
+    }
+
+    #[test]
+    fn direction_auto_keeps_majority_vote() {
+        let doc = mixed_doc("auto");
+        let segments = collect_segments(&doc, &cfg());
+        // "hello world rscaps" = 15 L chars vs 5 R/AL → LTR.
+        assert!(segments.iter().all(|s| !s.direction.is_rtl()));
     }
 }

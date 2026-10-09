@@ -33,6 +33,13 @@ pub struct CaptionParams {
     pub pop_in_ms: u32,
     #[serde(default = "default_travel_px")]
     pub travel_px: f32,
+    /// Base text direction: `"auto"` (strong-char majority over the whole
+    /// document), `"ltr"`, or `"rtl"`. `"rtl"` is the right knob for Arabic/
+    /// Hebrew content — mixed lines then keep the declared RTL base and the
+    /// word highlight follows spoken order (right→left, jumping across an
+    /// embedded Latin run) instead of flipping the whole line to LTR.
+    #[serde(default = "default_direction")]
+    pub direction: String,
 }
 
 fn default_font_family() -> String {
@@ -59,6 +66,9 @@ fn default_pop_in_ms() -> u32 {
 fn default_travel_px() -> f32 {
     44.0
 }
+fn default_direction() -> String {
+    "auto".to_string()
+}
 
 impl Default for CaptionParams {
     fn default() -> Self {
@@ -71,6 +81,7 @@ impl Default for CaptionParams {
             width_frac: default_width_frac(),
             pop_in_ms: default_pop_in_ms(),
             travel_px: default_travel_px(),
+            direction: default_direction(),
         }
     }
 }

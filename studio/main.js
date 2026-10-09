@@ -19,6 +19,7 @@ const DEFAULT_DOC = {
     width_frac: 0.78,
     pop_in_ms: 250,
     travel_px: 48,
+    direction: "auto",
   },
 };
 
@@ -55,6 +56,7 @@ const els = {
   placeholderNote: $("placeholder-note"),
   templatePicker: $("template-picker"),
   templateSelect: $("template-select"),
+  directionSelect: $("direction-select"),
 };
 
 let bridge;
@@ -401,6 +403,22 @@ els.templateSelect.addEventListener("change", () => {
   applyDocument().catch((err) => setStatus(String(err), true));
 });
 
+// Direction picker: force the base text direction (RTL for Arabic/Hebrew
+// content) so mixed Latin+RTL segments keep the declared base instead of
+// flipping to LTR via the majority vote.
+els.directionSelect.addEventListener("change", () => {
+  try {
+    const doc = JSON.parse(els.doc.value);
+    doc.params = doc.params || {};
+    doc.params.direction = els.directionSelect.value;
+    els.doc.value = JSON.stringify(doc, null, 2);
+  } catch (err) {
+    setStatus(String(err), true);
+    return;
+  }
+  applyDocument().catch((err) => setStatus(String(err), true));
+});
+
 // Keyboard shortcuts (tscaps-style): Space = play/pause, ←/→ = frame step
 window.addEventListener("keydown", (e) => {
   const tag = (e.target.tagName || "").toLowerCase();
@@ -577,7 +595,9 @@ try {
 
   els.doc.value = JSON.stringify(DEFAULT_DOC, null, 2);
   try {
-    els.templateSelect.value = JSON.parse(els.doc.value).template || "";
+    const doc = JSON.parse(els.doc.value);
+    els.templateSelect.value = doc.template || "";
+    els.directionSelect.value = doc.params?.direction || "auto";
   } catch {}
   await applyDocument();
 } catch (err) {

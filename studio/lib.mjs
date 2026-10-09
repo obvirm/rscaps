@@ -42,6 +42,7 @@ export function baseDoc(overrides = {}) {
       width_frac: 0.78,
       pop_in_ms: 250,
       travel_px: 48,
+      direction: "auto",
     },
     ...overrides,
   };
