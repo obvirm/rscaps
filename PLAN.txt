@@ -755,3 +755,19 @@ PORT TEMPLATE — REVISI 2026-10-08 (arah user, MENANG ATAS CATATAN SEBELUMNYA):
     verify-ezra-slide.png.
   * Kesimpulan: TIDAK perlu ubah kode ezra. Jebakan rust: raw string
     r#"..."# terpotong oleh sequence "#000 (pakai r##"..."##).
+
+- STATUS 2026-10-10 (Phase 0: video-first beranda + Svelte 5 studio): SELESAI.
+  * Studio ditulis ulang dgn Svelte 5 (runes) + class store singleton; hash
+    router (#/ home, #/project/:id); IndexedDB dgn store `projects` + `videos`
+    (DB v2) nyimpen blob video sumber.
+  * New Project = pilih file video -> probeVideo (mediabunny) -> dialog
+    ringkasan video read-only (1280x720 . 30 fps . 00:03). Durasi/FPS/canvas
+    semua turunan dari file; field Duration/FPS/Canvas dihapus.
+  * PreviewStage: <video> background (object-cover) di bawah overlay SVG
+    caption transparan; scrub sinkron currentTime; playback video-driven.
+  * Verifikasi browser-harness: probe akurat, editor kebuka (blob+SVG),
+    seekTo(45)->currentTime 1.5s, kartu home punya thumbnail+durasi.
+  * pnpm check = 0 errors; pnpm build:studio sukses; commit a96fbfb.
+  * Catatan: warning "Mediabunny loaded twice" krn fframes bundel mediabunny
+    sendiri + impor probe kita (2 instance terpisah, probe read-only ttp OK).
+  * Dev-only: window.__rscaps = { store } (import.meta.env.DEV) utk debug.
