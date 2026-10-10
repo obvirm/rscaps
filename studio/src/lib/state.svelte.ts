@@ -297,7 +297,13 @@ class StudioState {
           end_ms: Math.max(0, Math.round(s.end * 1000)),
           text: s.text,
         }))
-        .filter((c) => c.text.length > 0 && c.end_ms > c.start_ms);
+        .filter(
+          (c) =>
+            c.end_ms > c.start_ms &&
+            // Drop degenerate cues that are only punctuation/whitespace (e.g. a
+            // lone "." that whisper emits over near-silence).
+            c.text.replace(/[\p{P}\p{S}\s]/gu, "").length > 0,
+        );
       if (cues.length === 0) {
         this.setStatus("no speech detected", true);
         return;
