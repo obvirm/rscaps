@@ -77,6 +77,15 @@ export default defineConfig({
   server: {
     port: 5177,
     strictPort: true,
+    // NOTE: COOP/COEP (crossOriginIsolated) enables SharedArrayBuffer for
+    // onnxruntime-web's threaded wasm, but the threaded build hangs during
+    // multi-worker session init under the Vite dev server, and the detached-
+    // ArrayBuffer issue is fixed in Rust by pre-growing the heap (see
+    // whisper-spike transcribe). Kept off for simplicity.
+    // headers: {
+    //   "Cross-Origin-Opener-Policy": "same-origin",
+    //   "Cross-Origin-Embedder-Policy": "require-corp",
+    // },
   },
   build: {
     outDir: fileURLToPath(new URL("./studio/dist/", import.meta.url)),
