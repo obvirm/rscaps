@@ -1,10 +1,25 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
   import { toggleTheme } from "../lib/theme";
+  import ExportDialog from "./ExportDialog.svelte";
+  import type { ExportProjectRef } from "../lib/types";
 
   let { onBack }: { onBack?: () => void } = $props();
 
   let fileInput: HTMLInputElement;
+  let showExport = $state(false);
+
+  const exportProject = $derived<ExportProjectRef | null>(
+    store.currentId
+      ? {
+          id: store.currentId,
+          name: store.projectName,
+          width: store.videoWidth,
+          height: store.videoHeight,
+          fps: store.fps,
+        }
+      : null,
+  );
 
   async function onFileChange(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -44,7 +59,7 @@
   </button>
 
   <button class="btn" disabled>Save</button>
-  <button class="btn accent" onclick={() => store.exportPng()} title="Download current frame as PNG">Export</button>
+  <button class="btn accent" onclick={() => (showExport = true)} disabled={!store.currentId} title="Export video with burned-in captions">Export</button>
 
   <input
     bind:this={fileInput}
@@ -54,6 +69,10 @@
     onchange={onFileChange}
   />
 </header>
+
+{#if showExport && exportProject}
+  <ExportDialog project={exportProject} onclose={() => (showExport = false)} />
+{/if}
 
 <style>
   .command-bar {

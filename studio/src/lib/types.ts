@@ -145,9 +145,19 @@ export interface ProjectMetadata {
   updatedAt: string;
   thumbnail?: string;
   durationSec: number;
+  fps: number;
   width: number;
   height: number;
   videoName?: string;
+}
+
+// Minimal reference the export dialog needs; ProjectMetadata satisfies it.
+export interface ExportProjectRef {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  fps: number;
 }
 
 export function newProjectId(): string {

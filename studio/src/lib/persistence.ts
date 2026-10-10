@@ -74,6 +74,7 @@ export function toMetadata(p: RscapsProject): ProjectMetadata {
     updatedAt: p.updatedAt,
     thumbnail: p.thumbnail,
     durationSec: (p.doc?.duration_frames || 0) / fps,
+    fps,
     width: p.settings?.width || 1920,
     height: p.settings?.height || 1080,
     videoName: p.videoName,

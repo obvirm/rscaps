@@ -3,9 +3,10 @@
   import { store } from "../lib/state.svelte";
   import { router } from "../lib/router.svelte";
   import { toggleTheme } from "../lib/theme";
-  import { formatTimeShort } from "../lib/types";
+  import { formatTimeShort, type ProjectMetadata } from "../lib/types";
   import { probeVideo, type VideoProbe } from "../lib/video";
   import NewProjectDialog from "./NewProjectDialog.svelte";
+  import ExportDialog from "./ExportDialog.svelte";
 
   let showDialog = $state(false);
   let fileInput: HTMLInputElement;
@@ -14,6 +15,7 @@
   let probing = $state(false);
   let probeError = $state<string | null>(null);
   let openMenuId = $state<string | null>(null);
+  let exportProject = $state<ProjectMetadata | null>(null);
 
   onMount(() => {
     store.refreshProjects();
@@ -28,9 +30,10 @@
     openMenuId = openMenuId === id ? null : id;
   }
 
-  function onExport(id: string, name: string) {
+  function onExport(id: string) {
     closeMenu();
-    store.setStatus(`Export “${name}” — burn-in video not yet available (Phase E)`, false);
+    const project = store.projects.find((p) => p.id === id);
+    if (project) exportProject = project;
   }
 
   function pickVideo() {
@@ -163,7 +166,7 @@
                     {#if openMenuId === p.id}
                       <!-- svelte-ignore a11y_no_static_element_interactions -->
                       <div class="menu" role="menu" tabindex="-1" onclick={(e) => e.stopPropagation()}>
-                        <button class="menu-item" role="menuitem" onclick={() => onExport(p.id, p.name)}>
+                        <button class="menu-item" role="menuitem" onclick={() => onExport(p.id)}>
                           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 1.5v7M4 5.5 7 8.5l3-3" /><path d="M2 9.5v2a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-2" /></svg>
                           <span>Export</span>
                         </button>
@@ -205,6 +208,10 @@
 
 {#if showDialog && pendingVideo && pendingProbe}
   <NewProjectDialog video={pendingVideo} probe={pendingProbe} onclose={() => (showDialog = false)} />
+{/if}
+
+{#if exportProject}
+  <ExportDialog project={exportProject} onclose={() => (exportProject = null)} />
 {/if}
 
 <style>

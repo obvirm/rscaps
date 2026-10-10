@@ -1,5 +1,6 @@
 import { loadBridge, type LoadedBridge } from "./wasm";
 import { transcribeBlob } from "./transcribe";
+import { burnInExport, computeOutputSize, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
 import {
   formatTime,
   formatTimeShort,
@@ -74,6 +75,7 @@ class StudioState {
   model = $state<WhisperModel>("base");
   language = $state("en");
   transcribing = $state(false);
+  exporting = $state(false);
   status = $state("idle");
   statusIsError = $state(false);
   docText = $state("");
@@ -423,6 +425,30 @@ class StudioState {
     return canvas;
   }
 
+  // Render a caption frame onto a transparent canvas at an explicit output size.
+  private async renderFrameToCanvas(
+    frame: number,
+    outWidth: number,
+    outHeight: number,
+  ): Promise<HTMLCanvasElement | null> {
+    if (!this.wasm) return null;
+    const raw = this.wasm.bridge.render_frame(BigInt(frame));
+    if (!raw) return null;
+    const inlined = this.fontFaceCss
+      ? raw.replace(/^<svg[^>]*>/, (m) => `${m}<style>${this.fontFaceCss}</style>`)
+      : raw;
+    const uri = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(inlined);
+    const img = new Image();
+    img.src = uri;
+    await img.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = outWidth;
+    canvas.height = outHeight;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(img, 0, 0, outWidth, outHeight);
+    return canvas;
+  }
+
   async renderRaster(): Promise<void> {
     const t0 = performance.now();
     const canvas = await this.renderToCanvas(this.frame, 1920);
@@ -547,6 +573,77 @@ class StudioState {
       this.downloadBlob(blob, `frame-${this.frame}.png`);
       this.setStatus(`exported frame-${this.frame}.png`);
     }, "image/png");
+  }
+
+  // ── Project export (works from Home without opening the project) ────────
+  async exportProjectBurnIn(
+    projectId: string,
+    opts: { format: ExportFormat; quality: ExportQuality; resolution: ExportResolution },
+  ): Promise<void> {
+    if (this.exporting) return;
+    this.exporting = true;
+    try {
+      await this.bootWasm();
+      if (!this.wasm) throw new Error("wasm not ready");
+      const project = await getProject(projectId);
+      if (!project) throw new Error("project not found");
+      const blob = await loadVideo(projectId);
+      if (!blob) throw new Error("no video found");
+
+      // When exporting the project open in the editor, use the LIVE (possibly
+      // unsaved) document so the export matches what's on screen. Otherwise
+      // fall back to the persisted document (export from Home).
+      const isCurrent = projectId === this.currentId;
+      const docJson = isCurrent ? this.docText : JSON.stringify(project.doc);
+      const fps = (isCurrent ? this.fps : project.settings.fps) || 30;
+      const srcW = (isCurrent ? this.videoWidth : project.settings.width) || 1920;
+      const srcH = (isCurrent ? this.videoHeight : project.settings.height) || 1080;
+
+      // Point the caption bridge at this document so render_frame draws the
+      // right cues regardless of what is open in the editor.
+      this.wasm.setDocumentJson(docJson);
+      await this.wasm.bridge.prepare(fps);
+
+      const { width, height } = computeOutputSize(srcW, srcH, opts.resolution);
+      const out = await burnInExport({
+        videoBlob: blob,
+        sourceWidth: srcW,
+        sourceHeight: srcH,
+        fps,
+        format: opts.format,
+        quality: opts.quality,
+        resolution: opts.resolution,
+        renderCaption: (frame) => this.renderFrameToCanvas(frame, width, height),
+        onProgress: (frac, stage) =>
+          this.setStatus(`${stage} ${(frac * 100).toFixed(0)}%`),
+      });
+      const ext = opts.format === "webm" ? "webm" : "mp4";
+      this.downloadBlob(out, `${project.name || "export"}.${ext}`);
+      this.setStatus(`exported ${project.name}.${ext}`);
+    } catch (err) {
+      console.error(err);
+      this.setStatus(String(err), true);
+    } finally {
+      this.exporting = false;
+    }
+  }
+
+  async exportProjectSubtitle(projectId: string, format: "srt" | "vtt"): Promise<void> {
+    try {
+      await this.bootWasm();
+      if (!this.wasm) throw new Error("wasm not ready");
+      const project = await getProject(projectId);
+      if (!project) throw new Error("project not found");
+      const text = this.wasm.formatSubtitle(JSON.stringify(project.doc.cues), format);
+      this.downloadBlob(
+        new Blob([text], { type: "text/plain;charset=utf-8" }),
+        `${project.name || "captions"}.${format}`,
+      );
+      this.setStatus(`exported ${project.doc.cues.length} cues as .${format}`);
+    } catch (err) {
+      console.error(err);
+      this.setStatus(String(err), true);
+    }
   }
 
   private downloadBlob(blob: Blob, filename: string): void {
