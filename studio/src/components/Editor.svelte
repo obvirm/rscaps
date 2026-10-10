@@ -3,7 +3,6 @@
   import CommandBar from "./CommandBar.svelte";
   import IconRail from "./IconRail.svelte";
   import PreviewStage from "./PreviewStage.svelte";
-  import TimelineDock from "./TimelineDock.svelte";
   import Inspector from "./Inspector.svelte";
   import { store } from "../lib/state.svelte";
   import { router } from "../lib/router.svelte";
@@ -92,7 +91,6 @@
 
       <main class="center-col">
         <PreviewStage />
-        <TimelineDock />
       </main>
 
       <!-- svelte-ignore a11y_no_static_element_interactions -->

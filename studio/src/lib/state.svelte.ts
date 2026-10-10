@@ -3,7 +3,6 @@ import { transcribeBlob, type TranscribeStage } from "./transcribe";
 import { burnInExport, computeOutputSize, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
 import {
   formatTime,
-  formatTimeShort,
   newProjectId,
   type CaptionDocument,
   type Cue,
@@ -126,37 +125,6 @@ class StudioState {
   timeText = $derived(formatTime(this.frame / this.fps));
   durationText = $derived(formatTime(this.durationSec));
   scrubMax = $derived(Math.max(this.durationFrames - 1, 0));
-  playheadPct = $derived(this.durationFrames > 1 ? (this.frame / (this.durationFrames - 1)) * 100 : 0);
-
-  activeCueIndex = $derived.by(() => {
-    const t = (this.frame / this.fps) * 1000;
-    return this.cues.findIndex((c) => t >= c.start_ms && t < c.end_ms);
-  });
-
-  rulerTicks = $derived.by(() => {
-    const niceSteps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
-    const raw = this.durationSec / 6;
-    const step = niceSteps.find((s) => s >= raw) || 900;
-    const ticks: { left: number; label: string }[] = [];
-    for (let s = 0; s <= this.durationSec + 0.001; s += step) {
-      ticks.push({ left: (s / this.durationSec) * 100, label: formatTimeShort(s) });
-    }
-    return ticks;
-  });
-
-  cueChips = $derived.by(() => {
-    return this.cues.map((cue) => {
-      const start = cue.start_ms / 1000;
-      const end = cue.end_ms / 1000;
-      return {
-        text: cue.text,
-        left: (start / this.durationSec) * 100,
-        width: ((end - start) / this.durationSec) * 100,
-        title: `${formatTime(start)} → ${formatTime(end)}`,
-        seekFrame: Math.min(Math.round(start * this.fps), this.durationFrames - 1),
-      };
-    });
-  });
 
   // ── Helpers ─────────────────────────────────────────────────────────────
   setStatus(message: string, isError = false): void {
