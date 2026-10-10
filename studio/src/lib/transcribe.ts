@@ -13,7 +13,11 @@ export interface TranscribeResult {
   text: string;
 }
 
-export type ProgressFn = (stage: string) => void;
+export type ProgressFn = (fraction: number, stage: TranscribeStage) => void;
+
+// Coarse phases of a transcription run, used by the loading overlay to pick
+// its title/subtext. `fraction` is the overall 0→1 progress across all phases.
+export type TranscribeStage = "engine" | "model" | "audio" | "transcribe" | "done";
 
 // The spike engine is compiled for the whisper-base architecture only (6 enc/dec
 // layers, d_model 512, 8 heads, vocab 51865). Other sizes need their own
@@ -57,11 +61,39 @@ function ensureOk(res: Response, url: string): Response {
   return res;
 }
 
+// Fetch a file while reporting byte progress (0→1 within this file). Falls back
+// to an indeterminate `total = 0` when the server omits Content-Length.
+async function fetchBytes(
+  url: string,
+  onFrac: (frac: number) => void,
+): Promise<Uint8Array> {
+  const res = ensureOk(await fetch(url), url);
+  const total = Number(res.headers.get("content-length")) || 0;
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    loaded += value.length;
+    if (total > 0) onFrac(loaded / total);
+  }
+  const out = new Uint8Array(loaded);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+
 async function loadWhisper(model: WhisperModel, onProgress: ProgressFn): Promise<WhisperModule> {
   if (cached) return cached;
   if (loading) return loading;
   loading = (async () => {
-    onProgress("loading engine…");
+    onProgress(0.02, "engine");
     const pkgUrl = "/wpkg/whisper_spike.js";
     const mod = (await import(/* @vite-ignore */ pkgUrl)) as WhisperModule;
     await mod.default("/wpkg/whisper_spike_bg.wasm");
@@ -70,18 +102,21 @@ async function loadWhisper(model: WhisperModel, onProgress: ProgressFn): Promise
     const g = globalThis as { ort?: { env?: { wasm?: { numThreads?: number } } } };
     if (g.ort?.env?.wasm) g.ort.env.wasm.numThreads = 1;
 
-    onProgress(`loading ${model} model…`);
+    onProgress(0.05, "model");
     const base = `/models/whisper-${model}/`;
-    const encUrl = base + "encoder_model.onnx";
-    const decUrl = base + "decoder_model_merged.onnx";
-    const tokUrl = base + "tokenizer.json";
-    const [enc, dec, tok] = await Promise.all([
-      fetch(encUrl).then((r) => ensureOk(r, encUrl)).then((r) => r.arrayBuffer()),
-      fetch(decUrl).then((r) => ensureOk(r, decUrl)).then((r) => r.arrayBuffer()),
-      fetch(tokUrl).then((r) => ensureOk(r, tokUrl)).then((r) => r.text()),
-    ]);
-    await mod.load_encoder(new Uint8Array(enc));
-    await mod.load_decoder(new Uint8Array(dec));
+    // Fetch sequentially with byte progress so the bar moves smoothly during a
+    // first-run download (encoder ~23 MB, decoder ~54 MB).
+    const enc = await fetchBytes(base + "encoder_model.onnx", (f) =>
+      onProgress(0.05 + f * 0.13, "model"),
+    );
+    const dec = await fetchBytes(base + "decoder_model_merged.onnx", (f) =>
+      onProgress(0.18 + f * 0.1, "model"),
+    );
+    const tokRes = ensureOk(await fetch(base + "tokenizer.json"), base + "tokenizer.json");
+    const tok = await tokRes.text();
+    onProgress(0.29, "model");
+    await mod.load_encoder(enc);
+    await mod.load_decoder(dec);
     mod.load_tokenizer(tok);
     cached = mod;
     return mod;
@@ -112,11 +147,14 @@ export async function transcribeBlob(
   }
   const mod = await loadWhisper(model, onProgress);
 
-  onProgress("decoding audio…");
+  onProgress(0.32, "audio");
   const audio = await decodeAudioTo16kMono(blob);
   const samples = audio.samples;
   const totalSamples = samples.length;
-  if (totalSamples === 0) return { segments: [], text: "" };
+  if (totalSamples === 0) {
+    onProgress(1, "done");
+    return { segments: [], text: "" };
+  }
 
   const langId = BigInt(langToTokenId(language));
   const segments: TranscribeSegment[] = [];
@@ -130,7 +168,7 @@ export async function transcribeBlob(
     // Pad the final short window to at least 1 sample so the mel has signal.
     const chunk = window.length < 1 ? new Float32Array(1) : window;
 
-    onProgress(`transcribing ${i + 1}/${totalChunks}…`);
+    onProgress(0.4 + (i / totalChunks) * 0.58, "transcribe");
     const offsetSec = start / SAMPLE_RATE;
     const windowDur = chunk.length / SAMPLE_RATE;
 
@@ -153,6 +191,6 @@ export async function transcribeBlob(
     if (parsed.text.trim()) texts.push(parsed.text.trim());
   }
 
-  onProgress("done");
+  onProgress(1, "done");
   return { segments, text: texts.join(" ").trim() };
 }

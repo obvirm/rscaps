@@ -1,3 +1,6 @@
+// Must be first: patches console.error before any module (incl. mediabunny /
+// fframes) loads, to silence the benign mediabunny double-load warning.
+import "./lib/quiet";
 import { mount } from "svelte";
 import "./app.css";
 import App from "./App.svelte";

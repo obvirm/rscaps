@@ -1,5 +1,5 @@
 import { loadBridge, type LoadedBridge } from "./wasm";
-import { transcribeBlob } from "./transcribe";
+import { transcribeBlob, type TranscribeStage } from "./transcribe";
 import { burnInExport, computeOutputSize, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
 import {
   formatTime,
@@ -36,6 +36,16 @@ export interface NewProjectOptions {
   width: number;
   height: number;
 }
+
+// Short status-bar text per transcription phase (the full-screen overlay shows
+// richer copy; this is the one-line command-bar summary).
+const STAGE_STATUS: Record<TranscribeStage, string> = {
+  engine: "loading engine…",
+  model: "loading model…",
+  audio: "decoding audio…",
+  transcribe: "transcribing…",
+  done: "done",
+};
 
 const DEFAULT_PARAMS: CaptionDocument["params"] = {
   font_family: "Arial",
@@ -75,6 +85,8 @@ class StudioState {
   model = $state<WhisperModel>("base");
   language = $state("en");
   transcribing = $state(false);
+  transcribeFraction = $state(0);
+  transcribeStage = $state<TranscribeStage>("engine");
   exporting = $state(false);
   status = $state("idle");
   statusIsError = $state(false);
@@ -291,15 +303,19 @@ class StudioState {
   async transcribeCurrent(): Promise<void> {
     if (!this.currentId || this.transcribing) return;
     this.transcribing = true;
+    this.transcribeFraction = 0;
+    this.transcribeStage = "engine";
     try {
       const blob = this.videoBlob ?? (await loadVideo(this.currentId)) ?? null;
       if (!blob) {
         this.setStatus("no video found to transcribe", true);
         return;
       }
-      const result = await transcribeBlob(blob, this.model, this.language, (stage) =>
-        this.setStatus(stage),
-      );
+      const result = await transcribeBlob(blob, this.model, this.language, (fraction, stage) => {
+        this.transcribeFraction = fraction;
+        this.transcribeStage = stage;
+        this.setStatus(STAGE_STATUS[stage] ?? stage);
+      });
       const cues: Cue[] = result.segments
         .map((s) => ({
           start_ms: Math.max(0, Math.round(s.start * 1000)),
