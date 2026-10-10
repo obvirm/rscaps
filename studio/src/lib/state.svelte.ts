@@ -95,6 +95,9 @@ class StudioState {
   private playStartFrame = 0;
   private saveTimer = 0;
   private videoEl: HTMLVideoElement | null = null;
+  // Raw blob of the currently loaded video, kept in memory so export and
+  // transcription don't depend on a fresh IndexedDB read succeeding.
+  private videoBlob: Blob | null = null;
   private objectUrl: string | null = null;
 
   // ── Derived ─────────────────────────────────────────────────────────────
@@ -205,6 +208,7 @@ class StudioState {
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
     this.objectUrl = URL.createObjectURL(blob);
     this.videoUrl = this.objectUrl;
+    this.videoBlob = blob;
   }
 
   attachVideoElement(el: HTMLVideoElement | null): void {
@@ -277,7 +281,10 @@ class StudioState {
       }
     }
     await this.applyDocument();
-    this.setStatus(`opened “${project.name}”`);
+    this.setStatus(
+      blob ? `opened “${project.name}”` : "source video missing — re-import the video file",
+      !blob,
+    );
   }
 
   // ── Transcription ───────────────────────────────────────────────────────
@@ -285,7 +292,7 @@ class StudioState {
     if (!this.currentId || this.transcribing) return;
     this.transcribing = true;
     try {
-      const blob = await loadVideo(this.currentId);
+      const blob = this.videoBlob ?? (await loadVideo(this.currentId)) ?? null;
       if (!blob) {
         this.setStatus("no video found to transcribe", true);
         return;
@@ -587,13 +594,20 @@ class StudioState {
       if (!this.wasm) throw new Error("wasm not ready");
       const project = await getProject(projectId);
       if (!project) throw new Error("project not found");
-      const blob = await loadVideo(projectId);
-      if (!blob) throw new Error("no video found");
 
-      // When exporting the project open in the editor, use the LIVE (possibly
-      // unsaved) document so the export matches what's on screen. Otherwise
-      // fall back to the persisted document (export from Home).
+      // When exporting the project open in the editor, prefer the in-memory
+      // video blob (already loaded on screen) over a fresh IndexedDB read, and
+      // use the LIVE (possibly unsaved) document so the export matches what's
+      // on screen. Otherwise fall back to the persisted doc + stored video.
       const isCurrent = projectId === this.currentId;
+      let blob: Blob | null = isCurrent ? this.videoBlob : null;
+      if (!blob) blob = (await loadVideo(projectId)) ?? null;
+      if (!blob) {
+        throw new Error(
+          "source video missing for this project — re-import the video file to export",
+        );
+      }
+
       const docJson = isCurrent ? this.docText : JSON.stringify(project.doc);
       const fps = (isCurrent ? this.fps : project.settings.fps) || 30;
       const srcW = (isCurrent ? this.videoWidth : project.settings.width) || 1920;

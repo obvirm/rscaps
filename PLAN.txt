@@ -771,3 +771,24 @@ PORT TEMPLATE — REVISI 2026-10-08 (arah user, MENANG ATAS CATATAN SEBELUMNYA):
   * Catatan: warning "Mediabunny loaded twice" krn fframes bundel mediabunny
     sendiri + impor probe kita (2 instance terpisah, probe read-only ttp OK).
   * Dev-only: window.__rscaps = { store } (import.meta.env.DEV) utk debug.
+- STATUS 2026-10-10 (Phase E: burn-in video export dialog): SELESAI + terverifikasi.
+  * export.ts burnInExport (mediabunny): decode frame sumber -> komposit overlay
+    caption dari render_frame (Rust) -> re-encode CanvasSource -> salin audio
+    AudioSampleSource. mp4=avc+aac, webm=vp9+opus; ukuran output ikut pilihan
+    resolution (keep/1080/720/480, tanpa upscale).
+  * ExportDialog.svelte (Resolution/Format/Quality/Export subtitles instead)
+    dipakai BERSAMA dari menu kartu Home DAN tombol Export di editor
+    (CommandBar) — satu dialog, satu jalur output.
+  * Editor "Export" sebelumnya menyesatkan (download 1 frame PNG via
+    exportPng); kini buka ExportDialog. exportProjectBurnIn pakai doc LIVE saat
+    export project yang sedang terbuka (cocok dgn edit unsaved), fallback doc
+    tersimpan saat export dari Home.
+  * Verifikasi: mp4 hasil valid (ffprobe: h264 High 1280x720 30fps + aac LC,
+    identik profile/level dgn source); caption ke-burn (PSNR ~24dB vs export
+    tanpa caption); tombol Export editor ketemu+enabled, klik->dialog
+    (Resolution + Export subtitles instead tampil). Native <video> timeout di
+    browser-harness = quirk decoder headless, BUKAN file rusak.
+  * pnpm check = 0 errors; build:studio sukses; commit 96fbc9b.
+  * Catatan: jalur render v0 (doc TANPA template) menghasilkan body kosong
+    (text_break_lines tak menggambar); project asli selalu pakai template jadi
+    tak terpengaruh. Export subtitles instead / .srt / .vtt tetap tersedia.
