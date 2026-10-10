@@ -3,6 +3,7 @@
   import { router } from "../lib/router.svelte";
   import { TEMPLATES } from "../lib/templates";
   import {
+    WHISPER_LANGUAGES,
     WHISPER_MODELS,
     formatTimeShort,
     type Direction,
@@ -23,6 +24,7 @@
   let direction = $state<Direction>("auto");
   let backend = $state<WhisperBackend>("cpu");
   let model = $state<WhisperModel>("base");
+  let language = $state("en");
   let advancedOpen = $state(false);
   let creating = $state(false);
   let nameInput: HTMLInputElement;
@@ -55,7 +57,9 @@
     try {
       const id = await createProject();
       onclose();
-      router.openProject(id);
+      await router.openProject(id);
+      store.language = language;
+      void store.transcribeCurrent();
     } catch (err) {
       store.setStatus(String(err), true);
     } finally {
@@ -157,6 +161,16 @@
             {/each}
           </select>
           <p class="hint">Larger models give better accuracy but take longer to download and run.</p>
+        </div>
+
+        <div class="field">
+          <label class="label" for="np-language">Language</label>
+          <select id="np-language" class="select" bind:value={language}>
+            {#each WHISPER_LANGUAGES as l (l.id)}
+              <option value={l.id}>{l.label}</option>
+            {/each}
+          </select>
+          <p class="hint">Spoken language of the video. Pick the right one for best accuracy.</p>
         </div>
 
         <div class="field">

@@ -29,9 +29,9 @@ function log(msg, cls) {
 
 async function main() {
   try {
-    const pkgUrl = "/wpkg/whisper_spike.js";
+    const pkgUrl = "/wpkg/whisper_spike.js?cb=" + Date.now();
     const wasm = await import(/* @vite-ignore */ pkgUrl);
-    await wasm.default();
+    await wasm.default("/wpkg/whisper_spike_bg.wasm?cb=" + Date.now());
     log("wasm module loaded");
     await wasm.init();
     log("ort-web backend init ok");
@@ -84,8 +84,9 @@ async function main() {
 
     // Transcribe WITHOUT timestamps (simplest correctness check).
     const EN = 50259n, TRANSCRIBE = 50359n;
+    const dur = audio.durationSec;
     const t1 = performance.now();
-    const rawNoTs = await wasm.transcribe(hidden, EN, TRANSCRIBE, false, 128);
+    const rawNoTs = await wasm.transcribe(hidden, EN, TRANSCRIBE, false, 128, dur);
     const tNoTs = performance.now() - t1;
     const noTs = JSON.parse(rawNoTs);
     log(`--- no-timestamps (${tNoTs.toFixed(0)}ms) ---`);
@@ -94,11 +95,12 @@ async function main() {
 
     // Transcribe WITH timestamps.
     const t2 = performance.now();
-    const rawTs = await wasm.transcribe(hidden, EN, TRANSCRIBE, true, 128);
+    const rawTs = await wasm.transcribe(hidden, EN, TRANSCRIBE, true, 128, dur);
     const tTs = performance.now() - t2;
     const ts = JSON.parse(rawTs);
     log(`--- timestamps (${tTs.toFixed(0)}ms) ---`);
     log(`TEXT: "${ts.text}"`);
+    log(`TOKENS: ${JSON.stringify(ts.tokens)}`);
     log(`SEGMENTS (${ts.segments.length}):`);
     for (const s of ts.segments) log(`  [${s.start.toFixed(2)}→${s.end.toFixed(2)}] ${s.text}`);
 

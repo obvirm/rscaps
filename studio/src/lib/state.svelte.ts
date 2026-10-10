@@ -1,4 +1,5 @@
 import { loadBridge, type LoadedBridge } from "./wasm";
+import { transcribeBlob } from "./transcribe";
 import {
   formatTime,
   formatTimeShort,
@@ -71,6 +72,8 @@ class StudioState {
   videoName = $state<string | null>(null);
   backend = $state<WhisperBackend>("cpu");
   model = $state<WhisperModel>("base");
+  language = $state("en");
+  transcribing = $state(false);
   status = $state("idle");
   statusIsError = $state(false);
   docText = $state("");
@@ -273,6 +276,46 @@ class StudioState {
     }
     await this.applyDocument();
     this.setStatus(`opened “${project.name}”`);
+  }
+
+  // ── Transcription ───────────────────────────────────────────────────────
+  async transcribeCurrent(): Promise<void> {
+    if (!this.currentId || this.transcribing) return;
+    this.transcribing = true;
+    try {
+      const blob = await loadVideo(this.currentId);
+      if (!blob) {
+        this.setStatus("no video found to transcribe", true);
+        return;
+      }
+      const result = await transcribeBlob(blob, this.model, this.language, (stage) =>
+        this.setStatus(stage),
+      );
+      const cues: Cue[] = result.segments
+        .map((s) => ({
+          start_ms: Math.max(0, Math.round(s.start * 1000)),
+          end_ms: Math.max(0, Math.round(s.end * 1000)),
+          text: s.text,
+        }))
+        .filter((c) => c.text.length > 0 && c.end_ms > c.start_ms);
+      if (cues.length === 0) {
+        this.setStatus("no speech detected", true);
+        return;
+      }
+      this.updateDoc((doc) => {
+        doc.cues = cues;
+      });
+      this.frame = 0;
+      await this.applyDocument();
+      await this.saveCurrent();
+      await this.refreshProjects();
+      this.setStatus(`transcribed ${cues.length} cue${cues.length === 1 ? "" : "s"}`);
+    } catch (err) {
+      console.error(err);
+      this.setStatus(String(err), true);
+    } finally {
+      this.transcribing = false;
+    }
   }
 
   async saveCurrent(): Promise<void> {

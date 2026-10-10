@@ -81,6 +81,44 @@ export const WHISPER_MODELS: { id: WhisperModel; label: string }[] = [
   { id: "large", label: "Large — ~1.5 GB" },
 ];
 
+// Whisper language token ids run in a fixed alphabetical order starting at
+// <|en|> = 50259. This is that order (index 0 = en). We expose a curated
+// subset in the UI but map by index so any code resolves correctly.
+const WHISPER_LANG_ORDER =
+  "en zh de es ru ko fr ja pt tr pl ca nl ar sv it id hi fi vi he uk el ms cs ro da hu ta no th ur hr bg lt la mi ml cy sk te fa lv bn sr az sl kn et mk br eu hy ne mn bs kk sq sw gl mr pa si km sn yo so af oc ka be tg sd gu am yi lo uz fo ht ps tk nn mt sa lb my bo tl mg as tt haw ln ha ba jw su yue".split(
+    " ",
+  );
+
+export const WHISPER_LANGUAGES: { id: string; label: string }[] = [
+  { id: "en", label: "English" },
+  { id: "id", label: "Indonesian" },
+  { id: "ms", label: "Malay" },
+  { id: "ar", label: "Arabic" },
+  { id: "zh", label: "Chinese" },
+  { id: "ja", label: "Japanese" },
+  { id: "ko", label: "Korean" },
+  { id: "hi", label: "Hindi" },
+  { id: "ur", label: "Urdu" },
+  { id: "fa", label: "Persian" },
+  { id: "he", label: "Hebrew" },
+  { id: "tr", label: "Turkish" },
+  { id: "ru", label: "Russian" },
+  { id: "es", label: "Spanish" },
+  { id: "fr", label: "French" },
+  { id: "de", label: "German" },
+  { id: "pt", label: "Portuguese" },
+  { id: "it", label: "Italian" },
+  { id: "nl", label: "Dutch" },
+  { id: "pl", label: "Polish" },
+  { id: "vi", label: "Vietnamese" },
+  { id: "th", label: "Thai" },
+];
+
+export function langToTokenId(code: string): number {
+  const idx = WHISPER_LANG_ORDER.indexOf(code);
+  return idx >= 0 ? 50259 + idx : 50259; // default <|en|>
+}
+
 export interface ProjectSettings {
   fps: number;
   width: number;
