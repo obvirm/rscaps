@@ -792,3 +792,13 @@ PORT TEMPLATE — REVISI 2026-10-08 (arah user, MENANG ATAS CATATAN SEBELUMNYA):
   * Catatan: jalur render v0 (doc TANPA template) menghasilkan body kosong
     (text_break_lines tak menggambar); project asli selalu pakai template jadi
     tak terpengaruh. Export subtitles instead / .srt / .vtt tetap tersedia.
+  * (2026-10-10) Transcription loading overlay + suppress warning Mediabunny.
+    TranscribeOverlay.svelte: full-screen (persen + bar progress + salinan
+    per-tahap) muncul saat store.transcribing. ProgressFn jadi (fraction,
+    stage); download model pakai byte-progress (encoder ~23MB, decoder ~54MB)
+    supaya bar jalan saat first-run. State: transcribeFraction/transcribeStage.
+    quiet.ts (import paling atas di main.ts) filter console.error "Mediabunny
+    was loaded twice" dari copy @fframes/editor — TANPA sentuh HTML (TS murni).
+    Verifikasi browser: quietActive=true, overlayPresent=true, pct="57%",
+    title/sub tahap transcribe benar. pnpm check=0 errors; build sukses;
+    commit ea0d857.
