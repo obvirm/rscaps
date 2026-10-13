@@ -1,6 +1,7 @@
 {
   "name": "Naya",
   "category": "viral",
+  "galleryOrder": 4,
   "variants": [
     { "label": "Yellow", "overrides": { "highlight-color": "#ffff00" } },
     { "label": "Cyan", "overrides": { "highlight-color": "#00e5ff" } },

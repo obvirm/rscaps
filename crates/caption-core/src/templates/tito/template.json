@@ -1,6 +1,7 @@
 {
   "name": "Tito",
   "category": "viral",
+  "galleryOrder": 5,
   "variants": [
     { "label": "Mint", "overrides": { "highlight-color": "#00ffb3" } },
     { "label": "Gold", "overrides": { "highlight-color": "#ffd700" } },

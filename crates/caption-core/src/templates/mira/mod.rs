@@ -191,9 +191,10 @@ pub fn render<'a>(
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
     let stroke_px = OUTLINE_THICKNESS_EM * fs;
 
+    let font_family_attr = stack::svg_font_family(FONT);
     let mut words_svg = format!(
         "<g transform=\"translate(0,{ty})\" opacity=\"{opacity}\">\
-         <g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
+         <g font-family=\"{font_family_attr}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
          letter-spacing=\"{ls_px}\" stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
          paint-order=\"stroke\" filter=\"url(#mira-shadow)\">"
     );
@@ -212,7 +213,7 @@ pub fn render<'a>(
             let family_attr = if *family == FONT {
                 String::new()
             } else {
-                format!(" font-family=\"{family}\"")
+                format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr}>{text}</text>"

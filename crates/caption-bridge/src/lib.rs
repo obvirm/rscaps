@@ -33,3 +33,17 @@ pub fn parse_subtitle(text: &str, format: &str) -> Result<String, JsValue> {
 pub fn format_subtitle(cues_json: &str, format: &str) -> Result<String, JsValue> {
     caption_core::format_subtitle_json(cues_json, format).map_err(|err| JsValue::from_str(&err))
 }
+
+/// The one template catalog: JSON `[{"id": "ada", "label": "Ada"}, …]`.
+/// Consumers must show this instead of hardcoding their own template list.
+#[wasm_bindgen]
+pub fn template_catalog_json() -> String {
+    caption_core::template_catalog_json()
+}
+
+/// Canonical empty document as JSON (default params, no cues). The one
+/// source of caption defaults for every consumer.
+#[wasm_bindgen]
+pub fn default_document_json() -> String {
+    caption_core::default_document_json()
+}

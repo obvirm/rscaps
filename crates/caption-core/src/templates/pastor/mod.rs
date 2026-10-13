@@ -280,8 +280,9 @@ pub fn render<'a>(
         word_shadow_filter(shadow_copies, shadow_dy, shadow_std)
     );
 
+    let svg_font_attr = stack::svg_font_family(&svg_font);
     let mut words_svg = format!(
-        "<g font-family=\"{svg_font}\" font-weight=\"{font_weight}\" font-size=\"{fs}\" \
+        "<g font-family=\"{svg_font_attr}\" font-weight=\"{font_weight}\" font-size=\"{fs}\" \
          letter-spacing=\"{ls_px}\" fill=\"{PRIMARY}\">"
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
@@ -319,7 +320,7 @@ pub fn render<'a>(
             let family_attr = if *family == svg_font {
                 String::new()
             } else {
-                format!(" font-family=\"{family}\"")
+                format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#pastor-word)\"{family_attr}>{text}</text>"

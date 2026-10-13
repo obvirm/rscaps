@@ -250,8 +250,9 @@ pub fn render<'a>(
          <g clip-path=\"url(#selene-clip)\">{hairlines}</g>"
     );
 
+    let font_family_attr = stack::svg_font_family(FONT);
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
+        "<g font-family=\"{font_family_attr}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
          letter-spacing=\"{ls_px}\" fill=\"{PRIMARY}\">"
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
@@ -269,7 +270,7 @@ pub fn render<'a>(
             let family_attr = if *family == FONT {
                 String::new()
             } else {
-                format!(" font-family=\"{family}\"")
+                format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#selene-word)\"{family_attr}>{text}</text>"

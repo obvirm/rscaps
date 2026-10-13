@@ -1,6 +1,7 @@
 {
   "name": "Zara",
   "category": "viral",
+  "galleryOrder": 12,
   "typography": {
     "fontStack": "anton",
     "fontWeight": 400,

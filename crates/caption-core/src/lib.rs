@@ -42,29 +42,34 @@ pub struct CaptionParams {
     pub direction: String,
 }
 
+// ── Canonical defaults ─────────────────────────────────────────────────────
+// This is the ONE place default caption params live. Consumers (studio UIs,
+// other apps) must obtain them via `default_document_json()` / the wasm
+// bridge instead of hardcoding their own copy — a second set of defaults is
+// a guarantee of drift.
 fn default_font_family() -> String {
-    "Arial Black".to_string()
+    "Arial".to_string()
 }
 fn default_font_size() -> f32 {
-    96.0
+    110.0
 }
 fn default_font_weight() -> u16 {
-    700
+    400
 }
 fn default_color() -> String {
-    "#ffffff".to_string()
+    "#ffdd57".to_string()
 }
 fn default_y_frac() -> f32 {
-    0.82
+    0.78
 }
 fn default_width_frac() -> f32 {
-    0.8
+    0.78
 }
 fn default_pop_in_ms() -> u32 {
-    220
+    250
 }
 fn default_travel_px() -> f32 {
-    44.0
+    48.0
 }
 fn default_direction() -> String {
     "auto".to_string()
@@ -119,19 +124,19 @@ static DOC: OnceLock<RwLock<CaptionDocument>> = OnceLock::new();
 // BreakLinesOpts needs &'a str (tied to the frame context lifetime), so the
 // dynamic family/color strings are leaked once per document update instead of
 // being borrowed from the document lock guard.
-static LIVE_FONT_FAMILY: RwLock<&'static str> = RwLock::new("Arial Black");
-static LIVE_TEXT_COLOR: RwLock<&'static str> = RwLock::new("#ffffff");
+static LIVE_FONT_FAMILY: RwLock<&'static str> = RwLock::new("Arial");
+static LIVE_TEXT_COLOR: RwLock<&'static str> = RwLock::new("#ffdd57");
 
 fn leak_str(value: &str) -> &'static str {
     Box::leak(value.to_string().into_boxed_str())
 }
 
 fn live_family() -> &'static str {
-    LIVE_FONT_FAMILY.read().map(|guard| *guard).unwrap_or("Arial Black")
+    LIVE_FONT_FAMILY.read().map(|guard| *guard).unwrap_or("Arial")
 }
 
 fn live_color() -> &'static str {
-    LIVE_TEXT_COLOR.read().map(|guard| *guard).unwrap_or("#ffffff")
+    LIVE_TEXT_COLOR.read().map(|guard| *guard).unwrap_or("#ffdd57")
 }
 
 
@@ -184,6 +189,20 @@ pub fn format_subtitle_json(cues_json: &str, format: &str) -> Result<String, Str
     let cues: Vec<Cue> =
         serde_json::from_str(cues_json).map_err(|err| format!("invalid cues: {err}"))?;
     Ok(srt::format(&cues, format))
+}
+
+/// Canonical empty document as JSON: default params, no cues, no template.
+///
+/// Consumers build new projects from this instead of hardcoding their own
+/// defaults — `CaptionParams::default()` above is the single source.
+pub fn default_document_json() -> String {
+    serde_json::to_string(&CaptionDocument::default()).expect("default document serializes")
+}
+
+/// Re-export of [`templates::template_catalog_json`] — the one template
+/// catalog (`[{"id", "label"}, …]`) consumers must use.
+pub fn template_catalog_json() -> String {
+    templates::template_catalog_json()
 }
 
 #[derive(Debug, Default)]

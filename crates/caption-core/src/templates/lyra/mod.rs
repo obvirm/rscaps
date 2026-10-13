@@ -216,8 +216,9 @@ pub fn render<'a>(
     let shade1_std = SHADE1_BLUR_EM * fs / 2.0;
     let shade2_std = SHADE2_BLUR_EM * fs / 2.0;
 
+    let font_family_attr = stack::svg_font_family(FONT);
     let mut words_svg = format!(
-        "<g filter=\"url(#lyra-shade)\" font-family=\"{FONT}\" \
+        "<g filter=\"url(#lyra-shade)\" font-family=\"{font_family_attr}\" \
          font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" letter-spacing=\"{ls_px}\">"
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
@@ -235,7 +236,7 @@ pub fn render<'a>(
             let family_attr = if *family == FONT {
                 String::new()
             } else {
-                format!(" font-family=\"{family}\"")
+                format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"url(#lyra-grad)\"{family_attr}>{text}</text>"

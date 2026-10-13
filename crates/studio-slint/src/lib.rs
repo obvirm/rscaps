@@ -674,13 +674,6 @@ const WHISPER_LANG_ORDER: &str = "en zh de es ru ko fr ja pt tr pl ca nl ar sv i
     // (NO_SPEECH_DROP retired with the gate at the chunk filter.)
     const SINGLE_SEG_DROP: f64 = -0.6;
 
-const TEMPLATE_IDS: [&str; 41] = [
-    "ada", "anya", "cleo", "elio", "enzo", "ezra", "freya", "hugo", "iris", "ivo", "juno", "kai",
-    "kel", "lena", "levi", "lewis", "loki", "luca", "luna", "lyra", "milo", "mira", "naya", "noor",
-    "nova", "nyx", "otto", "pastor", "pepper", "pico", "remi", "rhea", "sara", "selene", "sol",
-    "tala", "theo", "tito", "vera", "yuki", "zara",
-];
-
 fn lang_token_id(code: &str) -> i64 {
     let idx = WHISPER_LANG_ORDER
         .split(' ')
@@ -690,82 +683,39 @@ fn lang_token_id(code: &str) -> i64 {
     50259 + idx
 }
 
+// Template gallery + id mapping — derived from caption-core's generated
+// registry (src/templates/<id>/template.json via build.rs). The 1-based
+// index used by the UI is the position in that registry (alphabetical by
+// folder name), matching the old hardcoded TEMPLATE_IDS order.
+// "viral" order follows template.json `galleryOrder`; other sections are
+// alphabetical by label (same as before).
+
 fn template_id(idx: i32) -> String {
     if idx <= 0 {
         return String::new();
     }
-    TEMPLATE_IDS
+    caption_core::templates::template_catalog()
         .get(idx as usize - 1)
-        .copied()
-        .unwrap_or("")
-        .to_string()
+        .map(|entry| entry.id.to_string())
+        .unwrap_or_default()
 }
 
-// Galeri template (paritas tscaps, data dari template.json kita, MIT):
-// seksi + nama tampil + idx nyata ke TEMPLATE_IDS (1-based; 0 = none).
-// Urutan VIRAL mengikuti builtin tscaps (Loki, Pepper, lewis, ...),
-// seksi lain alfabetis.
-const TPL_VIRAL: [(i32, &str); 12] = [
-    (17, "Loki"),
-    (29, "Pepper"),
-    (16, "Lewis"),
-    (23, "Naya"),
-    (38, "Tito"),
-    (11, "Juno"),
-    (7, "Freya"),
-    (31, "Remi"),
-    (10, "Ivo"),
-    (36, "Tala"),
-    (12, "Kai"),
-    (41, "Zara"),
-];
-const TPL_MODERN: [(i32, &str); 10] = [
-    (3, "Cleo"),
-    (5, "Enzo"),
-    (8, "Hugo"),
-    (22, "Mira"),
-    (24, "Noor"),
-    (25, "Nova"),
-    (32, "Rhea"),
-    (33, "Sara"),
-    (34, "Selene"),
-    (35, "Sol"),
-];
-const TPL_CLASSIC: [(i32, &str); 7] = [
-    (1, "Ada"),
-    (2, "Anya"),
-    (13, "Kel"),
-    (27, "Otto"),
-    (37, "Theo"),
-    (39, "Vera"),
-    (40, "Yuki"),
-];
-const TPL_KEY: [(i32, &str); 7] = [
-    (4, "Elio"),
-    (6, "Ezra"),
-    (15, "Levi"),
-    (18, "Luca"),
-    (19, "Luna"),
-    (21, "Milo"),
-    (28, "Pastor"),
-];
-const TPL_LAB: [(i32, &str); 5] = [
-    (9, "Iris"),
-    (14, "Lena"),
-    (20, "Lyra"),
-    (26, "Nyx"),
-    (30, "Pico"),
-];
-
-fn tpl_items(sec: &[(i32, &str)], query: &str) -> Vec<TemplateItem> {
+fn section_items(section: &str, query: &str) -> Vec<TemplateItem> {
+    let mut entries: Vec<(usize, &caption_core::templates::TemplateEntry)> =
+        caption_core::templates::template_catalog()
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.category == section)
+            .collect();
+    entries.sort_by_key(|(_, entry)| (entry.gallery_order.unwrap_or(u32::MAX), entry.label));
     let q = query.to_lowercase();
-    sec.iter()
+    entries
+        .into_iter()
+        .filter(|(_, entry)| q.is_empty() || entry.label.to_lowercase().contains(&q))
         .enumerate()
-        .filter(|(_, (_, name))| q.is_empty() || name.to_lowercase().contains(&q))
-        .enumerate()
-        .map(|(pos, (_, (idx, name)))| TemplateItem {
-            name: (*name).into(),
-            idx: *idx,
+        .map(|(pos, (i, entry))| TemplateItem {
+            name: entry.label.into(),
+            idx: (i + 1) as i32,
             row: (pos / 3) as i32,
             col: (pos % 3) as i32,
         })
@@ -773,11 +723,11 @@ fn tpl_items(sec: &[(i32, &str)], query: &str) -> Vec<TemplateItem> {
 }
 
 fn set_template_models(ui: &App, query: &str) {
-    ui.set_template_viral(Rc::new(slint::VecModel::from(tpl_items(&TPL_VIRAL, query))).into());
-    ui.set_template_modern(Rc::new(slint::VecModel::from(tpl_items(&TPL_MODERN, query))).into());
-    ui.set_template_classic(Rc::new(slint::VecModel::from(tpl_items(&TPL_CLASSIC, query))).into());
-    ui.set_template_key(Rc::new(slint::VecModel::from(tpl_items(&TPL_KEY, query))).into());
-    ui.set_template_lab(Rc::new(slint::VecModel::from(tpl_items(&TPL_LAB, query))).into());
+    ui.set_template_viral(Rc::new(slint::VecModel::from(section_items("viral", query))).into());
+    ui.set_template_modern(Rc::new(slint::VecModel::from(section_items("modern", query))).into());
+    ui.set_template_classic(Rc::new(slint::VecModel::from(section_items("classic", query))).into());
+    ui.set_template_key(Rc::new(slint::VecModel::from(section_items("key-moments", query))).into());
+    ui.set_template_lab(Rc::new(slint::VecModel::from(section_items("lab", query))).into());
 }
 
 // Gaya overlay per template (slice 2a). GENERATED dari
@@ -1171,6 +1121,7 @@ async fn run_transcribe(
     lang_idx: i32,
     template_idx: i32,
     hist: Rc<RefCell<DocHistory>>,
+    pid: String,
 ) {
     let cancelled = || gen_cell.get() != generation;
     set_progress(
@@ -1443,6 +1394,7 @@ async fn run_transcribe(
         ui.set_show_transcribe(false);
         ui.set_tr_pct(100);
     }
+    persist_doc(&pid);
 }
 
 // ── Video blob persistence (IndexedDB, Svelte VideoBlobCache parity) ──
@@ -1451,6 +1403,7 @@ async fn run_transcribe(
 // keyPath/indexes. All operations fail safe to None/() with a log.
 const VIDEO_DB: &str = "rscaps";
 const VIDEO_STORE: &str = "videos";
+const DOC_STORE: &str = "docs";
 
 fn idb_await_request(req: &web_sys::IdbRequest) -> js_sys::Promise {
     js_sys::Promise::new(&mut |resolve, reject| {
@@ -1481,7 +1434,7 @@ fn idb_open_db() -> Result<js_sys::Promise, String> {
         .map_err(|_| "idb unavailable".to_string())?
         .ok_or_else(|| "idb unavailable".to_string())?;
     let req = factory
-        .open_with_u32(VIDEO_DB, 1)
+        .open_with_u32(VIDEO_DB, 2)
         .map_err(|_| "idb open failed".to_string())?;
     let up = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
         let db: Option<web_sys::IdbDatabase> = e
@@ -1491,6 +1444,7 @@ fn idb_open_db() -> Result<js_sys::Promise, String> {
             .and_then(|v| v.dyn_into().ok());
         if let Some(db) = db {
             let _ = db.create_object_store(VIDEO_STORE);
+            let _ = db.create_object_store(DOC_STORE);
         }
     });
     req.set_onupgradeneeded(Some(up.as_ref().unchecked_ref()));
@@ -1573,6 +1527,67 @@ async fn idb_del(id: &str) -> Result<(), String> {
         .await
         .map_err(|_| "idb del failed".to_string())?;
     Ok(())
+}
+
+// ── Caption document persistence (IndexedDB store "docs") ──────────
+// Document (cues + params + template) di-serialize JSON, disimpan per
+// project id. Restore saat project_open; save saat cue mutation.
+async fn idb_put_doc(id: &str, json: &str) -> Result<(), String> {
+    let db = idb_get_db().await?;
+    let tx = db
+        .transaction_with_str_and_mode(DOC_STORE, web_sys::IdbTransactionMode::Readwrite)
+        .map_err(|_| "idb tx failed".to_string())?;
+    let store = tx
+        .object_store(DOC_STORE)
+        .map_err(|_| "idb store failed".to_string())?;
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(&obj, &JsValue::from_str("id"), &JsValue::from_str(id))
+        .map_err(|_| "idb put failed".to_string())?;
+    js_sys::Reflect::set(&obj, &JsValue::from_str("json"), &JsValue::from_str(json))
+        .map_err(|_| "idb put failed".to_string())?;
+    let req = store
+        .put_with_key(&obj.into(), &JsValue::from_str(id))
+        .map_err(|_| "idb put failed".to_string())?;
+    JsFuture::from(idb_await_request(&req))
+        .await
+        .map_err(|_| "idb put failed".to_string())?;
+    Ok(())
+}
+
+async fn idb_get_doc(id: &str) -> Result<Option<String>, String> {
+    let db = idb_get_db().await?;
+    let tx = db
+        .transaction_with_str_and_mode(DOC_STORE, web_sys::IdbTransactionMode::Readonly)
+        .map_err(|_| "idb tx failed".to_string())?;
+    let store = tx
+        .object_store(DOC_STORE)
+        .map_err(|_| "idb store failed".to_string())?;
+    let req = store
+        .get(&JsValue::from_str(id))
+        .map_err(|_| "idb get failed".to_string())?;
+    let v = JsFuture::from(idb_await_request(&req))
+        .await
+        .map_err(|_| "idb get failed".to_string())?;
+    if v.is_undefined() {
+        return Ok(None);
+    }
+    let json_val = js_sys::Reflect::get(&v, &JsValue::from_str("json"))
+        .map_err(|_| "idb get failed".to_string())?;
+    if json_val.is_undefined() {
+        return Ok(None);
+    }
+    Ok(json_val.as_string())
+}
+
+/// Simpan document JSON ke IndexedDB untuk project id.
+fn persist_doc(pid: &str) {
+    let Some(json) = doc_json_now() else { return };
+    let pid = pid.to_string();
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Err(e) = idb_put_doc(&pid, &json).await {
+            log(&format!("doc persist failed: {e}"));
+        }
+    });
 }
 
 // Resolve on the next occurrence of a DOM event (one-shot).
@@ -2299,6 +2314,7 @@ pub fn main() {
     {
         let weak_sub = ui.as_weak();
         let hist_sub = doc_hist.clone();
+        let cur_sub = current_id.clone();
         let sub_on_change = Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
             let input: web_sys::HtmlInputElement = e
                 .target()
@@ -2319,6 +2335,7 @@ pub fn main() {
             // Per-invocation clone: the async block moves its captures and
             // this handler runs on every file pick.
             let hist_c = hist_sub.clone();
+            let cur_c = cur_sub.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let ab = match JsFuture::from(file.text()).await {
                     Ok(v) => v,
@@ -2382,6 +2399,10 @@ pub fn main() {
                     }
                 }
                 overlay_render::invalidate();
+                // Persist doc (cues+params+template) ke IndexedDB.
+                if let Some(pid) = cur_c.borrow().clone() {
+                    persist_doc(&pid);
+                }
                 let doc_str = caption_core::document()
                     .read()
                     .ok()
@@ -2680,6 +2701,7 @@ pub fn main() {
             ui.set_tr_sub("Loading the transcription engine.".into());
             let g = gen_start.get().wrapping_add(1);
             gen_start.set(g);
+            let pid_start = current_start.borrow().clone().unwrap_or_default();
             wasm_bindgen_futures::spawn_local(run_transcribe(
                 weak.clone(),
                 gen_start.clone(),
@@ -2689,6 +2711,7 @@ pub fn main() {
                 lang_idx,
                 template_idx,
                 hist_start.clone(),
+                pid_start,
             ));
         }
     });
@@ -2768,27 +2791,14 @@ pub fn main() {
             return;
         }
         let t = (f as f64 * d).clamp(0.0, d);
-        st.video.set_current_time(t);
-        let vw = st.video.video_width();
-        let vh = st.video.video_height();
-        let img = if vw > 0 && vh > 0 {
-            let scale = (640.0 / vw as f64).min(1.0);
-            let w = ((vw as f64 * scale).round() as u32).max(1);
-            let h = ((vh as f64 * scale).round() as u32).max(1);
-            grab_frame(&st.video, &st.canvas, w, h)
-        } else {
-            None
-        };
-        if let Some(ui) = weak_scrub.upgrade() {
-            if let Some(img) = img {
-                ui.set_preview_image(img);
-            }
-            ui.set_time_text(fmt_dur_ms(t).into());
-            let frame = (t * 30.0) as i32;
-            ui.set_frame(frame);
-            ui.set_overlay_text(active_cue_at((t * 1000.0) as u32).into());
-            overlay_render::request(&ui, frame);
-        }
+        let frame = (t * 30.0) as i32;
+        // Tunggu "seeked" sebelum grab — grab_frame langsung setelah
+        // set_current_time mengambil frame LAMA (seek async), visual macet.
+        let ui_w = weak_scrub.clone();
+        let picker_c = picker_scrub.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            seek_grab_frame(ui_w, picker_c, t, frame).await;
+        });
     });
 
     let weak_vol = ui.as_weak();
@@ -2897,6 +2907,24 @@ pub fn main() {
             // Dokumen project lain: reset overlay + cache SVG supaya render
             // berikutnya pasti fresh (tanpa ini caption bisa hilang).
             overlay_render::reset(&ui);
+            // Restore document (cues+params+template) dari IndexedDB.
+            if let Some(pid) = pid.clone() {
+                let ui_w = weak.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    match idb_get_doc(&pid).await {
+                        Ok(Some(json)) => {
+                            if caption_core::set_document_json(&json).is_ok() {
+                                overlay_render::invalidate();
+                                if let Some(ui) = ui_w.upgrade() {
+                                    ui.set_doc_text(json.as_str().into());
+                                    overlay_render::request(&ui, ui.get_frame());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            }
             // Restore the persisted video blob (if any): reattach, wait
             // for a decodable frame, then show it. No blob -> stage stays
             // black with SAMPLE (same as before this change).
@@ -3116,6 +3144,7 @@ pub fn main() {
     });
 
     let weak = ui.as_weak();
+    let cur_tpl = current_id.clone();
     ui.on_template_chosen(move |i| {
         if let Some(ui) = weak.upgrade() {
             ui.set_template_selected(i);
@@ -3128,6 +3157,9 @@ pub fn main() {
             }
             overlay_render::invalidate();
             overlay_render::request(&ui, ui.get_frame());
+            if let Some(pid) = cur_tpl.borrow().clone() {
+                persist_doc(&pid);
+            }
         }
     });
 
@@ -3226,12 +3258,12 @@ pub fn main() {
     let weak = ui.as_weak();
     let picker_seek = picker.clone();
     ui.on_seek(move |f| {
-        picker_seek.borrow().video.set_current_time(f as f64 / 30.0);
-        if let Some(ui) = weak.upgrade() {
-            ui.set_frame(f);
-            ui.set_overlay_text(active_cue_at((f as f64 / 30.0 * 1000.0) as u32).into());
-            overlay_render::request(&ui, f);
-        }
+        // Tunggu "seeked" sebelum grab — sama seperti on_scrub_to.
+        let ui_w = weak.clone();
+        let picker_c = picker_seek.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            seek_grab_frame(ui_w, picker_c, f as f64 / 30.0, f).await;
+        });
     });
 
     // Paused stepping (settings popup steppers + F/W/S shortcuts).
@@ -3547,7 +3579,7 @@ pub fn main() {
                     pick_h.borrow_mut().video_file = Some(blob.clone());
                     let g = gen_h.get().wrapping_add(1);
                     gen_h.set(g);
-                    run_transcribe(weak_h, gen_h, eng_h, g, blob, 0, 0, hist_h).await;
+                    run_transcribe(weak_h, gen_h, eng_h, g, blob, 0, 0, hist_h, id.clone()).await;
                 }
                 _ => log("e2e hook: video missing in IDB"),
             }

@@ -1,6 +1,7 @@
 {
   "name": "Juno",
   "category": "viral",
+  "galleryOrder": 6,
   "variants": [
     { "label": "Yellow", "overrides": { "highlight-color": "#ffdd00" } },
     { "label": "Cyan", "overrides": { "highlight-color": "#00e5ff" } },

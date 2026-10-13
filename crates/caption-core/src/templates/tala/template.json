@@ -1,6 +1,7 @@
 {
   "name": "Tala",
   "category": "viral",
+  "galleryOrder": 10,
   "typography": {
     "fontStack": "anton",
     "fontWeight": 400,

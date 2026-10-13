@@ -1,7 +1,7 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { store } from "../lib/state.svelte";
   import { router } from "../lib/router.svelte";
-  import { TEMPLATES } from "../lib/templates";
   import {
     WHISPER_LANGUAGES,
     WHISPER_MODELS,
@@ -17,6 +17,12 @@
     probe,
     onclose,
   }: { video: File; probe: VideoProbe; onclose: () => void } = $props();
+
+  // Template catalog lives in caption-core; boot wasm so store.templates is
+  // populated before the picker renders options.
+  onMount(() => {
+    void store.bootWasm();
+  });
 
   const initialName = video.name.replace(/\.[^.]+$/, "") || "Untitled";
   let name = $state(initialName);
@@ -126,7 +132,7 @@
     <div class="field">
       <label class="label" for="np-template">Template</label>
       <select id="np-template" class="select" bind:value={template}>
-        {#each TEMPLATES as [id, label] (id)}
+        {#each store.templates as { id, label } (id)}
           <option value={id}>{label}</option>
         {/each}
       </select>

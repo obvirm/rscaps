@@ -87,6 +87,29 @@ pub fn script_metrics(family: &str) -> Option<(f32, f32, f32)> {
         .map(|i| all[i])
 }
 
+// ── SVG font-family emission ───────────────────────────────────────────────
+
+/// Browser-facing family name → extra name-table alternates (fontsource
+/// packaging ships odd ID16 typographic families: "Montserrat Thin",
+/// "Bricolage Grotesque 96pt ExtraBold", …). Templates MUST emit
+/// `font-family` through this helper: the result is a CSS font stack whose
+/// first name the browser matches against `@font-face`, while usvgr/fontdb
+/// (the studio-slint / export rasterizer) tries every name in order, so the
+/// text survives both renderers. A family without a known alternate is
+/// returned unchanged.
+pub fn svg_font_family(family: &str) -> String {
+    const ALTERNATES: &[(&str, &str)] = &[
+        ("Montserrat", "Montserrat Thin"),
+        ("Bricolage Grotesque", "Bricolage Grotesque 96pt ExtraBold"),
+        ("Manrope", "Manrope ExtraLight"),
+        ("Poppins", "Poppins Black"),
+    ];
+    match ALTERNATES.iter().find(|(name, _)| *name == family) {
+        Some((name, alternate)) => format!("{name}, {alternate}"),
+        None => family.to_string(),
+    }
+}
+
 // ── stacks ─────────────────────────────────────────────────────────────────
 
 /// The faces that draw under one Latin family: the template's own face
@@ -376,6 +399,21 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn svg_font_family_appends_name_table_alternates() {
+        assert_eq!(svg_font_family("Montserrat"), "Montserrat, Montserrat Thin");
+        assert_eq!(
+            svg_font_family("Bricolage Grotesque"),
+            "Bricolage Grotesque, Bricolage Grotesque 96pt ExtraBold"
+        );
+        assert_eq!(svg_font_family("Manrope"), "Manrope, Manrope ExtraLight");
+        assert_eq!(svg_font_family("Poppins"), "Poppins, Poppins Black");
+        // Families whose name-table already matches stay untouched.
+        assert_eq!(svg_font_family("Anton"), "Anton");
+        assert_eq!(svg_font_family("Inter"), "Inter");
+        assert_eq!(svg_font_family("Cairo"), "Cairo");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import type { WasmBridge, CaptionDocument, ParsedSubtitle } from "./types";
+import type { WasmBridge, CaptionDocument, TemplateEntry } from "./types";
 
 interface FontSource {
   path: string;
@@ -98,6 +98,10 @@ export interface LoadedBridge {
   setDocumentJson: (json: string) => void;
   parseSubtitle: (text: string, format: string) => string;
   formatSubtitle: (cuesJson: string, format: string) => string;
+  /** Template catalog straight from caption-core — never hardcode a copy. */
+  templateCatalog: TemplateEntry[];
+  /** Canonical default document (params) straight from caption-core. */
+  defaultDocument: CaptionDocument;
   fontFaceCss: string;
 }
 
@@ -112,6 +116,8 @@ export async function loadBridge(): Promise<LoadedBridge> {
     set_document_json: (json: string) => void;
     parse_subtitle: (text: string, format: string) => string;
     format_subtitle: (cuesJson: string, format: string) => string;
+    template_catalog_json: () => string;
+    default_document_json: () => string;
   };
 
   await mod.default();
@@ -144,6 +150,8 @@ export async function loadBridge(): Promise<LoadedBridge> {
     setDocumentJson: mod.set_document_json,
     parseSubtitle: mod.parse_subtitle,
     formatSubtitle: mod.format_subtitle,
+    templateCatalog: JSON.parse(mod.template_catalog_json()) as TemplateEntry[],
+    defaultDocument: JSON.parse(mod.default_document_json()) as CaptionDocument,
     fontFaceCss: faceCss,
   };
 }

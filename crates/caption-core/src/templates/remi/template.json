@@ -1,6 +1,7 @@
 {
   "name": "Remi",
   "category": "viral",
+  "galleryOrder": 8,
   "variants": [
     { "label": "Gold", "overrides": { "highlight-color": "#ffd966" } },
     { "label": "Cyan", "overrides": { "highlight-color": "#00e5ff" } },

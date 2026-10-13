@@ -1,6 +1,7 @@
 {
   "name": "Ivo",
   "category": "viral",
+  "galleryOrder": 9,
   "variants": [
     { "label": "Lime", "overrides": { "accent-bg": "#adff2f" } },
     { "label": "Gold", "overrides": { "accent-bg": "#ffd700" } },

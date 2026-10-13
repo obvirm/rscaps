@@ -35,38 +35,17 @@ export interface ParsedSubtitle {
   duration_frames: number;
 }
 
+/** One entry of the template catalog exported by caption-core. */
+export interface TemplateEntry {
+  id: string;
+  label: string;
+}
+
 export interface WasmBridge {
   render_frame(frame: bigint): string;
   prepare(fps: number): Promise<PrepareMeta>;
   ingest_font(bytes: Uint8Array): unknown;
 }
-
-export const DEFAULT_DOC: CaptionDocument = {
-  duration_frames: 300,
-  cues: [
-    { start_ms: 0, end_ms: 2500, text: "Welcome to rscaps" },
-    {
-      start_ms: 2500,
-      end_ms: 5500,
-      text: "مرحبا بالعالم من rscaps — هذا نص عربي طويل لاختبار تقسيم الأسطر",
-    },
-    { start_ms: 5500, end_ms: 8000, text: "שלום עולם — זהו טקסט עברי לבדיקת פריסה" },
-    { start_ms: 8000, end_ms: 10000, text: "Captions rendered by fframes in Rust" },
-  ],
-  params: {
-    font_family: "Arial",
-    font_size: 110,
-    font_weight: 400,
-    color: "#ffdd57",
-    y_frac: 0.78,
-    width_frac: 0.78,
-    pop_in_ms: 250,
-    travel_px: 48,
-    direction: "auto",
-  },
-};
-
-export const FPS = 30;
 
 // ── Project model ─────────────────────────────────────────────────────────
 

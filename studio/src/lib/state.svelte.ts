@@ -9,6 +9,7 @@ import {
   type Direction,
   type ProjectMetadata,
   type RscapsProject,
+  type TemplateEntry,
   type WhisperBackend,
   type WhisperModel,
 } from "./types";
@@ -46,25 +47,17 @@ const STAGE_STATUS: Record<TranscribeStage, string> = {
   done: "done",
 };
 
-const DEFAULT_PARAMS: CaptionDocument["params"] = {
-  font_family: "Arial",
-  font_size: 110,
-  font_weight: 400,
-  color: "#ffdd57",
-  y_frac: 0.78,
-  width_frac: 0.78,
-  pop_in_ms: 250,
-  travel_px: 48,
-  direction: "auto",
-};
+// Caption defaults and the template catalog come straight from caption-core
+// through the wasm bridge (one source of truth). Never hardcode them here.
 
-function buildDoc(opts: NewProjectOptions): CaptionDocument {
+function buildDoc(opts: NewProjectOptions, base: CaptionDocument): CaptionDocument {
   const durationMs = Math.max(1, Math.round(opts.durationSec * 1000));
   return {
+    ...base,
     duration_frames: Math.max(1, Math.round(opts.durationSec * opts.fps)),
     cues: [{ start_ms: 0, end_ms: durationMs, text: opts.name || "New project" }],
     template: opts.template || undefined,
-    params: { ...DEFAULT_PARAMS, direction: opts.direction },
+    params: { ...base.params, direction: opts.direction },
   };
 }
 
@@ -93,6 +86,8 @@ class StudioState {
   svg = $state("");
   fontFaceCss = $state("");
   bootError = $state<string | null>(null);
+  /** Template catalog from caption-core (populated on wasm boot). */
+  templates = $state<TemplateEntry[]>([]);
 
   // ── Home state ──────────────────────────────────────────────────────────
   projects = $state<ProjectMetadata[]>([]);
@@ -140,6 +135,12 @@ class StudioState {
     }
   }
 
+  /** Canonical default document from caption-core (fresh copy each call). */
+  private defaultDocument(): CaptionDocument {
+    if (!this.wasm) throw new Error("wasm not ready");
+    return structuredClone(this.wasm.defaultDocument);
+  }
+
   private updateDoc(mutate: (doc: CaptionDocument) => void): boolean {
     const doc = this.currentDoc();
     if (!doc) return false;
@@ -156,6 +157,7 @@ class StudioState {
       const loaded = await loadBridge();
       this.wasm = loaded;
       this.fontFaceCss = loaded.fontFaceCss;
+      this.templates = loaded.templateCatalog;
       this.setStatus("ready");
     } catch (err) {
       console.error(err);
@@ -203,7 +205,7 @@ class StudioState {
       name: opts.name || "Untitled",
       createdAt: now,
       updatedAt: now,
-      doc: buildDoc(opts),
+      doc: buildDoc(opts, this.defaultDocument()),
       settings: {
         fps: opts.fps,
         width: opts.width,
@@ -517,7 +519,7 @@ class StudioState {
 
   setDirection(dir: Direction): boolean {
     return this.updateDoc((doc) => {
-      doc.params = doc.params || ({ ...DEFAULT_PARAMS } as CaptionDocument["params"]);
+      doc.params = doc.params || this.defaultDocument().params;
       doc.params.direction = dir;
     });
   }
@@ -533,7 +535,11 @@ class StudioState {
     };
     const doc =
       this.currentDoc() ||
-      ({ cues: [], duration_frames: 0, params: { ...DEFAULT_PARAMS } } as CaptionDocument);
+      (() => {
+        const base = this.defaultDocument();
+        base.cues = [];
+        return base;
+      })();
     doc.cues = parsed.cues;
     doc.duration_frames = Math.max(doc.duration_frames || 0, parsed.duration_frames);
     this.docText = JSON.stringify(doc, null, 2);

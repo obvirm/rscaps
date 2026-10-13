@@ -192,8 +192,9 @@ pub fn render<'a>(
         -center_x,
         -block_cy
     );
+    let font_family_attr = stack::svg_font_family(FONT);
     body.push_str(&format!(
-        "<g font-family=\"{FONT}\" font-size=\"{fs}\" letter-spacing=\"{ls_px}\" \
+        "<g font-family=\"{font_family_attr}\" font-size=\"{fs}\" letter-spacing=\"{ls_px}\" \
          fill=\"{PRIMARY}\" filter=\"url(#rhea-shadow)\">"
     ));
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
@@ -219,7 +220,7 @@ pub fn render<'a>(
             let family_attr = if *family == FONT {
                 String::new()
             } else {
-                format!(" font-family=\"{family}\"")
+                format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             body.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" font-weight=\"{weight}\"{family_attr}>{text}</text>"

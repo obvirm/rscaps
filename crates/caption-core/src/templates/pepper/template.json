@@ -1,6 +1,7 @@
 {
   "name": "Pepper",
   "category": "viral",
+  "galleryOrder": 2,
   "variants": [
     { "label": "Red pill", "overrides": { "highlight-bg-color": "#c8392c" } },
     { "label": "Blue pill", "overrides": { "highlight-bg-color": "#2c8ec8" } },

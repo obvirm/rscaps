@@ -215,8 +215,9 @@ pub fn render<'a>(
         "<clipPath id=\"luna-segment\"><rect x=\"{box_left}\" y=\"{box_top}\" \
          width=\"{box_w}\" height=\"{box_h}\"/></clipPath>"
     );
+    let font_family_attr = stack::svg_font_family(FONT);
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
+        "<g font-family=\"{font_family_attr}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
     );
     for (i, &(start, end)) in lines.iter().enumerate() {
         let line_top = box_top + pad_y + i as f32 * (line_h + line_spacing);
@@ -248,7 +249,7 @@ pub fn render<'a>(
             let family_attr = if *family == FONT {
                 String::new()
             } else {
-                format!(" font-family=\"{family}\"")
+                format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr}>{text}</text>"

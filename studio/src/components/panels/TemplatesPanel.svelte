@@ -1,6 +1,13 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { store } from "../../lib/state.svelte";
-  import { TEMPLATES } from "../../lib/templates";
+
+  // Catalog comes from caption-core via the wasm bridge (store.templates) —
+  // boot it here so the list is ready even if the editor didn't open a
+  // project through the normal path.
+  onMount(() => {
+    void store.bootWasm();
+  });
 
   let current = $derived.by(() => {
     try {
@@ -30,7 +37,7 @@
   <div class="picker">
     <select id="template-select" value={current} onchange={onChange}>
       <option value="">Default (v0)</option>
-      {#each TEMPLATES as [id, label] (id)}
+      {#each store.templates as { id, label } (id)}
         <option value={id}>{label}</option>
       {/each}
     </select>

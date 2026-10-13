@@ -1,6 +1,7 @@
 {
   "name": "Lewis",
   "category": "viral",
+  "galleryOrder": 3,
   "typography": {
     "fontStack": "gabarito",
     "fontWeight": 900,
