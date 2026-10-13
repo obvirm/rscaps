@@ -1,0 +1,167 @@
+// NewProjectDialog — split from ui.slint (per-component files).
+import { AppButton } from "./app_button.slint";
+import { Picker } from "./picker.slint";
+import { TextField } from "./text_field.slint";
+import { Theme } from "./theme.slint";
+
+
+// ── New project dialog ─────────────────────────────────────────────────────
+export component NewProjectDialog inherits Rectangle {
+    in property <bool> is-dark: Theme.is-dark;
+    property <bool> shown: false;
+    // Pop-in rise: starts 14px low, settles into place (see panel y).
+    in-out property <length> rise: 14px;
+    animate rise { duration: 180ms; easing: ease-out; }
+    init => { root.shown = true; root.rise = 0px; }
+    in-out property <string> video-name: "";
+    in-out property <string> video-meta: "";
+    in-out property <string> name: "Untitled";
+    in-out property <int> template-selected: 18;
+    in-out property <int> backend-selected: 0;
+    in-out property <int> model-selected: 1;
+    in-out property <int> language-selected: 0;
+    in-out property <int> direction-selected: 0;
+    in property <bool> advanced-open: false;
+    in property <bool> creating: false;
+    callback create;
+    callback cancel;
+    callback use-subtitle;
+    callback toggle-advanced;
+    width: 100%; height: 100%;
+    background: #0c0c0eb3;
+    backdrop-tap := TouchArea { x: 0; y: 0; width: parent.width; height: parent.height; clicked => { root.cancel(); } }
+    panel := Rectangle {
+        width: 440px;
+        // Content sizes naturally (vertical-stretch:0). Closed needs ~440px
+        // (title+desc+fields+advanced toggle+footer+padding). Advanced adds
+        // ~280px. Old 460 with stretch:1 left a gap; old 400 clipped footer.
+        height: root.advanced-open ? 720px : 440px;
+        animate height { duration: 300ms; easing: ease-in-out; }
+        opacity: root.shown ? 1 : 0;
+        animate opacity { duration: 160ms; easing: ease-out; }
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2 + root.rise;
+        background: (root.is-dark ? Theme.bg1-dark : Theme.bg1-light);
+        border-color: (root.is-dark ? Theme.borderStrong-dark : Theme.borderStrong-light); border-width: 1px;
+        border-radius: Theme.rLg;
+        drop-shadow-color: (root.is-dark ? #141416F2 : #3c322899);
+        drop-shadow-blur: 12px;
+        drop-shadow-offset-y: 3px;
+        clip: true;
+        // Shield behind children: swallows clicks on empty panel area so
+        // they don't fall through to the backdrop (which would cancel).
+        // Children in VerticalLayout are drawn after → on top → get clicks first.
+        TouchArea { x: 0; y: 0; width: parent.width; height: parent.height; }
+        VerticalLayout {
+            padding-top: 22px; padding-bottom: 18px; padding-left: 22px; padding-right: 22px;
+            spacing: 14px;
+            Text { text: "New project"; color: (root.is-dark ? Theme.fg0-dark : Theme.fg0-light); font-size: 20px; font-weight: 600; horizontal-stretch: 0; vertical-stretch: 0; }
+            Text { text: "Duration, frame rate, and canvas are derived from your video. Everything runs in your browser."; color: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 13px; wrap: word-wrap; horizontal-stretch: 0; vertical-stretch: 0; }
+            Rectangle {
+                vertical-stretch: 0;
+                clip: true;
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 14px;
+                            Rectangle {
+                                background: (root.is-dark ? Theme.bg0-dark : Theme.bg0-light); border-color: (root.is-dark ? Theme.border-dark : Theme.border-light); border-width: 1px; border-radius: Theme.rSm;
+                                VerticalLayout {
+                                    padding-top: 10px; padding-bottom: 10px; padding-left: 12px; padding-right: 12px;
+                                    spacing: 3px;
+                                    Text { text: root.video-name; color: (root.is-dark ? Theme.fg0-dark : Theme.fg0-light); font-size: 13px; font-weight: 500; overflow: elide; }
+                                    Text { text: root.video-meta; color: (root.is-dark ? Theme.fg2-dark : Theme.fg2-light); font-size: 11.5px; font-family: "IBM Plex Mono"; }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 6px;
+                                Text { text: "Name"; color: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 12px; font-weight: 500; }
+                                TextField { is-dark: root.is-dark; text <=> root.name; }
+                            }
+                            VerticalLayout {
+                                spacing: 6px;
+                                Text { text: "Template"; color: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 12px; font-weight: 500; }
+                                Picker {
+                                    is-dark: root.is-dark;
+                                    options: ["Default (v0)", "Ada", "Anya", "Cleo", "Elio", "Enzo", "Ezra", "Freya", "Hugo", "Iris", "Ivo", "Juno", "Kai", "Kel", "Lena", "Levi", "Lewis", "Loki", "Luca", "Luna", "Lyra", "Milo", "Mira", "Naya", "Noor", "Nova", "Nyx", "Otto", "Pastor", "Pepper", "Pico", "Remi", "Rhea", "Sara", "Selene", "Sol", "Tala", "Theo", "Tito", "Vera", "Yuki", "Zara"];
+                                    selected <=> root.template-selected;
+                                }
+                                Text { text: "Native templates render 1:1 through fframes — same engine in preview and export."; color: (root.is-dark ? Theme.fg2-dark : Theme.fg2-light); font-size: 11.5px; wrap: word-wrap; }
+                            }
+                            Rectangle {
+                                height: 22px; horizontal-stretch: 0;
+                                adv-tap := TouchArea { clicked => { root.toggle-advanced(); } }
+                                HorizontalLayout {
+                                    alignment: start; spacing: 6px;
+                            if root.advanced-open: Path {
+                                width: 12px; height: 12px;
+                                y: (parent.height - self.height) / 2;
+                                fill: transparent;
+                                stroke: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light);
+                                stroke-width: 1.6px;
+                                commands: "M 2.5 4 L 6 8 L 9.5 4";
+                            }
+                            if !root.advanced-open: Path {
+                                width: 12px; height: 12px;
+                                y: (parent.height - self.height) / 2;
+                                fill: transparent;
+                                stroke: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light);
+                                stroke-width: 1.6px;
+                                commands: "M 4 2.5 L 8 6 L 4 9.5";
+                            }
+                                    Text { text: "Advanced"; color: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 12.5px; font-weight: 500; vertical-alignment: center; }
+                                }
+                            }
+                            Rectangle {
+                                height: root.advanced-open ? 280px : 0px;
+                                clip: true;
+                                animate height { duration: 300ms; easing: ease-in-out; }
+                                VerticalLayout {
+                                    alignment: start;
+                                    spacing: 10px;
+                                    padding-left: 12px;
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        Text { text: "Backend"; color: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 12px; font-weight: 500; }
+                                        Picker { is-dark: root.is-dark; options: ["CPU", "WebGPU"]; selected <=> root.backend-selected; }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        Text { text: "Model"; color: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 12px; font-weight: 500; }
+                                        Picker { is-dark: root.is-dark; options: ["Tiny — ~39 MB", "Base — ~75 MB", "Small — ~244 MB", "Medium — ~769 MB", "Large — ~1.5 GB"]; selected <=> root.model-selected; }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        Text { text: "Language"; color: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 12px; font-weight: 500; }
+                                        Picker { is-dark: root.is-dark; options: ["English", "Indonesian", "Malay", "Arabic", "Chinese", "Japanese", "Korean", "Hindi", "Urdu", "Persian", "Hebrew", "Turkish", "Russian", "Spanish", "French", "German", "Portuguese", "Italian", "Dutch", "Polish", "Vietnamese", "Thai"]; selected <=> root.language-selected; }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 4px;
+                                        Text { text: "Direction"; color: (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 12px; font-weight: 500; }
+                                        Picker { is-dark: root.is-dark; options: ["Auto", "Left to right", "Right to left"]; selected <=> root.direction-selected; }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: space-between; horizontal-stretch: 0; vertical-stretch: 0;
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            height: 22px;
+                            HorizontalLayout {
+                                Text { text: "Use subtitle file instead"; color: sub-tap.has-hover ? (root.is-dark ? Theme.fg0-dark : Theme.fg0-light) : (root.is-dark ? Theme.fg1-dark : Theme.fg1-light); font-size: 12.5px; vertical-alignment: center; }
+                            }
+                            sub-tap := TouchArea {
+                                x: 0; y: 0; width: parent.width; height: parent.height;
+                                clicked => { root.use-subtitle(); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px; alignment: end; horizontal-stretch: 0;
+                            AppButton { is-dark: root.is-dark; text: "Cancel"; background: (root.is-dark ? Theme.bg2-dark : Theme.bg2-light); border-color: (root.is-dark ? Theme.borderStrong-dark : Theme.borderStrong-light); clicked => { root.cancel(); } }
+                            AppButton { is-dark: root.is-dark; text: root.creating ? "Starting…" : "Start"; accent: true; disabled: root.creating; clicked => { root.create(); } }
+                        }
+                    }
+                }
+            }
+}

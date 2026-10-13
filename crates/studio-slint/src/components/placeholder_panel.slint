@@ -1,0 +1,22 @@
+// PlaceholderPanel — split from ui.slint (per-component files).
+import { Theme } from "./theme.slint";
+
+
+// ── Placeholder panel ──────────────────────────────────────────────────────
+export component PlaceholderPanel inherits VerticalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    in property <string> label;
+    alignment: center;
+    spacing: 16px;
+    Rectangle {
+        width: 120px; height: 72px; horizontal-stretch: 0; vertical-stretch: 0;
+        border-color: (root.is-dark ? Theme.borderStrong-dark : Theme.borderStrong-light); border-width: 1px;
+        border-radius: Theme.rMd;
+        Rectangle { x: -1px; y: -1px; width: 10px; height: 10px; border-color: (root.is-dark ? Theme.accent-dark : Theme.accent-light); border-width: 1.5px; background: transparent; }
+        Rectangle { x: parent.width - 9px; y: parent.height - 9px; width: 10px; height: 10px; border-color: (root.is-dark ? Theme.accent-dark : Theme.accent-light); border-width: 1.5px; background: transparent; }
+    }
+    Text {
+        text: root.label + " - coming soon";
+        color: (root.is-dark ? Theme.fg2-dark : Theme.fg2-light); font-size: 13px; horizontal-alignment: center;
+    }
+}

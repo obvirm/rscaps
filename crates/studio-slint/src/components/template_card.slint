@@ -1,0 +1,33 @@
+// TemplateCard — satu kartu galeri template (thumbnail snapshot
+// menyusul; kini wordmark nama). Satu file satu komponen.
+import { Theme } from "./theme.slint";
+
+
+// ── Template card ────────────────────────────────────────────────────────
+export component TemplateCard inherits Rectangle {
+    in property <bool> is-dark: Theme.is-dark;
+    in property <string> label;
+    in property <bool> active: false;
+    callback picked;
+    height: 64px;
+    background: root.active ? (root.is-dark ? Theme.bg3-dark : Theme.bg3-light) : (root.is-dark ? Theme.bg2-dark : Theme.bg2-light);
+    border-color: root.active ? (root.is-dark ? Theme.accent-dark : Theme.accent-light) : (root.is-dark ? Theme.border-dark : Theme.border-light);
+    border-width: root.active ? 2px : 1px;
+    border-radius: Theme.rMd;
+    clip: true;
+    Text {
+        x: 0; y: 0; width: parent.width; height: parent.height;
+        text: root.label;
+        color: (root.is-dark ? Theme.fg0-dark : Theme.fg0-light);
+        font-size: 14px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    TouchArea {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        mouse-cursor: pointer;
+        clicked => { root.picked(); }
+    }
+}

@@ -1,0 +1,80 @@
+[package]
+name = "studio-slint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# unstable-fontique-011: runtime font registration (template TTFs) via
+# slint::fontique_011::shared_collection — documented "downloaded font"
+# path; Slint 1.18 has no compile-time @font-face (verified by probe).
+slint = { version = "1", features = ["renderer-femtovg", "unstable-fontique-011"] }
+caption-core = { path = "../caption-core" }
+# Overlay caption (render_frame paritas main): WasmEditor<CaptionVideo>
+# in-process - satu memori dokumen dengan call sites caption-core rlib.
+# MIT, (c) Dmitriy Kovalenko (fframes.studio); crate yang sama dipakai
+# caption-bridge.
+fframes-editor-controller = "1.2.0"
+# @font-face base64 di-inline ke SVG overlay (paritas fontFaceCss main).
+base64 = "0.22"
+# Restores getrandom/wasm_js unification previously pulled in via the removed
+# whisper-spike dep (else getrandom 0.3 fails to compile for wasm32).
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlVideoElement",
+    "HtmlImageElement",
+    "HtmlMediaElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "Blob",
+    "File",
+    "FileList",
+    "Url",
+    "Event",
+    "Node",
+    "NodeList",
+    "DomTokenList",
+    "Storage",
+    "MediaQueryList",
+    "MediaQueryListEvent",
+    "MutationObserver",
+    "MutationObserverInit",
+    "Location",
+    "MouseEvent",
+    "MouseEventInit",
+    "AudioContext",
+    "OfflineAudioContext",
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioDestinationNode",
+    "Response",
+    "IdbFactory",
+    "IdbDatabase",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "IdbObjectStore",
+    "IdbRequest",
+    "IdbOpenDbRequest",
+    "HtmlAnchorElement",
+    "Navigator",
+    "Gpu",
+    "Performance",
+] }
+
+[build-dependencies]
+slint-build = "1"

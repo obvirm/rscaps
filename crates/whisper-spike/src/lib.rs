@@ -4,7 +4,7 @@ mod mel;
 mod tokenizer;
 
 #[cfg(target_arch = "wasm32")]
-mod wasm {
+pub mod wasm {
     use std::sync::Mutex;
 
     use ndarray::{Array1, Array2, Array3, Array4};

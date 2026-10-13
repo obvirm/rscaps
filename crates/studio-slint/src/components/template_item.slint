@@ -1,0 +1,12 @@
+// TemplateItem — struct-only (precedent: project_meta.slint).
+// Satu kartu galeri: nama tampil + idx nyata ke TEMPLATE_IDS
+// (agar klik kartu = template-chosen(idx) yang sama seperti dulu)
+// + posisi grid (row/col dihitung Rust agar Slint bebas hitungan).
+struct TemplateItem {
+    name: string,
+    idx: int,
+    row: int,
+    col: int,
+}
+
+export { TemplateItem }
