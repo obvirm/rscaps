@@ -63,10 +63,10 @@ export component PreviewStage inherits VerticalLayout {
         vertical-stretch: 1;
 
         Rectangle {
-            // Frame = kartu video (paritas Svelte .video-box): radius +
-            // border + shadow-md, inset12px dari tepi container supaya
-            // shadow muat. Background pakai theme bg0 (paritas tscaps),
-            // bukan #000 pekat.
+            // Kartu video (paritas Svelte .video-box): aspect-ratio mengikuti
+            // video asli (bisa 9:16, 4:3, dsb) — background bg0 jadi bar
+            // letterbox. Radius + border + shadow-md, inset 12px dari tepi
+            // container supaya shadow muat.
             property <length> avail-w: Math.max(0px, parent.width - 24px);
             property <length> avail-h: Math.max(0px, parent.height - 24px);
             property <length> fw: Math.min(avail-w, avail-h * root.video-aspect);
@@ -92,9 +92,10 @@ export component PreviewStage inherits VerticalLayout {
                 source: root.frame-image;
                 image-fit: contain;
             }
-            // Overlay caption render_frame di atas video. Geometri = kotak
-            // frame yang sama (contain, sama seperti preserveAspectRatio
-            // meet SVG di main) sehingga posisi caption identik.
+            // Overlay caption render_frame (viewBox 1920×1080, paritas main
+            // .stage svg). CONTAIN supaya proporsi glyph + background template
+            // benar (pill tetap pill, bukan blob) — tradeoff: caption lebih
+            // kecil & centered di video portrait, posisi anchor bergeser.
             if root.overlay-live && root.has-video: Image {
                 x: 0px; y: 0px;
                 width: parent.width; height: parent.height;

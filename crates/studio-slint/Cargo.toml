@@ -13,11 +13,16 @@ crate-type = ["cdylib"]
 # path; Slint 1.18 has no compile-time @font-face (verified by probe).
 slint = { version = "1", features = ["renderer-femtovg", "unstable-fontique-011"] }
 caption-core = { path = "../caption-core" }
-# Overlay caption (render_frame paritas main): WasmEditor<CaptionVideo>
-# in-process - satu memori dokumen dengan call sites caption-core rlib.
-# MIT, (c) Dmitriy Kovalenko (fframes.studio); crate yang sama dipakai
-# caption-bridge.
+# Overlay caption: WasmEditor<CaptionVideo> in-process (document state) +
+# fframes CpuFrameRenderer (tiny-skia) untuk raster SVG -> RGBA pixel asli
+# (engine yang sama dengan export; bukan browser load_from_svg_data).
 fframes-editor-controller = "1.2.0"
+# Rasterizer overlay: usvgr parse + svgr::render (tiny-skia) -> Pixmap ->
+# slint::Image. Engine yang SAMA dengan export fframes; bukan browser
+# load_from_svg_data. svgr = crate raster murni-Rust fframes (pure Rust,
+# kompile ke WASM; CpuFrameRenderer di fframes di-gate non-WASM tapi svgr
+# tidak).
+svgr = "0.46"
 # @font-face base64 di-inline ke SVG overlay (paritas fontFaceCss main).
 base64 = "0.22"
 # Restores getrandom/wasm_js unification previously pulled in via the removed

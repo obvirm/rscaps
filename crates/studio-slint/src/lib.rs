@@ -2618,6 +2618,13 @@ pub fn main() {
             let model_idx = ui.get_np_model_selected();
             let lang_idx = ui.get_np_language_selected();
             let template_idx = ui.get_np_template_selected();
+            // Set template SEGERA — jangan tunggu transcribe sukses. Kalau
+            // transcribe gagal (audio decode, model error, dst), template
+            // tetap harus aktif saat user import SRT / tambah cue manual.
+            if let Ok(mut doc) = caption_core::document().write() {
+                doc.template = template_id(template_idx);
+            }
+            overlay_render::reset(&ui);
             let blob = picker_start.borrow().video_file.clone();
             let Some(blob) = blob else {
                 ui.set_status("no video found to transcribe".into());
@@ -2777,7 +2784,10 @@ pub fn main() {
                 ui.set_preview_image(img);
             }
             ui.set_time_text(fmt_dur_ms(t).into());
-            ui.set_frame((t * 30.0) as i32);
+            let frame = (t * 30.0) as i32;
+            ui.set_frame(frame);
+            ui.set_overlay_text(active_cue_at((t * 1000.0) as u32).into());
+            overlay_render::request(&ui, frame);
         }
     });
 
@@ -2884,6 +2894,9 @@ pub fn main() {
             }
             ui.set_route("editor".into());
             ui.set_status("ready".into());
+            // Dokumen project lain: reset overlay + cache SVG supaya render
+            // berikutnya pasti fresh (tanpa ini caption bisa hilang).
+            overlay_render::reset(&ui);
             // Restore the persisted video blob (if any): reattach, wait
             // for a decodable frame, then show it. No blob -> stage stays
             // black with SAMPLE (same as before this change).
@@ -3108,12 +3121,10 @@ pub fn main() {
             ui.set_template_selected(i);
             apply_template_style(&ui, i);
             // Pipeline template asli (41 template caption-core) membaca
-            // doc.template - sebelumnya tak ada yang menulis saat klik kartu,
-            // sehingga render_frame tak pernah memakai template.
+            // doc.template. Index picker 1-based (0 = Default v0);
+            // template_id() konversi ke 0-based TEMPLATE_IDS.
             if let Ok(mut doc) = caption_core::document().write() {
-                if let Some(id) = TEMPLATE_IDS.get(i.max(0) as usize) {
-                    doc.template = (*id).to_string();
-                }
+                doc.template = template_id(i);
             }
             overlay_render::invalidate();
             overlay_render::request(&ui, ui.get_frame());
@@ -3218,6 +3229,8 @@ pub fn main() {
         picker_seek.borrow().video.set_current_time(f as f64 / 30.0);
         if let Some(ui) = weak.upgrade() {
             ui.set_frame(f);
+            ui.set_overlay_text(active_cue_at((f as f64 / 30.0 * 1000.0) as u32).into());
+            overlay_render::request(&ui, f);
         }
     });
 
