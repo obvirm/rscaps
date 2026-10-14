@@ -17,7 +17,7 @@ use caption_core::CaptionVideo;
 use fframes_editor_controller::WasmEditor;
 use slint::ComponentHandle;
 
-use crate::{log, App};
+use crate::app::{log, App};
 
 // Nomor urut render (lintas thread_local - dipakai langsung, bukan LocalKey).
 static GEN: AtomicU32 = const { AtomicU32::new(0) };

@@ -67,6 +67,14 @@ export component PreviewStage inherits VerticalLayout {
             // video asli (bisa 9:16, 4:3, dsb) — background bg0 jadi bar
             // letterbox. Radius + border + shadow-md, inset 12px dari tepi
             // container supaya shadow muat.
+            //
+            // Opsi A2 (WASM preview): saat has-video, background kartu jadi
+            // TRANSPARAN — lubang di kanvas Slint tempat DOM <video> di
+            // belakang kanvas terlihat (rect video di-sync Rust dari
+            // matematika layout yang SAMA dengan binding di bawah; konstanta
+            // harus ikut berubah bersama). Border/shadow kartu pindah ke
+            // CSS #preview-video (index.html). Tanpa video (home / empty
+            // state), kartu tampil normal dengan bg0.
             property <length> avail-w: Math.max(0px, parent.width - 24px);
             property <length> avail-h: Math.max(0px, parent.height - 24px);
             property <length> fw: Math.min(avail-w, avail-h * root.video-aspect);
@@ -75,18 +83,21 @@ export component PreviewStage inherits VerticalLayout {
             y: (parent.height - fh) / 2;
             width: fw;
             height: fh;
-            background: (root.is-dark ? Theme.bg0-dark : Theme.bg0-light);
+            background: root.has-video ? #00000000 : (root.is-dark ? Theme.bg0-dark : Theme.bg0-light);
             border-radius: Theme.rLg;
-            border-width: 1px;
+            border-width: root.has-video ? 0px : 1px;
             border-color: (root.is-dark ? Theme.border-dark : Theme.border-light);
             clip: true;
-            drop-shadow-color: (root.is-dark ? #141416F2 : #3c322899);
-            drop-shadow-blur: 12px;
-            drop-shadow-offset-y: 3px;
+            drop-shadow-color: root.has-video ? #00000000 : (root.is-dark ? #141416F2 : #3c322899);
+            drop-shadow-blur: root.has-video ? 0px : 12px;
+            drop-shadow-offset-y: root.has-video ? 0px : 3px;
             if !root.has-video: TouchArea {
                 x: 0px; y: 0px; width: parent.width; height: parent.height;
                 clicked => { root.attach-video(); }
             }
+            // Frame preview (Fase 3/native): diisi dari FFmpeg -> SharedPixelBuffer.
+            // Di WASM jalur ini KOSONG (video DOM di belakang kanvas);
+            // Image kosong tidak menggambar apa pun.
             if root.has-video: Image {
                 width: 100%; height: 100%;
                 source: root.frame-image;

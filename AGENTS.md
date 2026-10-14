@@ -10,9 +10,11 @@
    - Menambah API di caption-core/bridge: boleh — itu memperkaya satu titik. Menggandakan logika/metadata di konsumen: dilarang.
    - Fix/penyesuaian visual overlay: di `crates/studio-slint` (bukan di caption-core).
 
-2. **HANYA boleh edit `E:\project\rscaps\crates\studio-slint`** untuk keperluan overlay desktop
-   - Fix rendering overlay: `crates/studio-slint/src/overlay_render.rs`
-   - UI/state: `crates/studio-slint/src/lib.rs`
+2. **`crates/studio-slint` = cross-platform (WASM + native)** — lihat seksi "Arsitektur Cross-Platform" di bawah
+   - Raster overlay WASM: `crates/studio-slint/src/app/overlay_render.rs`
+   - UI/state WASM: `crates/studio-slint/src/app.rs` (modul `app`, feature `wasm`)
+   - Native entry: `crates/studio-slint/src/bin/studio_native.rs` → `platform/native.rs` (feature `native`)
+   - **Shared (cross-platform)**: `caption-core`, `svgr`, `ui.slint` — JANGAN di-hardcode per-platform.
 
 3. **Jangan asal patch**
    - Pahami root cause dulu sebelum fix.
@@ -25,6 +27,48 @@
 - Port 5177: tscaps studio (Svelte)  
 - Port 5178: studio-slint (trunk)
 - Build: `cd crates/studio-slint; $env:PATH = "E:\temp\opencode\ffmpeg-9.0.2-full_build-shared\bin;$env:PATH"; trunk build --release`
+
+## Arsitektur Cross-Platform (WASM + Native + Android)
+
+`crates/studio-slint` mendukung **multi-target**. Satu codebase UI (`.slint`), dua jalur runtime.
+
+| | WASM (browser) | Native (desktop) | Android (target masa depan) |
+|---|---|---|---|
+| Entry | Trunk → `#[wasm_bindgen(start)]` di `app.rs` | `bin/studio_native.rs` → `platform/native.rs` | via NDK / JNI (belum ada) |
+| Feature flag | `wasm` (default Trunk) | `native` | — |
+| **Decode video** | `<video>` DOM (browser HW decode) | `fframes-media::FFmpegDecoder` → `SwsScaler` → `SharedPixelBuffer` | `mediacodec` (fframes-media, HW decode) |
+| **Caption raster** | `svgr` → `slint::Image` (`overlay_render.rs`) | `fframes::Previewer` → `RgbaFrame` → `slint::Image` | sama dengan native |
+| **Window/render** | winit-web + femtovg (WebGL) | winit-native + femtovg (OpenGL/Vulkan) | Slint Android backend |
+| **File picker** | `<input type=file>` DOM | `rfd` (native dialog) | `rfd` / Storage Access Framework |
+| **Transcribe** | `whisper-spike` (WASM ONNX) | ONNX Runtime native (belum ada) | ONNX Runtime mobile |
+
+**Prinsip:**
+- **Video decode = 2 implementasi di balik 1 interface.** Browser pakai `<video>` DOM (HW decode); native pakai `FFmpegDecoder` (sudah di dependency tree fframes). TIDAK mungkin disatukan — ini batas platform.
+- **Caption raster = SATU engine.** `svgr` (tiny-skia) dipakai di semua platform — preview & export pakai mesin yang sama, nol divergensi.
+- **Shared module** (`caption-core`, `svgr`, `ui.slint`) jangan di-hardcode per-platform. Platform-specific code (`web_sys`, `fframes-media`, `rfd`) di-gate `cfg(feature = ...)` / `cfg(target_arch)`.
+
+**Build native (Fase 3):**
+```bash
+cd crates/studio-slint
+$env:PATH = "E:\temp\opencode\ffmpeg-9.0.2-full_build-shared\bin;$env:PATH"
+cargo build --release --bin studio-native --features native
+```
+**GOTCHA WAJIB (PATH):** proc-macro `fframes-media-dir-macro` (milik fframes) mengimpor
+DLL FFmpeg 9.0.2 (`avcodec-63.dll` dsb) yang hanya ada di
+`E:\temp\opencode\ffmpeg-9.0.2-full_build-shared\bin`. Folder itu **bukan bagian dari
+PATH default** — kalau cargo/rustc dijalankan tanpa prepend di atas, rustc gagal load
+proc-macro dan gagal dengan `error[E0463]: can't find crate for fframes_media_dir_macro`
+(padahal file DLL-nya ada). Semua perintah cargo yang menyentuh fframes (dev/release,
+check/build, native maupun lewat wasm) HARUS memakai prepend PATH yang sama — sama
+seperti perintah trunk build di atas. Kalau lihat E0463 untuk dir_macro: bukan bug kode,
+PATH ffmpeg belum masuk.
+
+Belum ada: audio playback native (`cpal`), transcribe native, export native.
+
+**Runtime native:** exe butuh 5 DLL FFmpeg (`avutil-61, avcodec-63, avformat-63,
+swscale-10, swresample-7`) — salin dari `E:\temp\opencode\ffmpeg-9.0.2-full_build-shared\bin`
+ke `target\release\` (samping exe). Kalau exe gagal start dengan dialog
+"avutil-61.dll was not found", itulah penyebabnya.
 
 ## Known Issues
 

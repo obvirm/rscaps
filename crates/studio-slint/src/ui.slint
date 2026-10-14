@@ -14,7 +14,13 @@ export component App inherits Window {
     title: "rscaps";
     preferred-width: 1280px;
     preferred-height: 720px;
-    background: Theme.bg0;
+    // Opsi A2: WASM = transparan (DOM <video> + body HTML di belakang
+    // kanvas). Native tidak punya layer di belakang kanvas — native.rs
+    // meng-set window-background ke bg0 opak saat start (lihat
+    // platform/native.rs). Properti ini agar kedua target pakai .slint
+    // yang sama.
+    in-out property <brush> window-background: transparent;
+    background: root.window-background;
 
     in-out property <string> route: "home";
     in-out property <bool> app-is-dark: true;

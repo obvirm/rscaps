@@ -151,6 +151,28 @@
         height: 100vh !important;
         outline: none;
       }
+      /* DOM video preview (Opsi A2): plays behind the transparent Slint
+         canvas at the stage-card rect computed by Rust (sync_video_rect).
+         Caption overlay stays on the Slint canvas (svgr raster) so the
+         caption engine is unified with export. The video element carries
+         the card chrome (border/shadow/radius) via CSS so the Slint card
+         can be a transparent hole in the canvas. */
+      #preview-video {
+        position: absolute;
+        z-index: 0;
+        display: none;
+        object-fit: contain;
+        border-radius: 12px; /* Theme.rLg */
+        border: 1px solid #26262b; /* border-dark */
+        box-shadow: 0 3px 12px rgba(20, 20, 22, 0.95);
+        background: #0c0c0e; /* bg0-dark */
+        pointer-events: none;
+      }
+      body.theme-light #preview-video {
+        border-color: #e4e2dc; /* border-light */
+        box-shadow: 0 3px 12px rgba(60, 50, 40, 0.6);
+        background: #f5f5f3; /* bg0-light */
+      }
     </style>
   </head>
   <body>

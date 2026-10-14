@@ -5,7 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+# rlib: dipakai bin native (studio-native) untuk fitur shared; cdylib: WASM.
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "studio-native"
+path = "src/bin/studio_native.rs"
+required-features = ["native"]
+
+[features]
+default = []
+# Aktifkan hanya untuk build native (desktop). Tidak pernah untuk wasm32.
+# Jalur WASM di-gate cfg(target_arch = "wasm32"), tanpa feature.
+native = ["dep:fframes", "dep:fframes-media", "dep:rfd"]
 
 [dependencies]
 # unstable-fontique-011: runtime font registration (template TTFs) via
@@ -16,22 +28,26 @@ caption-core = { path = "../caption-core" }
 # Overlay caption: WasmEditor<CaptionVideo> in-process (document state) +
 # fframes CpuFrameRenderer (tiny-skia) untuk raster SVG -> RGBA pixel asli
 # (engine yang sama dengan export; bukan browser load_from_svg_data).
+# WASM-only (crate ini di-gate #![cfg(target_arch = "wasm32")]; di native
+# jadi crate kosong — aman dibiarkan non-optional).
 fframes-editor-controller = "1.2.0"
 # Rasterizer overlay: usvgr parse + svgr::render (tiny-skia) -> Pixmap ->
 # slint::Image. Engine yang SAMA dengan export fframes; bukan browser
 # load_from_svg_data. svgr = crate raster murni-Rust fframes (pure Rust,
 # kompile ke WASM; CpuFrameRenderer di fframes di-gate non-WASM tapi svgr
-# tidak).
+# tidak). Cross-platform (WASM + native).
 svgr = "0.46"
 # @font-face base64 di-inline ke SVG overlay (paritas fontFaceCss main).
 base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # Restores getrandom/wasm_js unification previously pulled in via the removed
 # whisper-spike dep (else getrandom 0.3 fails to compile for wasm32).
 getrandom = { version = "0.3", features = ["wasm_js"] }
+# ── WASM-only deps (dipakai modul app di target wasm32; native tidak
+#    meng-importnya walau ikut ter-resolve — target-gate via cfg) ──
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = [
     "console",
@@ -80,6 +96,10 @@ web-sys = { version = "0.3", features = [
     "Gpu",
     "Performance",
 ] }
+# ── Native-only deps (fitur "native"; Fase 3 video preview) ──
+fframes = { version = "1.2.0", optional = true, default-features = false, features = ["cpu_renderer"] }
+fframes-media = { version = "1.2.0", optional = true }
+rfd = { version = "0.15", optional = true }
 
 [build-dependencies]
 slint-build = "1"
