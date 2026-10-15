@@ -104,19 +104,23 @@ function clamp01(v: number): number {
 }
 
 function resolveDefX(align: TemplateDefaults["alignment"] | undefined): number {
+  // `horizontalOffset` = titik anchor absolut (mengukur dari kiri; `center`
+  // selalu 0.5, `right` = 1-offset) — SEMANTIK tscaps (xPx = resolver(...)),
+  // sama dengan anchor_x konst per-template di engine. JANGAN ubah jadi
+  // "align menentukan sisi" — itu hanya menentu sisi BLOK, bukan titik.
   if (!align) return 0.5;
   const off = align.horizontalOffset ?? 0.5;
-  if (align.horizontalAlign === "left") return clamp01(off);
   if (align.horizontalAlign === "right") return 1 - clamp01(off);
-  return 0.5;
+  if (align.horizontalAlign === "center") return 0.5;
+  return clamp01(off); // left / tak ada align
 }
 
 function resolveDefY(align: TemplateDefaults["alignment"] | undefined): number {
+  // `verticalOffset` = titik anchor absolut dari ATAS (tscaps: yPx =
+  // verticalOffset×height; verticalAlign hanya menempelkan sisi blok di
+  // titik itu). Engine menyimpan anchor_y konst = nilai ini mentah.
   if (!align) return 0.75;
-  const off = align.verticalOffset ?? 0.75;
-  if (align.verticalAlign === "top") return clamp01(off);
-  if (align.verticalAlign === "bottom") return 1 - clamp01(off);
-  return 0.5;
+  return clamp01(align.verticalOffset ?? 0.75);
 }
 
 // ── Effects ───────────────────────────────────────────────────────────────

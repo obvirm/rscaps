@@ -43,7 +43,18 @@
     store.setParams({ h_align: undefined, h_offset: v });
   }
   function setAnchor(col: string, row: string) {
-    store.setParams({ h_align: col, v_align: row });
+    // Pertahankan titik anchor absolut saat sisi blok berganti — engine
+    // override: top→v_offset, bottom→1−v_offset, center→tanpa offset.
+    // Tanpa ini, offset tak-terdefinisi =0 → blok melompat ke tepi ekstrem.
+    const patch: Record<string, string | number | undefined> = {
+      h_align: col,
+      v_align: row,
+    };
+    patch.v_offset =
+      row === "center" ? undefined : row === "bottom" ? 1 - ay : ay;
+    patch.h_offset =
+      col === "center" ? undefined : col === "right" ? 1 - ax : ax;
+    store.setParams(patch);
   }
   function setAngle(v: number) {
     store.setParams({ angle_deg: v });
