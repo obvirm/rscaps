@@ -85,6 +85,11 @@ const FONT_LOADS = [
   '400 40px "Lobster"',
 ];
 
+/** Unique caption font families (from FONT_SOURCES) for the Typography panel. */
+export const FONT_FAMILIES: string[] = [
+  ...new Set(FONT_SOURCES.filter((f) => f.family).map((f) => f.family!)),
+].sort((a, b) => a.localeCompare(b));
+
 function bytesToBase64(bytes: Uint8Array): string {
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) {

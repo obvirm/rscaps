@@ -36,7 +36,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from pastor's style.scss + template.json) ─────────────
@@ -77,6 +77,25 @@ const RISE_DURATION_S: f32 = 0.34;
 // stacked); both copies are opaque black, so the chain repeats verbatim.
 const BEHIND_SHADOW_COPIES: usize = 2;
 const QUIET_SHADOW_COPIES: usize = 1;
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: BEHIND_ACTOR, // the behind register uppercases
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// pastor's pipeline: clause boundary → 5–13 char limit → gap_free +
 /// remove_punctuation. The line splitter is `{ type: "balanced",
@@ -177,14 +196,16 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
 
     // The register picks the face, the case, the metrics and the anchor.
     let (svg_font, font_weight) = if BEHIND_ACTOR {
         (BEHIND_FONT, BEHIND_FONT_WEIGHT)
     } else {
-        (FONT, FONT_WEIGHT)
+        (FONT, ov.font_weight)
     };
     let script_stack = stack::Stack::for_latin(svg_font);
     let (asc_ratio, desc_ratio, _) = if BEHIND_ACTOR {
@@ -198,13 +219,7 @@ pub fn render<'a>(
     let display: Vec<String> = segment
         .words
         .iter()
-        .map(|w| {
-            if BEHIND_ACTOR {
-                w.display.to_uppercase()
-            } else {
-                w.display.clone()
-            }
-        })
+        .map(|w| ov.text_case.apply(&w.display))
         .collect();
 
     // Measure at one em so the behind clamp can divide a target width by
@@ -221,7 +236,7 @@ pub fn render<'a>(
         font_weight,
         ctx.font_source,
         1.0,
-        LETTER_SPACING_EM,
+        ov.letter_spacing_em,
         BEHIND_ACTOR,
     );
     let unit_widths: Vec<f32> = measured.widths;
@@ -229,26 +244,26 @@ pub fn render<'a>(
     let fs = if BEHIND_ACTOR {
         let line_w_em: f32 = unit_widths
             .iter()
-            .map(|w| w + 2.0 * WORD_SPACING_EM)
+            .map(|w| w + 2.0 * ov.word_spacing_em)
             .sum();
         behind_font_size(line_w_em, video_w as f32, video_h as f32)
     } else {
-        FONT_SIZE_CQH * video_h as f32
+        overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32)
     };
-    let margin = WORD_SPACING_EM * fs;
-    let ls_px = LETTER_SPACING_EM * fs;
+    let margin = ov.word_spacing_em * fs;
+    let ls_px = ov.letter_spacing_em * fs;
     let line_h = if BEHIND_ACTOR {
         BEHIND_LINE_HEIGHT * fs
     } else {
         LINE_HEIGHT * fs
     };
-    let line_gap = LINE_SPACING_EM * fs;
+    let line_gap = ov.line_spacing_em * fs;
     let widths: Vec<f32> = unit_widths.iter().map(|w| w * fs).collect();
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
@@ -258,9 +273,9 @@ pub fn render<'a>(
     let block_top = if BEHIND_ACTOR {
         BEHIND_Y_FRAC * video_h as f32
     } else {
-        ANCHOR_Y_FRAC * video_h as f32
+        ov.anchor_y * video_h as f32
     };
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -280,10 +295,12 @@ pub fn render<'a>(
         word_shadow_filter(shadow_copies, shadow_dy, shadow_std)
     );
 
-    let svg_font_attr = stack::svg_font_family(&svg_font);
+    let family = if BEHIND_ACTOR { svg_font } else { ov.font_family.as_str() };
+    let svg_font_attr = stack::svg_font_family(family);
     let mut words_svg = format!(
         "<g font-family=\"{svg_font_attr}\" font-weight=\"{font_weight}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\" fill=\"{PRIMARY}\">"
+         letter-spacing=\"{ls_px}\" fill=\"{fill}\">",
+        fill = ov.primary,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * (line_h + line_gap);
@@ -295,12 +312,12 @@ pub fn render<'a>(
         // Behind: the line rises in as its own narration starts (the
         // delay `--on-line-being-narrated-starts` resolves to); quiet
         // lines just are.
-        let (opacity, dy_em) = if BEHIND_ACTOR {
+        let (opacity, dy_em) = if BEHIND_ACTOR && !ov.motion_static {
             let span = state::LineSpan::of_words(&segment.words[start..end]);
             recipes::RiseIn::custom(
-                RISE_DISTANCE_EM,
+                ov.distance_or(RISE_DISTANCE_EM),
                 0.0,
-                RISE_DURATION_S,
+                ov.duration_or(RISE_DURATION_S),
                 recipes::ease_entrance,
             )
             .eval((now_ms - span.start_ms) / 1000.0)
@@ -330,10 +347,24 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
+    // User rotation wraps the caption around the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top
+            + (lines.len() as f32 * line_h
+                + lines.len().saturating_sub(1) as f32 * line_gap)
+                / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

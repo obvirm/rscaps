@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { ArrowLeft, Undo2, Redo2, Sun, Moon, Monitor } from "@lucide/svelte";
   import { store } from "../lib/state.svelte";
-  import { toggleTheme } from "../lib/theme";
+  import { cycleTheme, getMode, type Theme } from "../lib/theme";
   import ExportDialog from "./ExportDialog.svelte";
   import type { ExportProjectRef } from "../lib/types";
 
@@ -8,6 +9,9 @@
 
   let fileInput: HTMLInputElement;
   let showExport = $state(false);
+
+  // Theme mode mirrors the store-less theme module via a local tick.
+  let themeMode = $state<Theme>(getMode());
 
   const exportProject = $derived<ExportProjectRef | null>(
     store.currentId
@@ -21,6 +25,33 @@
       : null,
   );
 
+  // Project name: local draft, commit on blur/Enter, Esc reverts (tscaps).
+  let nameDraft = $state(store.projectName);
+  let nameFocused = $state(false);
+  let lastName = $state(store.projectName);
+  $effect(() => {
+    if (!nameFocused && store.projectName !== lastName) {
+      lastName = store.projectName;
+      nameDraft = store.projectName;
+    }
+  });
+  function commitName() {
+    if (nameDraft !== store.projectName) store.projectName = nameDraft.trim() || "Untitled";
+  }
+
+  // Save status pill (tscaps ProjectSaveStatusPill).
+  const savePill = $derived.by(() => {
+    if (store.saveState === "saving") return { label: "Saving", tone: "info" };
+    if (store.saveState === "error") return { label: "Save failed", tone: "danger" };
+    if (store.dirty) return { label: "Unsaved changes", tone: "warning" };
+    return { label: "Saved", tone: "subtle" };
+  });
+
+  function onThemeCycle() {
+    themeMode = cycleTheme();
+  }
+  const ThemeIcon = $derived(themeMode === "light" ? Sun : themeMode === "dark" ? Moon : Monitor);
+
   async function onFileChange(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -33,33 +64,101 @@
       input.value = "";
     }
   }
+
+  async function onSave() {
+    try {
+      await store.saveCurrent();
+      await store.refreshProjects();
+    } catch (err) {
+      store.setStatus(String(err), true);
+    }
+  }
+
+  function onBackClick() {
+    onBack?.();
+  }
 </script>
 
-<header class="command-bar">
-  <button class="icon-btn" onclick={onBack} title="Back to projects" aria-label="Back">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3 5 8l5 5" /></svg>
-  </button>
+<header class="toolbar">
+  <div class="cluster">
+    <button class="icon-btn" onclick={onBackClick} title="Back to dashboard" aria-label="Back to dashboard">
+      <ArrowLeft size={16} />
+    </button>
+    <input
+      class="name-input"
+      aria-label="Project name"
+      placeholder="Untitled"
+      bind:value={nameDraft}
+      onfocus={() => (nameFocused = true)}
+      onblur={() => {
+        nameFocused = false;
+        commitName();
+      }}
+      onkeydown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        if (e.key === "Escape") {
+          nameDraft = store.projectName;
+          (e.target as HTMLInputElement).blur();
+        }
+      }}
+    />
+  </div>
 
-  <span class="wordmark">rscaps</span>
-
-  <input class="name-input" aria-label="Project name" bind:value={store.projectName} />
+  <div class="cluster">
+    <button class="icon-btn" disabled title="Undo (Ctrl+Z)" aria-label="Undo">
+      <Undo2 size={16} />
+    </button>
+    <button class="icon-btn" disabled title="Redo (Ctrl+Y)" aria-label="Redo">
+      <Redo2 size={16} />
+    </button>
+  </div>
 
   <div class="spacer"></div>
 
-  <span class="status" class:error={store.statusIsError}>{store.status}</span>
-
-  <div class="group">
-    <button class="btn" onclick={() => fileInput.click()} title="Import captions from a .srt or .vtt file">Import</button>
-    <button class="btn" onclick={() => store.exportSubtitle("srt")} title="Download captions as SubRip (.srt)">.srt</button>
-    <button class="btn" onclick={() => store.exportSubtitle("vtt")} title="Download captions as WebVTT (.vtt)">.vtt</button>
+  <div class="desktop-only pill-zone">
+    <span class="pill {savePill.tone}">{savePill.label}</span>
   </div>
 
-  <button class="icon-btn" onclick={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.5" /><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" stroke="none" /></svg>
+  <div class="desktop-only cluster">
+    <button
+      class="icon-btn"
+      onclick={onThemeCycle}
+      title="Theme: {themeMode} (click to change)"
+      aria-label="Theme: {themeMode}. Click to change."
+    >
+      <ThemeIcon size={16} />
+    </button>
+  </div>
+
+  <div class="cluster import-group desktop-only">
+    <button
+      class="btn"
+      onclick={() => fileInput.click()}
+      title="Import captions from a .srt or .vtt file">Import</button
+    >
+    <button class="btn" onclick={() => store.exportSubtitle("srt")} title="Download captions as SubRip (.srt)"
+      >.srt</button
+    >
+    <button class="btn" onclick={() => store.exportSubtitle("vtt")} title="Download captions as WebVTT (.vtt)"
+      >.vtt</button
+    >
+  </div>
+
+  <button
+    class="save-btn"
+    onclick={onSave}
+    disabled={!store.dirty || store.saveState === "saving"}
+    aria-label="Save project"
+  >
+    {store.saveState === "saving" ? "Saving…" : "Save"}
   </button>
 
-  <button class="btn" disabled>Save</button>
-  <button class="btn accent" onclick={() => (showExport = true)} disabled={!store.currentId} title="Export video with burned-in captions">Export</button>
+  <button
+    class="btn accent"
+    onclick={() => (showExport = true)}
+    disabled={!store.currentId}
+    title="Export video with burned-in captions">Export</button
+  >
 
   <input
     bind:this={fileInput}
@@ -75,23 +174,32 @@
 {/if}
 
 <style>
-  .command-bar {
+  .toolbar {
+    width: 100%;
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 14px;
-    border-bottom: 1px solid rgb(var(--border));
+    gap: 4px;
+    padding: 4px 4px 10px;
+    border-bottom: 1px solid rgb(var(--border-subtle));
     flex-shrink: 0;
+    margin-bottom: 12px;
   }
-  .wordmark {
-    font-weight: 700;
-    font-size: 15px;
-    letter-spacing: -0.02em;
-    color: rgb(var(--fg-0));
-    padding-right: 4px;
-    border-right: 1px solid rgb(var(--border));
-    margin-right: 2px;
-    user-select: none;
+  .cluster {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+  .spacer {
+    flex: 1;
+  }
+  .desktop-only {
+    display: flex;
+  }
+  @media (max-width: 1023px) {
+    .desktop-only {
+      display: none;
+    }
   }
   .icon-btn {
     display: inline-flex;
@@ -99,25 +207,35 @@
     justify-content: center;
     width: 32px;
     height: 32px;
-    border-radius: var(--r-sm);
+    border: 1px solid transparent;
+    border-radius: var(--r-xs);
     color: rgb(var(--fg-1));
-    transition: color var(--motion) var(--ease), background-color var(--motion) var(--ease);
+    transition:
+      color var(--motion) var(--ease),
+      background-color var(--motion) var(--ease),
+      border-color var(--motion) var(--ease);
   }
   .icon-btn:not(:disabled):hover {
     background: rgb(var(--bg-2));
+    border-color: rgb(var(--border));
     color: rgb(var(--fg-0));
+  }
+  .icon-btn:focus-visible {
+    border-color: rgb(var(--accent));
   }
   .name-input {
     background: transparent;
     border: 1px solid transparent;
-    border-radius: var(--r-sm);
+    border-radius: var(--r-xs);
     color: rgb(var(--fg-0));
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 500;
-    padding: 5px 8px;
+    padding: 6px 8px;
     min-width: 120px;
-    max-width: 300px;
-    transition: background-color var(--motion) var(--ease), border-color var(--motion) var(--ease);
+    max-width: 320px;
+    transition:
+      background-color var(--motion) var(--ease),
+      border-color var(--motion) var(--ease);
   }
   .name-input:hover {
     background: rgb(var(--bg-2));
@@ -127,42 +245,60 @@
     background: rgb(var(--bg-2));
     border-color: rgb(var(--accent));
   }
-  .spacer {
-    flex: 1;
-  }
-  .group {
-    display: flex;
-    gap: 4px;
-  }
-  .status {
-    font-family: var(--font-mono);
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    padding: 0 9px;
+    border-radius: var(--r-pill);
     font-size: 11px;
-    color: rgb(var(--fg-2));
-    max-width: 360px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    padding: 3px 8px;
-    border-radius: var(--r-sm);
-    background: rgb(var(--bg-1));
+    font-weight: 500;
     border: 1px solid rgb(var(--border));
+    background: rgb(var(--bg-1));
+    color: rgb(var(--fg-2));
+    white-space: nowrap;
   }
-  .status.error {
+  .pill::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.85;
+  }
+  .pill.info {
+    color: rgb(var(--accent-hi));
+    border-color: rgb(var(--accent) / 0.4);
+  }
+  .pill.warning {
+    color: rgb(var(--warning));
+    border-color: rgb(var(--warning) / 0.4);
+  }
+  .pill.danger {
     color: rgb(var(--error));
     border-color: rgb(var(--error) / 0.4);
+  }
+  .pill.subtle {
+    color: rgb(var(--fg-2));
+  }
+  .import-group {
+    gap: 4px;
   }
   .btn {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 11px;
-    font-size: 12.5px;
+    padding: 7px 11px;
+    font-size: 13px;
     font-weight: 500;
     color: rgb(var(--fg-0));
     background: rgb(var(--bg-1));
     border: 1px solid rgb(var(--border));
-    border-radius: var(--r-sm);
-    transition: background-color var(--motion) var(--ease), border-color var(--motion) var(--ease);
+    border-radius: var(--r-xs);
+    transition:
+      background-color var(--motion) var(--ease),
+      border-color var(--motion) var(--ease);
   }
   .btn:not(:disabled):hover {
     background: rgb(var(--bg-2));
@@ -176,5 +312,24 @@
   .btn.accent:not(:disabled):hover {
     background: rgb(var(--accent-hi));
     border-color: rgb(var(--accent-hi));
+  }
+  .save-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    border-radius: var(--r-xs);
+    border: 1px solid rgb(var(--border));
+    font-size: 13px;
+    font-weight: 500;
+    color: rgb(var(--fg-0));
+    background: rgb(var(--bg-2));
+    transition:
+      background-color var(--motion) var(--ease),
+      border-color var(--motion) var(--ease);
+  }
+  .save-btn:not(:disabled):hover {
+    background: rgb(var(--bg-3));
+    border-color: rgb(var(--accent));
   }
 </style>

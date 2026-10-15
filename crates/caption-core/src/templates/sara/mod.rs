@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from sara's style.scss + template.json) ───────────────
@@ -41,6 +41,25 @@ const SHADOW_COLOR: &str = "#000000"; // --tscaps-shadow-color default
 // -webkit-text-stroke: var(--tscaps-outline-thickness, 0em) $outline-color
 const OUTLINE_THICKNESS_EM: f32 = 0.0;
 const OUTLINE_COLOR: &str = "#000000"; // --tscaps-outline-color default
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: 0.0, // no LINE_SPACING_EM in sara's spec
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: false,
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// sara's `effects` array: `gap_free`, `smart_punctuation`.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -96,11 +115,13 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -111,7 +132,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         IM_FELL_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -120,17 +141,17 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
 
     // Top-aligned block: the block's top edge sits at 0.62H; lines center
     // horizontally.
-    let block_top = ANCHOR_Y_FRAC * video_h as f32;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -145,11 +166,13 @@ pub fn render<'a>(
     let stroke_px = OUTLINE_THICKNESS_EM * fs;
 
     // Each word fades in on its own narration clock.
-    let fade = recipes::FadeIn::with(0.0, FADE_DURATION_S);
+    let fade = recipes::FadeIn::with(0.0, ov.duration_or(FADE_DURATION_S));
 
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\" filter=\"url(#sara-shadow)\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\" filter=\"url(#sara-shadow)\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * line_h;
@@ -162,26 +185,42 @@ pub fn render<'a>(
             .zip(&segment.words[start..end])
             .zip(&measured.families[start..end])
         {
-            let opacity = fade.eval((now_ms - word.start_ms) / 1000.0);
+            let opacity = if ov.motion_static {
+                1.0
+            } else {
+                fade.eval((now_ms - word.start_ms) / 1000.0)
+            };
             let family_attr = if *family == FONT {
                 String::new()
             } else {
                 format!(" font-family=\"{family}\"")
             };
-            let text = layout::escape_xml(&word.display);
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
                  stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
-                 paint-order=\"stroke\" opacity=\"{opacity}\">{text}</text>"
+                 paint-order=\"stroke\" opacity=\"{opacity}\">{text}</text>",
+                fill = ov.primary,
             ));
         }
     }
     words_svg.push_str("</g>");
 
+    // User rotation wraps the caption around the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + (lines.len() as f32 * line_h) / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

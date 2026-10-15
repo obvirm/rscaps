@@ -1,0 +1,78 @@
+// LayoutPanel - tab "Layout": scene char-limit + line-splitter knobs
+// (mirip tscaps LayoutTab). Nilai via DocParams; 0 = template default.
+import { Theme } from "./theme.slint";
+import { DocParams } from "./params_global.slint";
+import { Section, FieldRow, Slider } from "./controls.slint";
+import { AppButton } from "./app_button.slint";
+
+
+export component LayoutPanel inherits VerticalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    spacing: 0px;
+
+    Flickable {
+        VerticalLayout {
+            spacing: 0px;
+
+            Section {
+                is-dark: root.is-dark;
+                title: "SCENES";
+                first: true;
+                show-reset: false;
+                FieldRow {
+                    is-dark: root.is-dark;
+                    label: "Max chars";
+                    Slider {
+                        is-dark: root.is-dark;
+                        minimum: 0.0;
+                        maximum: 120.0;
+                        value: DocParams.max-chars;
+                        changed(v) => { DocParams.max-chars-changed(Math.round(v)); }
+                    }
+                }
+            }
+
+            Section {
+                is-dark: root.is-dark;
+                title: "LINES";
+                show-reset: false;
+                FieldRow {
+                    is-dark: root.is-dark;
+                    label: "Max lines";
+                    Slider {
+                        is-dark: root.is-dark;
+                        minimum: 0.0;
+                        maximum: 8.0;
+                        value: DocParams.max-lines;
+                        changed(v) => { DocParams.max-lines-changed(Math.round(v)); }
+                    }
+                }
+                FieldRow {
+                    is-dark: root.is-dark;
+                    label: "Max width";
+                    Slider {
+                        is-dark: root.is-dark;
+                        minimum: 0.0;
+                        maximum: 1.0;
+                        value <=> DocParams.max-width-frac;
+                        changed(v) => { DocParams.max-width-frac-changed(v); }
+                    }
+                }
+            }
+
+            Text {
+                text: "0 = template default";
+                color: root.is-dark ? Theme.fg2-dark : Theme.fg2-light;
+                font-size: 10.5px;
+                horizontal-alignment: center;
+            }
+
+            AppButton {
+                is-dark: root.is-dark;
+                text: "Reset layout";
+                horizontal-stretch: 0;
+                clicked => { DocParams.reset-layout(); }
+            }
+        }
+    }
+}

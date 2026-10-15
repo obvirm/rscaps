@@ -31,7 +31,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from milo's style.scss + template.json) ───────────────
@@ -87,6 +87,25 @@ const SMALL_NUM_MAX_EM: f32 = 4.5; // numerator growth: 4.5em × L
 const PRIMARY: &str = "#ffffff"; // primary-color default
 const BLEND: &str = "#ffffff"; // blend-color default
 
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_GAP_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: true, // the anchor word uppercases; the rest pass through
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
+
 /// milo's `effects` array: `gap_free`, `remove_punctuation`.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
     boundary: pipeline::Boundary::Clause, // segmentSplitters[0].mode: "clause"
@@ -141,12 +160,6 @@ fn line_metrics(latin: &str, dominant: &str) -> (f32, f32, f32) {
     } else {
         stack::script_metrics(dominant).expect("script face")
     }
-}
-
-/// `text-transform: uppercase` — the anchor measures and paints in this
-/// form (its `--word-char-count`, though, is taken before the transform).
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
 }
 
 // ── the container query ───────────────────────────────────────────────────
@@ -252,10 +265,12 @@ pub fn render<'a>(
     };
     let segment = &segments[index];
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let gap = WORD_GAP_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let gap = ov.word_spacing_em * fs;
     let margin = gap / 2.0; // the column-gap rides each word as a half-margin
     let line_h = LINE_HEIGHT * fs;
     let pad_x = PAD_X_EM * fs;
@@ -274,18 +289,18 @@ pub fn render<'a>(
         &segment.words,
         &main_stack,
         LOBSTER_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
-        LETTER_SPACING_EM * fs,
+        ov.letter_spacing_em * fs,
         false,
     );
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
@@ -333,7 +348,7 @@ pub fn render<'a>(
 
     for (line_index, &(start, end)) in lines.iter().enumerate() {
         if line_index > 0 {
-            cursor_top += LINE_SPACING_EM * fs;
+            cursor_top += ov.line_spacing_em * fs;
         }
         let line_top = cursor_top;
         let (line_width, line_height) = if geometry {
@@ -360,10 +375,10 @@ pub fn render<'a>(
                 &segment.words[start..end - 1],
                 &main_stack,
                 LOBSTER_TTF,
-                FONT_WEIGHT,
+                ov.font_weight,
                 ctx.font_source,
                 plain_fs,
-                LETTER_SPACING_EM * plain_fs,
+                ov.letter_spacing_em * plain_fs,
                 false,
             );
             let small_widths = &small_measured.widths;
@@ -425,8 +440,8 @@ pub fn render<'a>(
     // visible) and paints no chrome, so the content simply flows down
     // from the padded top edge.
     let box_w = content_w + 2.0 * pad_x;
-    let box_left = ANCHOR_X_FRAC * video_w as f32 - box_w / 2.0;
-    let box_top = ANCHOR_Y_FRAC * video_h as f32;
+    let box_left = ov.anchor_x * video_w as f32 - box_w / 2.0;
+    let box_top = ov.anchor_y * video_h as f32;
     let content_left = box_left + pad_x;
     let content_top = box_top + pad_y;
 
@@ -435,7 +450,12 @@ pub fn render<'a>(
     // adding to it.
     let elapsed_s = (now_ms - segment.start_ms) / 1000.0;
     let breathing = is_breathing(&segments, index);
-    let rise = recipes::RiseIn::custom(RISE_EM, RISE_FROM_OPACITY, RISE_DURATION_S, rise_ease);
+    let rise = recipes::RiseIn::custom(
+        ov.distance_or(RISE_EM),
+        RISE_FROM_OPACITY,
+        ov.duration_or(RISE_DURATION_S),
+        rise_ease,
+    );
 
     // `text-shadow` on the anchor is `none`; every other word carries it,
     // and `em` in a shadow resolves against that word's own font size.
@@ -443,14 +463,20 @@ pub fn render<'a>(
     let shadow_std = SHADOW_BLUR_EM * plain_fs / 2.0;
 
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (i, word) in segment.words.iter().enumerate() {
         let anchor = is_big[i];
         let wfs = word_fs[i];
         // `em` in a transform resolves against the element's own size too.
-        let (opacity, tx, ty) = if breathing {
-            let slide = recipes::SlideIn::with(breathing_slide_em(last_in_line[i]), 0.0);
+        let (opacity, tx, ty) = if ov.motion_static {
+            (1.0, 0.0, 0.0)
+        } else if breathing {
+            let mut slide = recipes::SlideIn::with(breathing_slide_em(last_in_line[i]), 0.0);
+            slide.duration_s = ov.duration_or(slide.duration_s);
+            slide.distance_em = slide.distance_em.signum() * ov.distance_or(SLIDE_EM);
             let (opacity, dx_em) = slide.eval(elapsed_s);
             (opacity, dx_em * wfs, 0.0)
         } else {
@@ -458,7 +484,7 @@ pub fn render<'a>(
             (opacity, 0.0, dy_em * wfs)
         };
         let shown = if anchor {
-            uppercase(&word.display)
+            ov.text_case.apply(&word.display)
         } else {
             word.display.clone()
         };
@@ -480,18 +506,31 @@ pub fn render<'a>(
                 format!(" font-family=\"{}\"", measured.families[i])
             };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{y}\" fill=\"{PRIMARY}\"{family_attr} font-size=\"{wfs}\" \
+                "<text x=\"{x}\" y=\"{y}\" fill=\"{primary}\"{family_attr} font-size=\"{wfs}\" \
                  filter=\"url(#milo-shadow)\" opacity=\"{opacity}\" \
-                 transform=\"translate({tx} {ty})\">{text}</text>"
+                 transform=\"translate({tx} {ty})\">{text}</text>",
+                primary = ov.primary.as_str(),
             ));
         }
     }
     words_svg.push_str("</g>");
 
+    // User rotation wraps the shrink-to-fit box about its centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let block_h = 2.0 * pad_y + cursor_top;
+        let cx = ov.anchor_x * video_w as f32;
+        let cy = box_top + block_h / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

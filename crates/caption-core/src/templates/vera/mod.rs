@@ -16,7 +16,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, stack, state};
+use super::{effects, layout, overrides, pipeline, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from vera's style.scss + template.json) ──────────────
@@ -48,6 +48,25 @@ const PILL_BG: &str = "#2563eb";
 const PILL_RADIUS_EM: f32 = 0.08;
 const PILL_PAD_X_EM: f32 = 0.18;
 const PILL_PAD_Y_EM: f32 = 0.10;
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: false,
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// vera's `effects`: `emoji` (skipped, see the module doc) + `gap_free`.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -112,11 +131,13 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs; // word-layout: full spacing per side
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs; // word-layout: full spacing per side
     let line_h = LINE_HEIGHT * fs;
     let plate_pad_x = PLATE_PAD_X_EM * fs;
     let plate_pad_y = PLATE_PAD_Y_EM * fs;
@@ -131,7 +152,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         INTER_900_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -140,18 +161,18 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
 
     // Bottom-aligned block: the block's bottom edge sits at 0.78H.
     let block_h = lines.len() as f32 * line_h
-        + lines.len().saturating_sub(1) as f32 * LINE_SPACING_EM * fs;
-    let block_top = ANCHOR_Y_FRAC * video_h as f32 - block_h;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+        + lines.len().saturating_sub(1) as f32 * ov.line_spacing_em * fs;
+    let block_top = ov.anchor_y * video_h as f32 - block_h;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -160,8 +181,10 @@ pub fn render<'a>(
     let pill_r = PILL_RADIUS_EM * fs;
 
     let mut body = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * (line_h + LINE_SPACING_EM * fs);
@@ -204,8 +227,11 @@ pub fn render<'a>(
             .zip(words)
             .zip(&measured.families[start..end])
         {
-            let text = layout::escape_xml(&word.display);
-            let fill = word_fill(now_ms, word);
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
+            let fill = match word_fill(now_ms, word) {
+                PRIMARY => ov.primary.as_str(),
+                f => f,
+            };
             let family_attr = if *family == FONT {
                 String::new()
             } else {
@@ -218,10 +244,21 @@ pub fn render<'a>(
     }
     body.push_str("</g>");
 
+    // User rotation wraps the caption around the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + block_h / 2.0;
+        body = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = body,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

@@ -2363,6 +2363,7 @@ pub fn main() {
                     }
                     ui.set_doc_text(doc_str.into());
                     overlay_render::request(&ui, ui.get_frame());
+                    crate::ui_common::sync_cue_list(&ui);
                     ui.set_status(
                         format!("imported {n} cue{} from {name}", if n == 1 { "" } else { "s" })
                             .into(),
@@ -3090,6 +3091,7 @@ pub fn main() {
             if let Ok(mut doc) = caption_core::document().write() {
                 doc.template = template_id(i);
             }
+            crate::ui_common::sync_style_controls(&ui);
             overlay_render::invalidate();
             overlay_render::request(&ui, ui.get_frame());
             if let Some(pid) = cur_tpl.borrow().clone() {
@@ -3129,9 +3131,24 @@ pub fn main() {
     });
 
     let weak = ui.as_weak();
+    // Snapshot history untuk Direction & Apply (Code panel) — memakai
+    // DocHistory yang sama dengan undo utama.
+    let hist_dir = doc_hist.clone();
+    let hist_apply = doc_hist.clone();
+    let cur_apply = current_id.clone();
     ui.on_direction_chosen(move |i| {
         if let Some(ui) = weak.upgrade() {
             ui.set_direction_selected(i);
+            // Tulis params.direction (auto/ltr/rtl) — pipeline kata +
+            // renderer baca field ini (satu titik caption-core).
+            let s = match i { 1 => "ltr", 2 => "rtl", _ => "auto" };
+            if let Some(snap) = doc_json_now() {
+                hist_dir.borrow_mut().push(snap);
+            }
+            let _ = caption_core::patch_params_json(&format!(r#"{{"direction": "{s}"}}"#));
+            overlay_render::invalidate();
+            overlay_render::request(&ui, ui.get_frame());
+            ui.set_status(format!("direction: {s}").into());
         }
     });
 
@@ -3139,7 +3156,29 @@ pub fn main() {
     ui.on_apply(move || {
         log("apply fired");
         if let Some(ui) = weak.upgrade() {
-            ui.set_status("applied".into());
+            // Apply = ganti seluruh dokumen dari editor JSON Code panel.
+            let text = ui.get_doc_text().to_string();
+            if let Some(snap) = doc_json_now() {
+                hist_apply.borrow_mut().push(snap);
+            }
+            match caption_core::set_document_json(&text) {
+                Ok(()) => {
+                    overlay_render::invalidate();
+                    crate::ui_common::sync_params_global(&ui);
+                    crate::ui_common::sync_style_controls(&ui);
+                    crate::ui_common::sync_cue_list(&ui);
+                    if let Some(pid) = cur_apply.borrow().clone() {
+                        persist_doc(&pid);
+                    }
+                    overlay_render::request(&ui, ui.get_frame());
+                    ui.set_status("document applied".into());
+                    ui.set_status_is_error(false);
+                }
+                Err(e) => {
+                    ui.set_status(format!("apply failed: {e}").into());
+                    ui.set_status_is_error(true);
+                }
+            }
         }
     });
 
@@ -3163,6 +3202,9 @@ pub fn main() {
             }
             hist_undo.borrow().sync_buttons(&ui);
             overlay_render::request(&ui, ui.get_frame());
+            crate::ui_common::sync_params_global(&ui);
+            crate::ui_common::sync_style_controls(&ui);
+            crate::ui_common::sync_cue_list(&ui);
             ui.set_status("undone".into());
         }
     });
@@ -3186,6 +3228,9 @@ pub fn main() {
             }
             hist_redo.borrow().sync_buttons(&ui);
             overlay_render::request(&ui, ui.get_frame());
+            crate::ui_common::sync_params_global(&ui);
+            crate::ui_common::sync_style_controls(&ui);
+            crate::ui_common::sync_cue_list(&ui);
             ui.set_status("redone".into());
         }
     });
@@ -3419,6 +3464,61 @@ pub fn main() {
             }
             set_body_theme(dark); // Opsi A2: body ikut tema
         });
+    }
+
+    // DocParams global wiring (sidebar panels → caption-core). Shared di
+    // ui_common (satu titik dgn native); WASM menambah undo snapshot +
+    // overlay invalidate + persist per patch.
+    {
+        let hist = doc_hist.clone();
+        let cur = current_id.clone();
+        crate::ui_common::wire_doc_params(
+            &ui,
+            {
+                let hist = hist.clone();
+                move |_ui: &App| {
+                    if let Some(snap) = doc_json_now() {
+                        hist.borrow_mut().push(snap);
+                    }
+                }
+            },
+            {
+                let cur = cur.clone();
+                move |ui: &App| {
+                    overlay_render::invalidate();
+                    overlay_render::request(ui, ui.get_frame());
+                    crate::ui_common::sync_cue_list(ui);
+                    if let Some(pid) = cur.borrow().clone() {
+                        persist_doc(&pid);
+                    }
+                }
+            },
+        );
+        crate::ui_common::wire_doc_cues(
+            &ui,
+            {
+                let hist = hist.clone();
+                move |_ui: &App| {
+                    if let Some(snap) = doc_json_now() {
+                        hist.borrow_mut().push(snap);
+                    }
+                }
+            },
+            {
+                let cur = cur.clone();
+                move |ui: &App| {
+                    overlay_render::invalidate();
+                    overlay_render::request(ui, ui.get_frame());
+                    crate::ui_common::sync_cue_list(ui);
+                    if let Some(pid) = cur.borrow().clone() {
+                        persist_doc(&pid);
+                    }
+                }
+            },
+        );
+        crate::ui_common::sync_params_global(&ui);
+        crate::ui_common::sync_cue_list(&ui);
+        crate::ui_common::sync_style_controls(&ui);
     }
 
     // HiDPI: keep attrs = rendered box * dpr (blur fix; MutationObserver wins

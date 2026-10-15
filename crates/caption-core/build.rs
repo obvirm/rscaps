@@ -74,12 +74,51 @@ fn main() {
             .get("galleryOrder")
             .and_then(|value| value.as_u64())
             .map(|value| value as u32);
+        // Style controls + variants: raw JSON untuk panel Style data-driven.
+        // Control tanpa `label`/`type` (referensi internal) dibuang — panel
+        // hanya butuh field yang bisa diedit user.
+        let style_controls = json
+            .get("styleControls")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                let kept: Vec<&serde_json::Value> = items
+                    .iter()
+                    .filter(|item| {
+                        item.get("label").and_then(|v| v.as_str()).is_some()
+                            && item.get("type").and_then(|v| v.as_str()).is_some()
+                    })
+                    .collect();
+                serde_json::Value::Array(kept.into_iter().cloned().collect())
+            })
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+        let variants = json.get("variants").cloned().unwrap_or_else(|| {
+            serde_json::Value::Array(Vec::new())
+        });
+        // Template defaults untuk panel (Typography/Position/Layout/Effects):
+        // raw JSON per bagian template.json yang tidak berubah saat edit.
+        let mut defaults = serde_json::Map::new();
+        for key in [
+            "typography",
+            "alignment",
+            "rendering",
+            "segmentSplitters",
+            "lineSplitter",
+            "features",
+            "effects",
+        ] {
+            if let Some(value) = json.get(key) {
+                defaults.insert(key.to_string(), value.clone());
+            }
+        }
 
         entries.push(TemplateRow {
             id,
             label: label.to_string(),
             category: category.to_string(),
             gallery_order,
+            style_controls: style_controls.to_string(),
+            variants: variants.to_string(),
+            defaults: serde_json::Value::Object(defaults).to_string(),
         });
     }
 
@@ -98,11 +137,16 @@ fn main() {
             None => "None".to_string(),
         };
         out.push_str(&format!(
-            "    TemplateEntry {{ id: \"{id}\", label: \"{label}\", category: \"{category}\", gallery_order: {order}, render: {id}::render }},\n",
+            "    TemplateEntry {{ id: {id:?}, label: {label:?}, category: {category:?}, gallery_order: {order}, \
+             style_controls: {controls:?}, variants: {variants:?}, defaults: {defaults:?}, render: {rid}::render }},\n",
             id = entry.id,
             label = entry.label,
             category = entry.category,
             order = order,
+            controls = entry.style_controls,
+            variants = entry.variants,
+            defaults = entry.defaults,
+            rid = entry.id,
         ));
     }
     out.push_str("];\n");
@@ -116,4 +160,7 @@ struct TemplateRow {
     label: String,
     category: String,
     gallery_order: Option<u32>,
+    style_controls: String,
+    variants: String,
+    defaults: String,
 }

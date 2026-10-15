@@ -20,12 +20,8 @@
 
   async function onChange(e: Event) {
     const id = (e.currentTarget as HTMLSelectElement).value;
-    if (!store.setTemplate(id)) {
-      store.setStatus("invalid document JSON", true);
-      return;
-    }
     try {
-      await store.applyDocument();
+      await store.applyTemplate(id);
     } catch (err) {
       store.setStatus(String(err), true);
     }

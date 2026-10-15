@@ -1,0 +1,432 @@
+// Controls - atoms for the sidebar editing panels (Typography/Position/
+// Effects/…). Visual style follows the existing components (Theme tokens,
+// 30px rows, rSm corners); behaviour mirrors tscaps' Slider/Toggle/Select/
+// ColorPicker/anchor grid with a native-Slint look.
+import { Theme } from "./theme.slint";
+
+
+// ── Section ────────────────────────────────────────────────────────────────
+// Uppercase title + optional reset, then children. border-t separator
+// between sections (first:none) like tscaps Section.
+export component Section inherits VerticalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    in property <string> title;
+    in property <bool> first: false;
+    in property <bool> show-reset: true;
+    callback reset;
+    spacing: 8px;
+    padding-top: 10px;
+    padding-bottom: 4px;
+    if !root.first: Rectangle {
+        height: 1px;
+        background: root.is-dark ? Theme.border-dark : Theme.border-light;
+        vertical-stretch: 0;
+    }
+    HorizontalLayout {
+        height: 20px;
+        spacing: 6px;
+        Text {
+            text: root.title;
+            color: root.is-dark ? Theme.fg2-dark : Theme.fg2-light;
+            font-size: 10.5px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.show-reset: Rectangle {
+            width: 22px; height: 22px;
+            border-radius: Theme.rSm;
+            background: reset-touch.has-hover ? (root.is-dark ? Theme.bg2-dark : Theme.bg2-light) : transparent;
+            reset-touch := TouchArea {
+                width: 100%; height: 100%;
+                clicked => { root.reset(); }
+            }
+            Text {
+                width: 100%; height: 100%;
+                text: "↺";
+                color: root.is-dark ? Theme.fg1-dark : Theme.fg1-light;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    @children
+}
+
+// ── FieldRow ───────────────────────────────────────────────────────────────
+// Label (fixed column) + control slot. One editable row.
+export component FieldRow inherits HorizontalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    in property <string> label;
+    in property <length> label-w: 96px;
+    spacing: 8px;
+    min-height: 28px;
+    Text {
+        width: root.label-w;
+        text: root.label;
+        color: root.is-dark ? Theme.fg1-dark : Theme.fg1-light;
+        font-size: 12px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    @children
+}
+
+// ── Slider ─────────────────────────────────────────────────────────────────
+// Horizontal track + thumb; drag or click to set. Numeric chip on the right
+// shows the value (step-formatted by the caller via `format`).
+export component Slider inherits HorizontalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    in property <float> minimum: 0.0;
+    in property <float> maximum: 1.0;
+    in-out property <float> value: 0.0;
+    in property <string> suffix: "";
+    callback changed(float);
+    spacing: 8px;
+    alignment: center;
+
+    function frac() -> float {
+        if (root.maximum <= root.minimum) { return 0.0; }
+        return (root.value - root.minimum) / (root.maximum - root.minimum);
+    }
+
+    function set-from-px(px: length) {
+        let w = max(track.width, 1px);
+        let f = min(1.0, max(0.0, px / w));
+        let v = root.minimum + f * (root.maximum - root.minimum);
+        if (v != root.value) {
+            root.value = v;
+            root.changed(v);
+        }
+    }
+
+    Rectangle {
+        height: 28px;
+        horizontal-stretch: 1;
+        track := Rectangle {
+            height: 4px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 2px;
+            background: root.is-dark ? Theme.bg3-dark : Theme.bg3-light;
+            // Fill from left to thumb.
+            Rectangle {
+                x: 0px;
+                width: parent.width * root.frac();
+                height: 100%;
+                border-radius: 2px;
+                background: root.is-dark ? Theme.accent-dark : Theme.accent-light;
+            }
+        }
+        // Thumb.
+        Rectangle {
+            x: (track.width - self.width) * root.frac() - self.width / 2 + (track.x);
+            y: (parent.height - self.height) / 2;
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            background: root.is-dark ? Theme.fg0-dark : Theme.fg0-light;
+            border-color: root.is-dark ? Theme.borderStrong-dark : Theme.borderStrong-light;
+            border-width: 1px;
+        }
+        // Hit area on top.
+        touch := TouchArea {
+            width: 100%; height: 100%;
+            moved => {
+                if (self.pressed) { root.set-from-px(self.mouse-x); }
+            }
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.set-from-px(self.mouse-x);
+                }
+            }
+        }
+    }
+    // Value chip (fixed width avoids a width binding loop).
+    Rectangle {
+        width: 48px;
+        height: 22px;
+        border-radius: Theme.rSm;
+        background: root.is-dark ? Theme.bg2-dark : Theme.bg2-light;
+        value-text := Text {
+            x: 5px;
+            width: parent.width - 10px;
+            height: 100%;
+            text: Math.round(root.value * 100.0) / 100.0 + root.suffix;
+            color: root.is-dark ? Theme.fg0-dark : Theme.fg0-light;
+            font-size: 11px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// ── Toggle ─────────────────────────────────────────────────────────────────
+// Label left, switch right (tscaps Toggle parity).
+export component Toggle inherits HorizontalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    in property <string> label;
+    in property <string> hint: "";
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+    spacing: 8px;
+    alignment: center;
+    min-height: 28px;
+
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 1px;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: root.is-dark ? Theme.fg0-dark : Theme.fg0-light;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        if root.hint != "": Text {
+            text: root.hint;
+            color: root.is-dark ? Theme.fg2-dark : Theme.fg2-light;
+            font-size: 10px;
+            overflow: elide;
+        }
+    }
+    Rectangle {
+        width: 34px;
+        height: 20px;
+        border-radius: 10px;
+        background: root.checked
+            ? (root.is-dark ? Theme.accent-dark : Theme.accent-light)
+            : (root.is-dark ? Theme.bg3-dark : Theme.bg3-light);
+        // Thumb.
+        Rectangle {
+            x: root.checked ? parent.width - self.width - 2px : 2px;
+            y: 2px;
+            width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            background: root.is-dark ? Theme.fg0-dark : Theme.fg0-light;
+            animate x { duration: 120ms; easing: ease-out; }
+        }
+        TouchArea {
+            width: 100%; height: 100%;
+            clicked => {
+                root.checked = !root.checked;
+                root.toggled(root.checked);
+            }
+        }
+    }
+}
+
+// ── Select ─────────────────────────────────────────────────────────────────
+// Compact dropdown: button shows the current option; click expands the list.
+export component Select inherits VerticalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    in property <string> label;
+    in property <[string]> options: [];
+    in-out property <int> selected: 0;
+    callback chosen(int);
+    spacing: 8px;
+
+    property <bool> open: false;
+
+    FieldRow {
+        is-dark: root.is-dark;
+        label: root.label;
+        Rectangle {
+            height: 30px;
+            horizontal-stretch: 1;
+            border-radius: Theme.rSm;
+            background: root.is-dark ? Theme.bg1-dark : Theme.bg1-light;
+            border-color: root.open
+                ? (root.is-dark ? Theme.accent-dark : Theme.accent-light)
+                : (root.is-dark ? Theme.border-dark : Theme.border-light);
+            border-width: 1px;
+            HorizontalLayout {
+                padding-left: 8px; padding-right: 8px;
+                Text {
+                    text: root.selected >= 0 && root.selected < root.options.length ? root.options[root.selected] : "";
+                    color: root.is-dark ? Theme.fg0-dark : Theme.fg0-light;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.open ? "▴" : "▾";
+                    color: root.is-dark ? Theme.fg1-dark : Theme.fg1-light;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+            }
+            TouchArea {
+                width: 100%; height: 100%;
+                clicked => { root.open = !root.open; }
+            }
+        }
+    }
+    if root.open && root.options.length > 0: Rectangle {
+        horizontal-stretch: 1;
+        height: min(root.options.length, 6) * 28px + 8px;
+        border-radius: Theme.rSm;
+        background: root.is-dark ? Theme.bg1-dark : Theme.bg1-light;
+        border-color: root.is-dark ? Theme.border-dark : Theme.border-light;
+        border-width: 1px;
+        VerticalLayout {
+            padding: 4px;
+            for opt[i] in root.options: Rectangle {
+                height: 28px;
+                border-radius: Theme.rSm;
+                background: i == root.selected
+                    ? (root.is-dark ? Theme.bg3-dark : Theme.bg3-light)
+                    : (opt-touch.has-hover ? (root.is-dark ? Theme.bg2-dark : Theme.bg2-light) : transparent);
+                Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    height: 100%;
+                    text: opt;
+                    color: root.is-dark ? Theme.fg0-dark : Theme.fg0-light;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                opt-touch := TouchArea {
+                    width: 100%; height: 100%;
+                    clicked => {
+                        root.selected = i;
+                        root.open = false;
+                        root.chosen(i);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── ColorSwatch ────────────────────────────────────────────────────────────
+// Row label + current-color swatch; click opens a preset grid.
+export component ColorSwatch inherits VerticalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    in property <string> label;
+    in-out property <color> color: #ffffff;
+    callback picked(color);
+    spacing: 8px;
+
+    property <bool> open: false;
+    // Preset palette (tscaps-style quick picks).
+    property <[color]> presets: [
+        #ffffff, #000000, #ffdd57, #ffea00, #ffff00, #e85d3c,
+        #c94a2c, #5a8f7b, #467864, #d4a843, #a07828, #5b8def,
+        #3b6fd4, #b06ae8, #7d4fd4, #f0a0c0, #1a1a1c, #e4e4e2,
+    ];
+
+    FieldRow {
+        is-dark: root.is-dark;
+        label: root.label;
+        Rectangle {
+            height: 30px;
+            horizontal-stretch: 1;
+            border-radius: Theme.rSm;
+            background: root.is-dark ? Theme.bg1-dark : Theme.bg1-light;
+            border-color: root.is-dark ? Theme.border-dark : Theme.border-light;
+            border-width: 1px;
+            HorizontalLayout {
+                padding-left: 6px; padding-right: 8px;
+                spacing: 8px;
+                Rectangle {
+                    width: 20px;
+                    height: 20px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: Theme.rSm;
+                    background: root.color;
+                    border-color: root.is-dark ? Theme.borderStrong-dark : Theme.borderStrong-light;
+                    border-width: 1px;
+                }
+                Text {
+                    text: root.open ? "▲" : "▼";
+                    color: root.is-dark ? Theme.fg1-dark : Theme.fg1-light;
+                    font-size: 9px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    horizontal-alignment: right;
+                }
+            }
+            TouchArea {
+                width: 100%; height: 100%;
+                clicked => { root.open = !root.open; }
+            }
+        }
+    }
+    if root.open: Rectangle {
+        horizontal-stretch: 1;
+        height: 78px;
+        // Preset grid: 6 per row (flat loop, 18 swatches).
+        for i in 18: Rectangle {
+            x: 104px + (i - Math.floor(i / 6.0) * 6) * 26px;
+            y: Math.floor(i / 6.0) * 26px;
+            width: 22px;
+            height: 22px;
+            border-radius: 4px;
+            background: root.presets[i];
+            border-color: root.presets[i] == root.color
+                ? (root.is-dark ? Theme.accent-dark : Theme.accent-light)
+                : (root.is-dark ? Theme.border-dark : Theme.border-light);
+            border-width: root.presets[i] == root.color ? 2px : 1px;
+        }
+        // Hit cells over the grid.
+        for i in 18: TouchArea {
+            x: 104px + (i - Math.floor(i / 6.0) * 6) * 26px;
+            y: Math.floor(i / 6.0) * 26px;
+            width: 22px;
+            height: 22px;
+            clicked => {
+                root.color = root.presets[i];
+                root.picked(root.color);
+            }
+        }
+    }
+}
+
+// ── AnchorGrid ─────────────────────────────────────────────────────────────
+// 3×3 anchor picker (Position tab). index: 0=top-left … 8=bottom-right.
+export component AnchorGrid inherits HorizontalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    in-out property <int> anchor: 4;
+    callback anchor-changed(int);
+    spacing: 10px;
+    alignment: center;
+
+    Rectangle {
+        width: 84px;
+        height: 84px;
+        border-radius: Theme.rSm;
+        background: root.is-dark ? Theme.bg1-dark : Theme.bg1-light;
+        border-color: root.is-dark ? Theme.border-dark : Theme.border-light;
+        border-width: 1px;
+        // 3×3 dots (single flat loop; row/col from index math).
+        for i in 9: Rectangle {
+            x: 12px + (i - Math.floor(i / 3.0) * 3) * 30px;
+            y: 12px + Math.floor(i / 3.0) * 30px;
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: i == root.anchor
+                ? (root.is-dark ? Theme.accent-dark : Theme.accent-light)
+                : (root.is-dark ? Theme.bg3-dark : Theme.bg3-light);
+            animate background { duration: 100ms; }
+        }
+        // Invisible 3×3 hit cells.
+        for i in 9: TouchArea {
+            x: 0px + (i - Math.floor(i / 3.0) * 3) * 28px;
+            y: 0px + Math.floor(i / 3.0) * 28px;
+            width: 28px;
+            height: 28px;
+            clicked => {
+                root.anchor = i;
+                root.anchor-changed(i);
+            }
+        }
+    }
+}

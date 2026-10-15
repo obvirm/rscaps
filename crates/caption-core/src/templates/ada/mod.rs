@@ -13,7 +13,7 @@
 use fframes::{FFramesContext, Svgr};
 use std::sync::OnceLock;
 
-use super::{effects, layout, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (cqh/em values from ada's style.scss) ──────────────────
@@ -36,6 +36,25 @@ const MAX_GAP_MS: f32 = 1000.0; // gap_free default maxGapMs
 const PRIMARY: &str = "#1c1e1d";
 const UPCOMING: &str = "#a6a6a6";
 const BG: &str = "#e7e5e7";
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: 0.0, // ada has no letter-spacing
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: 0.0, // ada has no line-spacing
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT_POPPINS,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: false, // ada's words pass through as spoken
+    min_lines: 1, // ada never splits: one line per segment
+    max_lines: 1,
+    max_width_ratio: 0.72, // unused — no splitter
+};
 
 /// ada's segment pipeline: sentence boundary → char limit → gap_free.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -98,11 +117,14 @@ pub fn render<'a>(
 
     let rtl = segment.direction.is_rtl();
 
-    let video_w = ctx.current_video_size.width;
+    let video_w = crate::ctx_video_size(ctx).width;
     let script_stack = stack::Stack::for_latin(FONT_POPPINS);
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let margin = WORD_SPACING_EM * fs; // one side of `.word` margin
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs; // one side of `.word` margin
     let line_h = LINE_HEIGHT * fs;
     let (asc_ratio, desc_ratio, _) = line_metrics(stack::dominant_family(&segment.words, &script_stack));
 
@@ -110,17 +132,17 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         POPPINS_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
-        0.0, // ada has no letter-spacing
+        ls_px,
         false,
     );
     let widths = measured.widths;
 
     let line_w: f32 = widths.iter().map(|w| w + 2.0 * margin).sum();
-    let y_bottom = ANCHOR_Y_FRAC * video_h as f32;
-    let x_center = ANCHOR_X_FRAC * video_w as f32;
+    let y_bottom = ov.anchor_y * video_h as f32;
+    let x_center = ov.anchor_x * video_w as f32;
     let seg_top = y_bottom - line_h;
     let line_left = x_center - line_w / 2.0;
 
@@ -142,11 +164,14 @@ pub fn render<'a>(
 
     let xs = layout::word_x_positions(&widths, margin, line_left, line_w, rtl);
     let mut words_svg = format!(
-        "<g font-family=\"{FONT_POPPINS}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for ((word, &x), family) in segment.words.iter().zip(&xs).zip(&measured.families) {
         let fill = if now_ms >= word.start_ms {
-            PRIMARY
+            ov.primary.as_str()
         } else {
             UPCOMING
         };
@@ -165,7 +190,7 @@ pub fn render<'a>(
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

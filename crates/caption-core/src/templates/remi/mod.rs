@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from remi's style.scss + template.json) ───────────────
@@ -35,6 +35,25 @@ const SHADOW2_DY_EM: f32 = 0.06;
 const SHADOW2_BLUR_EM: f32 = 0.19;
 const SHADOW2_ALPHA: f32 = 0.45;
 const SHADOW_COLOR: &str = "#000000"; // --tscaps-shadow-color default
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: 0.0, // no LETTER_SPACING_EM in remi's spec
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: 0.0, // no LINE_SPACING_EM in remi's spec
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: HIGHLIGHT,
+    force_uppercase: false,
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// remi's `effects` array: `gap_free` only.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -88,10 +107,12 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -102,7 +123,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         CAVEAT_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         0.0,
@@ -111,24 +132,26 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
 
     // Top-aligned block: the block's top edge sits at 0.68H; lines center
     // horizontally.
-    let block_top = ANCHOR_Y_FRAC * video_h as f32;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
 
     // Every word snaps in on its own narration clock.
-    let snap = recipes::SnapIn::with(SNAP_RISE_EM);
+    let mut snap = recipes::SnapIn::with(SNAP_RISE_EM);
+    snap.rise_em = ov.distance_or(snap.rise_em);
+    snap.duration_s = ov.duration_or(snap.duration_s);
 
     // Shadow geometry (px from em ratios).
     let shadow1_dx = SHADOW1_DX_EM * fs;
@@ -137,8 +160,10 @@ pub fn render<'a>(
     let shadow2_std = SHADOW2_BLUR_EM * fs / 2.0;
 
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         filter=\"url(#remi-shadow)\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         filter=\"url(#remi-shadow)\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * line_h;
@@ -153,7 +178,11 @@ pub fn render<'a>(
             .enumerate()
         {
             let w = widths[start + j];
-            let (opacity, ty_em, rot, sc) = snap.eval((now_ms - word.start_ms) / 1000.0);
+            let (opacity, ty_em, rot, sc) = if ov.motion_static {
+                (1.0, 0.0, 0.0, 1.0)
+            } else {
+                snap.eval((now_ms - word.start_ms) / 1000.0)
+            };
             let ty = ty_em * fs;
             // The word's own box: content top of this line, half the line
             // box tall — transform origin is its centre.
@@ -175,9 +204,9 @@ pub fn render<'a>(
             let fill = if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
                 HIGHLIGHT
             } else {
-                PRIMARY
+                ov.primary.as_str()
             };
-            let text = layout::escape_xml(&word.display);
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             let family_attr = if *family == FONT {
                 String::new()
             } else {
@@ -191,10 +220,21 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
+    // User rotation wraps the caption around the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + (lines.len() as f32 * line_h) / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

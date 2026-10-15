@@ -1,0 +1,99 @@
+// EffectsPanel - tab "Effects": 5 toggle dokumen + Emoji (placement/size/
+// gap). Mirip tscaps EffectsTab; nilai via DocParams.
+import { Theme } from "./theme.slint";
+import { DocParams } from "./params_global.slint";
+import { Section, FieldRow, Slider, Toggle, Select } from "./controls.slint";
+import { AppButton } from "./app_button.slint";
+
+
+export component EffectsPanel inherits VerticalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    spacing: 0px;
+
+    Flickable {
+        VerticalLayout {
+            spacing: 0px;
+
+            Section {
+                is-dark: root.is-dark;
+                title: "TEXT";
+                first: true;
+                show-reset: false;
+                Toggle {
+                    is-dark: root.is-dark;
+                    label: "Gap-free";
+                    hint: "Extend scenes across short gaps";
+                    checked <=> DocParams.fx-gap-free;
+                    toggled(v) => { DocParams.fx-gap-free-changed(v); }
+                }
+                Toggle {
+                    is-dark: root.is-dark;
+                    label: "Remove punctuation";
+                    checked <=> DocParams.fx-remove-punct;
+                    toggled(v) => { DocParams.fx-remove-punct-changed(v); }
+                }
+                Toggle {
+                    is-dark: root.is-dark;
+                    label: "Smart punctuation";
+                    hint: "\"quotes\" → “quotes”, -- → …";
+                    checked <=> DocParams.fx-smart-punct;
+                    toggled(v) => { DocParams.fx-smart-punct-changed(v); }
+                }
+                Toggle {
+                    is-dark: root.is-dark;
+                    label: "Carry quotes";
+                    checked <=> DocParams.fx-carry-quotes;
+                    toggled(v) => { DocParams.fx-carry-quotes-changed(v); }
+                }
+                Toggle {
+                    is-dark: root.is-dark;
+                    label: "Smart lowercase";
+                    checked <=> DocParams.fx-smart-lowercase;
+                    toggled(v) => { DocParams.fx-smart-lowercase-changed(v); }
+                }
+            }
+
+            Section {
+                is-dark: root.is-dark;
+                title: "EMOJIS";
+                show-reset: false;
+                Select {
+                    is-dark: root.is-dark;
+                    label: "Placement";
+                    options: ["Below caption", "Above caption", "Inline with word"];
+                    selected <=> DocParams.fx-emoji-placement;
+                    chosen(i) => { DocParams.fx-emoji-placement-changed(i); }
+                }
+                FieldRow {
+                    is-dark: root.is-dark;
+                    label: "Size";
+                    Slider {
+                        is-dark: root.is-dark;
+                        minimum: 0.5;
+                        maximum: 3.0;
+                        value <=> DocParams.fx-emoji-size;
+                        changed(v) => { DocParams.fx-emoji-size-changed(v); }
+                    }
+                }
+                FieldRow {
+                    is-dark: root.is-dark;
+                    label: "Gap";
+                    Slider {
+                        is-dark: root.is-dark;
+                        minimum: -5.0;
+                        maximum: 5.0;
+                        value <=> DocParams.fx-emoji-gap;
+                        changed(v) => { DocParams.fx-emoji-gap-changed(v); }
+                    }
+                }
+            }
+
+            AppButton {
+                is-dark: root.is-dark;
+                text: "Reset effects";
+                horizontal-stretch: 0;
+                clicked => { DocParams.reset-effects(); }
+            }
+        }
+    }
+}

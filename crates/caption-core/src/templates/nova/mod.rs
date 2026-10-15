@@ -10,7 +10,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from nova's style.scss + template.json) ───────────────
@@ -40,6 +40,25 @@ const RISE2_DURATION_S: f32 = 0.30; // rise-duration + 0.05s
 const RISE2_DISTANCE_EM: f32 = 1.125; // rise-distance × 1.5
 const RISE_BLUR_EM: f32 = 0.25; // keyframes filter: blur(0.25em)
 const OPACITY_HOLD: f32 = 0.15; // keyframes 15% stop (opacity 1)
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: HIGHLIGHT,
+    force_uppercase: false,
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// nova's `effects`: `gap_free` then `smart_punctuation`, both enabled.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -130,10 +149,12 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
@@ -146,7 +167,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         POPPINS_700_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -155,11 +176,14 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
-    let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * fs * WORD_SPACING_EM).collect();
+    let split_widths: Vec<f32> = widths
+        .iter()
+        .map(|w| w + 2.0 * fs * ov.word_spacing_em)
+        .collect();
     let lines = splitter.split(&split_widths);
 
     // Line boxes: line 0 at 1.5× the segment size, the rest at the base
@@ -170,14 +194,14 @@ pub fn render<'a>(
     for (i, _) in lines.iter().enumerate() {
         let line_fs = if i == 0 { fs * FIRST_LINE_SCALE } else { fs };
         if i > 0 {
-            cursor += LINE_SPACING_EM * line_fs;
+            cursor += ov.line_spacing_em * line_fs;
         }
         let height = LINE_HEIGHT * line_fs;
         boxes.push((cursor, height, line_fs));
         cursor += height;
     }
-    let block_top = ANCHOR_Y_FRAC * video_h as f32 - cursor;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32 - cursor;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ease = recipes::cubic_bezier(0.0, 0.85, 0.4, 1.0);
 
@@ -189,12 +213,27 @@ pub fn render<'a>(
         let line_fs = boxes[line_idx].2;
         let span = state::LineSpan::of_words(&segment.words[start..end]);
         let (duration, distance) = if line_idx == 0 {
-            (RISE_DURATION_S, RISE_DISTANCE_EM)
+            (
+                ov.duration_or(RISE_DURATION_S),
+                ov.distance_or(RISE_DISTANCE_EM),
+            )
         } else {
-            (RISE2_DURATION_S, RISE2_DISTANCE_EM)
+            (
+                ov.duration_or(RISE2_DURATION_S),
+                ov.distance_or(RISE2_DISTANCE_EM),
+            )
         };
-        let (opacity, dy_em, blur_em) =
-            nova_rise((now_ms - span.start_ms) / 1000.0, duration, distance, RISE_BLUR_EM, &ease);
+        let (opacity, dy_em, blur_em) = if ov.motion_static {
+            (1.0, 0.0, 0.0)
+        } else {
+            nova_rise(
+                (now_ms - span.start_ms) / 1000.0,
+                duration,
+                distance,
+                RISE_BLUR_EM,
+                &ease,
+            )
+        };
         rises.push((opacity, dy_em * line_fs, blur_em * line_fs));
     }
 
@@ -220,8 +259,10 @@ pub fn render<'a>(
     }
 
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let (top, line_h, line_fs) = boxes[line_idx];
@@ -230,13 +271,13 @@ pub fn render<'a>(
         let descent = desc_ratio * line_fs;
         let baseline = line_top + (line_h - (ascent + descent)) / 2.0 + ascent;
 
-        let margin = WORD_SPACING_EM * line_fs;
+        let margin = ov.word_spacing_em * line_fs;
         let line_words = &segment.words[start..end];
         let line_widths = stack::measure_words(
             line_words,
             &script_stack,
             POPPINS_700_TTF,
-            FONT_WEIGHT,
+            ov.font_weight,
             ctx.font_source,
             line_fs,
             ls_px,
@@ -251,7 +292,11 @@ pub fn render<'a>(
         let (opacity, dy, blur_std) = rises[line_idx];
 
         // First line takes the highlight, later lines the primary colour.
-        let fill = if line_idx == 0 { HIGHLIGHT } else { PRIMARY };
+        let fill = if line_idx == 0 {
+            HIGHLIGHT
+        } else {
+            ov.primary.as_str()
+        };
 
         if blur_std > 0.01 {
             words_svg.push_str(&format!(
@@ -273,7 +318,7 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
-            let text = layout::escape_xml(&word.display);
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
                  filter=\"url(#nova-shadow-{line_idx})\">{text}</text>"
@@ -283,10 +328,21 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
+    // User rotation wraps the caption around the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + cursor / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

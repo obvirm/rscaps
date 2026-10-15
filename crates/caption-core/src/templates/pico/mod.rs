@@ -21,7 +21,7 @@
 
 use fframes::{FFramesContext, FontQuery, Svgr};
 
-use super::{effects, layout, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from pico's style.scss + template.json) ───────────────
@@ -85,6 +85,25 @@ const CARET_COLOR: &str = "#aeafad";
 const CARET_W_EM: f32 = 0.06;
 const CARET_H_EM: f32 = 1.0;
 const CARET_TOP_EM: f32 = 0.05;
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: false,
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// pico's `effects` array: `gap_free`, `smart_punctuation` — declaration
 /// order is the application order.
@@ -293,12 +312,14 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let chrome = fs; // --chrome-unit: font-size × chrome-scale(1)
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs;
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -309,7 +330,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         JETBRAINS_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -322,9 +343,9 @@ pub fn render<'a>(
     let (faces, upems) = stack_faces(&script_stack, JETBRAINS_TTF, FONT_WEIGHT, ctx.font_source);
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
@@ -344,10 +365,10 @@ pub fn render<'a>(
         };
     let win_w = (content_w + pad_left + PAD_X_EM * fs).max(MIN_WIDTH_CQH * video_h as f32);
     let lines_h = lines.len() as f32 * line_h
-        + lines.len().saturating_sub(1) as f32 * LINE_SPACING_EM * fs;
+        + lines.len().saturating_sub(1) as f32 * ov.line_spacing_em * fs;
     let win_h = PAD_TOP_C * chrome + lines_h + PAD_BOTTOM_EM * fs;
-    let win_x = ANCHOR_X_FRAC * video_w as f32 - win_w / 2.0;
-    let win_y = ANCHOR_Y_FRAC * video_h as f32;
+    let win_x = ov.anchor_x * video_w as f32 - win_w / 2.0;
+    let win_y = ov.anchor_y * video_h as f32;
     let content_left = win_x + pad_left;
     let content_top = win_y + PAD_TOP_C * chrome;
 
@@ -428,8 +449,10 @@ pub fn render<'a>(
 
     // ── letters (typewriter) + caret ──
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     let mut carets_svg = String::new();
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
@@ -467,8 +490,9 @@ pub fn render<'a>(
                 if letter_visible(now_ms, word.start_ms, word.end_ms, i, count) {
                     let text = layout::escape_xml(&ch_str);
                     words_svg.push_str(&format!(
-                        "<text x=\"{cursor}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr}>\
-                         {text}</text>"
+                        "<text x=\"{cursor}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}>\
+                         {text}</text>",
+                        fill = ov.primary,
                     ));
                 }
                 // `$show-caret: false` keeps this dark by default; the
@@ -516,7 +540,7 @@ pub fn render<'a>(
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

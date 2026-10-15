@@ -23,7 +23,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from freya's style.scss + template.json) ─────────────
@@ -55,6 +55,25 @@ const PADDING_EM: f32 = 1.0; // rendering.padding: 1em
 // `tscaps-glitch-flicker` (step-end, relative to the segment's own
 // duration): bursts [0,5%) [6,10%) [11,14%), outline-only elsewhere.
 const FLICKER_BURSTS: [(f32, f32); 3] = [(0.0, 0.05), (0.06, 0.10), (0.11, 0.14)];
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: HIGHLIGHT,
+    force_uppercase: true, // freya always uppercases
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// freya's `effects` array: `emoji` (unported) + `remove_punctuation`.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -91,12 +110,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     } else {
         stack::script_metrics(dominant).expect("script face")
     }
-}
-
-/// `text-transform: uppercase` — the uppercased form is what gets
-/// measured *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
 }
 
 // ── glitch filters ────────────────────────────────────────────────────────
@@ -199,11 +212,13 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -214,7 +229,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         ANTON_400_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -223,9 +238,9 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
@@ -233,14 +248,14 @@ pub fn render<'a>(
     // Bottom-aligned block: the block's bottom edge sits at 0.84H (the
     // negative line spacing shrinks the block from what the per-line
     // math would otherwise give).
-    let line_gap = LINE_SPACING_EM * fs;
+    let line_gap = ov.line_spacing_em * fs;
     let block_h = lines.len() as f32 * line_h + lines.len().saturating_sub(1) as f32 * line_gap;
-    let block_top = ANCHOR_Y_FRAC * video_h as f32 - block_h;
+    let block_top = ov.anchor_y * video_h as f32 - block_h;
     let block_w: f32 = lines
         .iter()
         .map(|&(start, end)| widths[start..end].iter().map(|w| w + 2.0 * margin).sum::<f32>())
         .fold(0.0, f32::max);
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -253,8 +268,10 @@ pub fn render<'a>(
     let tick = tick_60(now_ms);
 
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * (line_h + line_gap);
@@ -267,7 +284,7 @@ pub fn render<'a>(
             .zip(&segment.words[start..end])
             .zip(&measured.families[start..end])
         {
-            let text = layout::escape_xml(&uppercase(&word.display));
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             // `.word-being-narrated { color: highlight }` — the default
             // highlight is the same white as the primary, but the split
             // still matters when a variant overrides one of them.
@@ -276,7 +293,7 @@ pub fn render<'a>(
             {
                 HIGHLIGHT
             } else {
-                PRIMARY
+                ov.primary.as_str()
             };
             let family_attr = if *family == FONT {
                 String::new()
@@ -318,6 +335,18 @@ pub fn render<'a>(
     segment_svg.push_str(&inner);
     segment_svg.push_str("</g></g>");
 
+    // User rotation composes outside the template's own tilt, about the
+    // same block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + block_h / 2.0;
+        segment_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = segment_svg,
+        );
+    }
+
     let defs = format!(
         "{}{}",
         outline_filter_defs(fs),
@@ -326,7 +355,7 @@ pub fn render<'a>(
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

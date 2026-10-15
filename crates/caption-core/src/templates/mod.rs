@@ -30,6 +30,7 @@ pub mod noor;
 pub mod nova;
 pub mod nyx;
 pub mod otto;
+pub mod overrides;
 pub mod pastor;
 pub mod pepper;
 pub mod pico;
@@ -62,6 +63,16 @@ pub struct TemplateEntry {
     pub label: &'static str,
     pub category: &'static str,
     pub gallery_order: Option<u32>,
+    /// Raw JSON array of editable `styleControls` from template.json
+    /// (entries with label+type only). "[]" when the template has none.
+    pub style_controls: &'static str,
+    /// Raw JSON array of style variants (`{label, overrides}`) or "[]".
+    pub variants: &'static str,
+    /// Raw JSON object of template defaults from template.json
+    /// (`typography`, `alignment`, `rendering`, `segmentSplitters`,
+    /// `lineSplitter`, `features`, `effects` — keys present only when the
+    /// template declares them). Panels read this instead of hardcoding.
+    pub defaults: &'static str,
     pub render: RenderFn,
 }
 
@@ -77,8 +88,26 @@ pub fn template_catalog() -> &'static [TemplateEntry] {
     REGISTRY
 }
 
+/// Style controls (JSON array) untuk satu template — dipakai panel Style
+/// saat user memilih template. `"[]"` untuk template tanpa control.
+pub fn style_controls_json(id: &str) -> &'static str {
+    REGISTRY
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.style_controls)
+        .unwrap_or("[]")
+}
+
+/// Variants (JSON array) untuk satu template — preset gaya per template.
+pub fn variants_json(id: &str) -> &'static str {
+    REGISTRY
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.variants)
+        .unwrap_or("[]")
+}
+
 /// Renders `doc` through the native template identified by `template`.
-///
 /// Returns `None` for an unknown id so the caller can fall back to the v0
 /// renderer, and `Some(Svgr::empty())` when the id is known but nothing is
 /// on screen at `now_ms`.
@@ -112,6 +141,17 @@ pub fn template_catalog_json() -> String {
             });
             if let Some(order) = entry.gallery_order {
                 value["galleryOrder"] = serde_json::json!(order);
+            }
+            // Data-driven Style/variants: parsed dari raw (tak pernah invalid
+            // — build.rs sudah parse template.json).
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(entry.style_controls) {
+                value["styleControls"] = v;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(entry.variants) {
+                value["variants"] = v;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(entry.defaults) {
+                value["defaults"] = v;
             }
             value
         })

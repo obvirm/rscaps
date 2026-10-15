@@ -8,7 +8,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{layout, pipeline, recipes, stack};
+use super::{layout, overrides, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from anya's style.scss + template.json) ───────────────
@@ -33,6 +33,25 @@ const HIGHLIGHT: &str = "#f5c982"; // highlight-color default / pulse $highlight
 const SHADOW_COLOR: &str = "#000000"; // shadow-color styleControl default
 const SHADOW_DY_EM: f32 = 0.11;
 const SHADOW_BLUR_EM: f32 = 0.47;
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: HIGHLIGHT,
+    force_uppercase: false, // anya keeps the spoken case
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// anya's `segmentSplitters`: boundary (sentence) + 36 chars; no
 /// `effects` array, so windows stay the raw word span.
@@ -111,11 +130,13 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -126,7 +147,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         PLAYFAIR_700_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -135,17 +156,17 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
 
     // Top-aligned block: the block's top edge sits at 0.75H; lines center
     // horizontally.
-    let block_top = ANCHOR_Y_FRAC * video_h as f32;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -156,11 +177,13 @@ pub fn render<'a>(
     let pulse = recipes::HighlightPulse::with();
 
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-style=\"italic\" \
-         font-size=\"{fs}\" letter-spacing=\"{ls_px}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-style=\"italic\" \
+         font-size=\"{fs}\" letter-spacing=\"{ls_px}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
-        let line_top = block_top + line_idx as f32 * (line_h + LINE_SPACING_EM * fs);
+        let line_top = block_top + line_idx as f32 * (line_h + ov.line_spacing_em * fs);
         let baseline = line_top + half_leading + ascent;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
@@ -174,7 +197,7 @@ pub fn render<'a>(
             // its full duration as the animation length.
             let elapsed = (now_ms - word.start_ms) / 1000.0;
             let duration = (word.end_ms - word.start_ms) / 1000.0;
-            let fill = mix_hex(PRIMARY, HIGHLIGHT, pulse.eval(elapsed, duration));
+            let fill = mix_hex(ov.primary.as_str(), HIGHLIGHT, pulse.eval(elapsed, duration));
             let family_attr = if *family == FONT {
                 String::new()
             } else {
@@ -189,10 +212,23 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
+    // User rotation wraps the block about its centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let block_h = lines.len() as f32 * line_h
+            + lines.len().saturating_sub(1) as f32 * ov.line_spacing_em * fs;
+        let cx = center_x;
+        let cy = block_top + block_h / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

@@ -12,7 +12,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from sol's style.scss + template.json) ────────────────
@@ -69,6 +69,25 @@ const POP_HOLD: f32 = 0.3; // keyframes 30% stop
 const POP_START_SCALE: f32 = 0.65; // keyframes 0% scale
 const POP_TY_EM: f32 = 0.1; // keyframes 0% translateY(0.1em)
 const POP_BLUR_EM: f32 = 0.3; // keyframes 0% blur(0.3em)
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: HIGHLIGHT,
+    force_uppercase: false,
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// sol's `segmentSplitters`: clause + 30/6 chars; `gap_free` then
 /// `smart_punctuation` (`...` → `…`, quotes → “ ”) in json order.
@@ -146,8 +165,13 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 ///
 /// Returns `(opacity, translateY_em, blur_em)`; `em` resolves against the
 /// segment's font-size.
-fn sol_rise(elapsed_s: f32, ease: &impl Fn(f32) -> f32) -> (f32, f32, f32) {
-    let p = progress(elapsed_s, RISE_DURATION_S);
+fn sol_rise(
+    elapsed_s: f32,
+    duration_s: f32,
+    distance_em: f32,
+    ease: &impl Fn(f32) -> f32,
+) -> (f32, f32, f32) {
+    let p = progress(elapsed_s, duration_s);
     let opacity = if p < RISE_OPACITY_HOLD {
         ease(p / RISE_OPACITY_HOLD)
     } else {
@@ -156,7 +180,7 @@ fn sol_rise(elapsed_s: f32, ease: &impl Fn(f32) -> f32) -> (f32, f32, f32) {
     let settle = ease(p);
     (
         opacity,
-        RISE_DISTANCE_EM * (1.0 - settle),
+        distance_em * (1.0 - settle),
         RISE_BLUR_EM * (1.0 - settle),
     )
 }
@@ -167,8 +191,8 @@ fn sol_rise(elapsed_s: f32, ease: &impl Fn(f32) -> f32) -> (f32, f32, f32) {
 ///
 /// Returns `(opacity, scale, translateY_em, blur_em)`; `em` resolves
 /// against the accent word's font-size.
-fn sol_pop(elapsed_s: f32, ease: &impl Fn(f32) -> f32) -> (f32, f32, f32, f32) {
-    let p = progress(elapsed_s, POP_DURATION_S);
+fn sol_pop(elapsed_s: f32, duration_s: f32, ease: &impl Fn(f32) -> f32) -> (f32, f32, f32, f32) {
+    let p = progress(elapsed_s, duration_s);
     let opacity = if p < POP_HOLD {
         ease(p / POP_HOLD)
     } else {
@@ -222,11 +246,13 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
 
     let main_stack = stack::Stack::for_latin(FONT);
     let tag_stack = stack::Stack::for_latin(TAG_FONT);
@@ -242,7 +268,7 @@ pub fn render<'a>(
         &segment.words,
         &main_stack,
         MONTSERRAT_300_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -251,22 +277,30 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
 
     let boxes = line_boxes(lines.len(), fs);
     let block_h = boxes.last().map(|(top, height, _)| top + height).unwrap_or(0.0);
-    let block_top = ANCHOR_Y_FRAC * video_h as f32 - block_h;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32 - block_h;
+    let center_x = ov.anchor_x * video_w as f32;
 
     // The segment rise: one transform + one blur over the whole block.
     let rise_ease = recipes::cubic_bezier(0.0, 0.85, 0.4, 1.0);
-    let (rise_opacity, rise_ty_em, rise_blur_em) =
-        sol_rise((now_ms - segment.start_ms) / 1000.0, &rise_ease);
+    let (rise_opacity, rise_ty_em, rise_blur_em) = if ov.motion_static {
+        (1.0, 0.0, 0.0)
+    } else {
+        sol_rise(
+            (now_ms - segment.start_ms) / 1000.0,
+            ov.duration_or(RISE_DURATION_S),
+            ov.distance_or(RISE_DISTANCE_EM),
+            &rise_ease,
+        )
+    };
     let rise_dy = rise_ty_em * fs;
     let rise_std = rise_blur_em * fs;
 
@@ -307,6 +341,7 @@ pub fn render<'a>(
     let pop_ease = recipes::cubic_bezier(0.16, 1.0, 0.3, 1.0);
     let mut pop_defs = String::new();
     let mut words_svg = String::new();
+    let family_override = ov.font_family.as_str();
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let (top, line_h, line_fs) = boxes[line_idx];
         let line_top = block_top + top;
@@ -325,12 +360,12 @@ pub fn render<'a>(
         } else {
             (
                 MONTSERRAT_300_TTF,
-                FONT_WEIGHT,
+                ov.font_weight,
                 asc_ratio,
                 desc_ratio,
                 FONT,
-                FONT_WEIGHT,
-                PRIMARY,
+                ov.font_weight,
+                ov.primary.as_str(),
                 &main_stack,
             )
         };
@@ -359,8 +394,9 @@ pub fn render<'a>(
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(line_widths, line_margin, line_left, line_w, rtl);
 
+        let emit_family = if is_tag { family } else { family_override };
         words_svg.push_str(&format!(
-            "<g font-family=\"{family}\" font-weight=\"{weight}\" font-size=\"{line_fs}\" \
+            "<g font-family=\"{emit_family}\" font-weight=\"{weight}\" font-size=\"{line_fs}\" \
              fill=\"{fill}\">"
         ));
         for (i, ((x, word), word_family)) in xs
@@ -369,7 +405,7 @@ pub fn render<'a>(
             .zip(&line_measured.families)
             .enumerate()
         {
-            let text = layout::escape_xml(&word.display);
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             let family_attr = if *word_family == family {
                 String::new()
             } else {
@@ -382,8 +418,15 @@ pub fn render<'a>(
                 continue;
             }
             // Only the accent line pops, anchored on the word's own start.
-            let (opacity, scale, ty_em, blur_em) =
-                sol_pop((now_ms - word.start_ms) / 1000.0, &pop_ease);
+            let (opacity, scale, ty_em, blur_em) = if ov.motion_static {
+                (1.0, 1.0, 0.0, 0.0)
+            } else {
+                sol_pop(
+                    (now_ms - word.start_ms) / 1000.0,
+                    ov.duration_or(POP_DURATION_S),
+                    &pop_ease,
+                )
+            };
             let ty = ty_em * line_fs;
             let blur_std = blur_em * line_fs;
             let filter_attr = if blur_std > 0.01 {
@@ -413,8 +456,10 @@ pub fn render<'a>(
     // Segment shell: the rise transform/blur wraps both lines.
     let mut segment_svg = format!(
         "<g opacity=\"{rise_opacity}\" transform=\"translate(0,{rise_dy})\" \
-         font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\""
+         font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\"",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     if rise_std > 0.01 {
         segment_svg.push_str(" filter=\"url(#sol-rise)\"");
@@ -422,12 +467,23 @@ pub fn render<'a>(
     segment_svg.push('>');
     segment_svg.push_str(&words_svg);
     segment_svg.push_str("</g>");
+
+    // User rotation wraps the caption around the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + block_h / 2.0;
+        segment_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = segment_svg,
+        );
+    }
     defs.push_str(&pop_defs);
 
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >
@@ -501,19 +557,19 @@ mod tests {
         let ease = recipes::cubic_bezier(0.0, 0.85, 0.4, 1.0);
         // Before the segment starts (fill both): hidden, full distance,
         // full blur.
-        let (op0, dy0, blur0) = sol_rise(-0.2, &ease);
+        let (op0, dy0, blur0) = sol_rise(-0.2, RISE_DURATION_S, RISE_DISTANCE_EM, &ease);
         assert_eq!(op0, 0.0);
         assert_eq!(dy0, RISE_DISTANCE_EM);
         assert_eq!(blur0, RISE_BLUR_EM);
         // At 10% the opacity has landed; the lift and the blur run on the
         // full-duration curve, so both are partway (this ease front-loads)
         // and nowhere near home yet.
-        let (op1, dy1, blur1) = sol_rise(RISE_DURATION_S * 0.1, &ease);
+        let (op1, dy1, blur1) = sol_rise(RISE_DURATION_S * 0.1, RISE_DURATION_S, RISE_DISTANCE_EM, &ease);
         assert!((op1 - 1.0).abs() < 1e-6, "opacity {op1}");
         assert!(dy1 > 0.0 && dy1 < RISE_DISTANCE_EM * 0.75, "dy {dy1}");
         assert!(blur1 > 0.0 && blur1 < RISE_BLUR_EM, "blur {blur1}");
         // Resting state at the end of the duration.
-        let (op2, dy2, blur2) = sol_rise(1.0, &ease);
+        let (op2, dy2, blur2) = sol_rise(1.0, RISE_DURATION_S, RISE_DISTANCE_EM, &ease);
         assert_eq!((op2, dy2, blur2), (1.0, 0.0, 0.0));
     }
 
@@ -521,16 +577,16 @@ mod tests {
     fn word_pop_snaps_blur_away_and_overshoots_the_rest_scale() {
         let ease = recipes::cubic_bezier(0.16, 1.0, 0.3, 1.0);
         // Start: shrunk, dropped, still blurred, invisible.
-        let (op0, scale0, ty0, blur0) = sol_pop(-0.1, &ease);
+        let (op0, scale0, ty0, blur0) = sol_pop(-0.1, POP_DURATION_S, &ease);
         assert_eq!((op0, scale0, ty0, blur0), (0.0, POP_START_SCALE, POP_TY_EM, POP_BLUR_EM));
         // At the 30% stop: lit, past the rest size, blur gone, still low.
-        let (op1, scale1, ty1, blur1) = sol_pop(POP_DURATION_S * POP_HOLD, &ease);
+        let (op1, scale1, ty1, blur1) = sol_pop(POP_DURATION_S * POP_HOLD, POP_DURATION_S, &ease);
         assert!((op1 - 1.0).abs() < 1e-6, "opacity {op1}");
         assert!((scale1 - (1.0 + POP_SCALE)).abs() < 1e-4, "scale {scale1}");
         assert_eq!(blur1, 0.0);
         assert!(ty1 > 0.0, "ty still easing down: {ty1}");
         // Resting state after the duration.
-        let (op2, scale2, ty2, blur2) = sol_pop(1.0, &ease);
+        let (op2, scale2, ty2, blur2) = sol_pop(1.0, POP_DURATION_S, &ease);
         assert!((op2, scale2, ty2, blur2) == (1.0, 1.0, 0.0, 0.0));
     }
 

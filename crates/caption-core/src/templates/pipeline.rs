@@ -289,6 +289,37 @@ pub fn split_char_limit(
     out
 }
 
+/// Merge a template's declared effect list with the user's tri-state
+/// overrides (`crate::EffectsParams`): `None` keeps the template entry,
+/// `Some(true)` force-adds, `Some(false)` removes. Order of the template
+/// list is preserved; forced additions append in catalog order.
+pub fn merged_effects(
+    template: &'static [crate::templates::effects::Effect],
+    overrides: &crate::EffectsParams,
+) -> Vec<crate::templates::effects::Effect> {
+    use crate::templates::effects::Effect;
+    let mut out: Vec<Effect> = template.to_vec();
+    let pairs: [(Option<bool>, Effect); 5] = [
+        (overrides.gap_free, Effect::GapFree),
+        (overrides.remove_punctuation, Effect::RemovePunctuation),
+        (overrides.smart_punctuation, Effect::SmartPunctuation),
+        (overrides.carry_quotes, Effect::CarryQuotes),
+        (overrides.smart_lowercase, Effect::SmartLowercase),
+    ];
+    for (flag, effect) in pairs {
+        match flag {
+            None => {}
+            Some(true) => {
+                if !out.contains(&effect) {
+                    out.push(effect);
+                }
+            }
+            Some(false) => out.retain(|e| *e != effect),
+        }
+    }
+    out
+}
+
 // ── document → windowed segments ──────────────────────────────────────────
 
 /// Tokenizes every cue, splits it (boundary → char limit), applies the
@@ -311,18 +342,23 @@ pub fn collect_segments(doc: &crate::CaptionDocument, cfg: &SplitConfig) -> Vec<
         _ => detect_document_direction(doc),
     };
     let mut groups: Vec<Vec<TimedWord>> = Vec::new();
+    // Layout override: user max_chars wins over the template's limit.
+    let max_chars = doc.params.max_chars.unwrap_or(cfg.max_chars as u32) as usize;
     for cue in &doc.cues {
         let tokens = tokenize(&cue.text);
         let words = spread(&tokens, cue.start_ms as f32, cue.end_ms as f32);
         for sentence in split_boundary(&words, cfg.boundary) {
-            for chunk in split_char_limit(sentence, cfg.max_chars, cfg.min_chars) {
+            for chunk in split_char_limit(sentence, max_chars, cfg.min_chars) {
                 if !chunk.is_empty() {
                     groups.push(chunk);
                 }
             }
         }
     }
-    crate::templates::effects::apply_text_effects(&mut groups, cfg.effects);
+    // Effects override: template list + user tri-state (None = inherit,
+    // Some(true) = force on, Some(false) = force off).
+    let effects = merged_effects(cfg.effects, &doc.params.effects);
+    crate::templates::effects::apply_text_effects(&mut groups, &effects);
 
     let mut segments: Vec<WindowedSegment> = groups
         .into_iter()
@@ -349,10 +385,7 @@ pub fn collect_segments(doc: &crate::CaptionDocument, cfg: &SplitConfig) -> Vec<
             .then(a.end_ms.total_cmp(&b.end_ms))
     });
 
-    if !cfg
-        .effects
-        .contains(&crate::templates::effects::Effect::GapFree)
-    {
+    if !effects.contains(&crate::templates::effects::Effect::GapFree) {
         return segments;
     }
 
@@ -400,6 +433,57 @@ mod tests {
             max_gap_ms: 1000.0,
             effects: &[Effect::GapFree],
         }
+    }
+
+    #[test]
+    fn merged_effects_honours_tri_state_overrides() {
+        use crate::EffectsParams;
+        // Template declares GapFree only.
+        let none = EffectsParams::default();
+        let kept = merged_effects(&[Effect::GapFree], &none);
+        assert_eq!(kept, vec![Effect::GapFree]);
+        // Force-remove gap free, force-add remove punctuation.
+        let patch = EffectsParams {
+            gap_free: Some(false),
+            remove_punctuation: Some(true),
+            ..Default::default()
+        };
+        let patched = merged_effects(&[Effect::GapFree], &patch);
+        assert_eq!(patched, vec![Effect::RemovePunctuation]);
+        // Force-add an effect the template already has → no duplicate.
+        let dup = EffectsParams {
+            gap_free: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(merged_effects(&[Effect::GapFree], &dup), vec![Effect::GapFree]);
+    }
+
+    #[test]
+    fn user_max_chars_overrides_template_limit() {
+        let doc = crate::CaptionDocument {
+            duration_frames: 300,
+            cues: vec![crate::Cue {
+                start_ms: 0,
+                end_ms: 3000,
+                text: "One two three four five six seven eight nine ten.".into(),
+            }],
+            params: crate::CaptionParams {
+                max_chars: Some(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let wide = collect_segments(&doc, &cfg());
+        // Template limit 26 chars → fewer segments than the tight override.
+        let tight_doc = crate::CaptionDocument {
+            params: crate::CaptionParams {
+                max_chars: Some(8),
+                ..Default::default()
+            },
+            ..doc.clone()
+        };
+        let tight = collect_segments(&tight_doc, &cfg());
+        assert!(tight.len() > wide.len(), "tight={} wide={}", tight.len(), wide.len());
     }
 
     fn word(text: &str) -> TimedWord {

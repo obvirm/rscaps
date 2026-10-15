@@ -103,15 +103,22 @@ export component PreviewStage inherits VerticalLayout {
                 source: root.frame-image;
                 image-fit: contain;
             }
-            // Overlay caption render_frame (viewBox 1920×1080, paritas main
-            // .stage svg). CONTAIN supaya proporsi glyph + background template
-            // benar (pill tetap pill, bukan blob) — tradeoff: caption lebih
-            // kecil & centered di video portrait, posisi anchor bergeser.
+            // Overlay caption render_frame (viewBox 1920×1080).
+            // Skala mengikuti TINGGI video (bukan contain/fill):
+            //   scale = card_h / 1080 → caption proporsional dgn tinggi video,
+            //   tidak stretch, tidak menyusut. Width overflow di-clip card.
+            // Untuk video 16:9 sama dgn contain; portrait = caption besar
+            // proporsional; landscape lebar = caption tetap proporsional.
             if root.overlay-live && root.has-video: Image {
-                x: 0px; y: 0px;
-                width: parent.width; height: parent.height;
+                property <float> scale-f: parent.height / 1080px;
+                property <length> ow: 1920px * self.scale-f;
+                property <length> oh: parent.height;
+                x: (parent.width - self.ow) / 2;
+                y: 0px;
+                width: self.ow;
+                height: self.oh;
                 source: root.overlay-image;
-                image-fit: contain;
+                image-fit: ImageFit.fill;
             }
             // Overlay caption live (slice 1: teks cue aktif; slice 2a: gaya
             // template). Band bg (bila template punya bg-color) + teks wrap

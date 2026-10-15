@@ -1,16 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import CommandBar from "./CommandBar.svelte";
-  import IconRail from "./IconRail.svelte";
   import PreviewStage from "./PreviewStage.svelte";
-  import Inspector from "./Inspector.svelte";
+  import Sidebar from "./Sidebar.svelte";
   import { store } from "../lib/state.svelte";
   import { router } from "../lib/router.svelte";
 
   let { projectId }: { projectId: string } = $props();
 
   let activeRail = $state("templates");
-  let inspectorWidth = $state(320);
+  let inspectorWidth = $state(360);
   let dragging = $state(false);
   let workspaceEl: HTMLElement;
   let loaded = $state(false);
@@ -87,8 +86,6 @@
       class:dragging
       style={`--inspector-w: ${inspectorWidth}px`}
     >
-      <IconRail bind:active={activeRail} />
-
       <main class="center-col">
         <PreviewStage />
       </main>
@@ -109,7 +106,9 @@
         <span></span>
       </div>
 
-      <Inspector {activeRail} />
+      <div class="sidebar-col">
+        <Sidebar bind:active={activeRail} />
+      </div>
     </div>
   {/if}
 </div>
@@ -133,9 +132,14 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 56px minmax(0, 1fr) 12px var(--inspector-w, 320px);
-    padding: 10px 12px 12px;
+    grid-template-columns: minmax(0, 1fr) 12px var(--inspector-w, 360px);
+    padding: 0 12px 12px;
     gap: 0;
+  }
+  .sidebar-col {
+    min-width: 0;
+    min-height: 0;
+    display: flex;
   }
   .center-col {
     min-width: 0;
@@ -143,7 +147,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    padding: 0 12px 0 10px;
+    padding: 0 12px 0 0;
   }
   .resize-handle {
     display: flex;
@@ -165,10 +169,10 @@
   }
   @media (max-width: 900px) {
     .workspace {
-      grid-template-columns: 48px minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr);
     }
     .resize-handle,
-    :global(aside.inspector) {
+    .sidebar-col {
       display: none;
     }
   }

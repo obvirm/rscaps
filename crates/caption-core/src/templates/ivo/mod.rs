@@ -11,7 +11,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from ivo's style.scss + template.json) ────────────────
@@ -41,6 +41,25 @@ const LINE_ROTATE_DEG: f32 = -2.0; // .line:last-child rotate(-2deg)
 const WOBBLE_SWING_DEG: f32 = 9.0; // wobble-in($swing: 9deg, $rest: -2deg)
 const SCALE_FROM: f32 = 0.94; // scale-in($from: 0.94)
 const SCALE_PEAK: f32 = 1.03; // scale-in($peak: 1.03)
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: 0.0, // ivo has no letter-spacing
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: true, // ivo always uppercases
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// ivo's `effects` array: `gap_free`.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -106,10 +125,13 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let pad_x = BG_PAD_X_EM * fs;
     let pad_y = BG_PAD_Y_EM * fs;
@@ -123,18 +145,18 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         ANTON_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
-        0.0,
+        ls_px,
         true,
     );
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
@@ -142,10 +164,10 @@ pub fn render<'a>(
     // Top-aligned block: the block's top edge sits at 0.72H. The rows
     // overlap by the (negative) line-spacing so the tape rides over
     // the bar; paint order is document order, tape last.
-    let block_top = ANCHOR_Y_FRAC * video_h as f32;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32;
+    let center_x = ov.anchor_x * video_w as f32;
     let total_h = lines.len() as f32 * box_h
-        + (lines.len() as f32 - 1.0) * LINE_SPACING_EM * fs;
+        + (lines.len() as f32 - 1.0) * ov.line_spacing_em * fs;
     let block_cy = block_top + total_h / 2.0;
 
     let ascent = asc_ratio * fs;
@@ -153,8 +175,15 @@ pub fn render<'a>(
     let half_leading = (line_h - (ascent + descent)) / 2.0;
 
     let elapsed_s = (now_ms - segment.start_ms) / 1000.0;
-    let (opacity, scale) = scale_in().eval(elapsed_s);
-    let wobble = recipes::WobbleIn::with(WOBBLE_SWING_DEG, LINE_ROTATE_DEG);
+    let mut anim = scale_in();
+    anim.duration_s = ov.duration_or(anim.duration_s);
+    let (opacity, scale) = if ov.motion_static {
+        (1.0, 1.0)
+    } else {
+        anim.eval(elapsed_s)
+    };
+    let mut wobble = recipes::WobbleIn::with(WOBBLE_SWING_DEG, LINE_ROTATE_DEG);
+    wobble.duration_s = ov.duration_or(wobble.duration_s);
 
     let mut body = format!(
         "<g transform=\"translate({center_x} {block_cy}) scale({scale}) \
@@ -163,7 +192,10 @@ pub fn render<'a>(
         -block_cy
     );
     body.push_str(&format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     ));
     let mut y = block_top;
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
@@ -174,14 +206,18 @@ pub fn render<'a>(
         let box_left = center_x - box_w / 2.0;
         // A lone line is both :first-child and :last-child — the
         // tape wins (later rule in the scss).
-        let (bg, fg) = if is_last {
+        let (bg, fg): (&str, &str) = if is_last {
             (ACCENT_BG, ACCENT)
         } else {
-            (PRIMARY_BG, PRIMARY)
+            (PRIMARY_BG, ov.primary.as_str())
         };
         let r = BG_RADIUS_EM * fs;
         if is_last {
-            let angle = wobble.eval(elapsed_s);
+            let angle = if ov.motion_static {
+                LINE_ROTATE_DEG
+            } else {
+                wobble.eval(elapsed_s)
+            };
             let cy = y + box_h / 2.0;
             body.push_str(&format!("<g transform=\"rotate({angle} {center_x} {cy})\">"));
         }
@@ -202,7 +238,7 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
-            let text = layout::escape_xml(&uppercase(&word.display));
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             body.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fg}\"{family_attr}>{text}</text>"
             ));
@@ -210,14 +246,25 @@ pub fn render<'a>(
         if is_last {
             body.push_str("</g>");
         }
-        y += box_h + LINE_SPACING_EM * fs;
+        y += box_h + ov.line_spacing_em * fs;
     }
     body.push_str("</g></g>");
+
+    // User rotation wraps the plates about the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_cy;
+        body = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = body,
+        );
+    }
 
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

@@ -1,72 +1,93 @@
-/* ── Design tokens: "precision instrument" ─────────────────────────────── */
+/* ── Design tokens (1:1 tscaps studio values, clean-room port) ──────────── */
 :root,
 [data-theme="dark"] {
-  --bg-0: 12 12 14;
-  --bg-1: 20 20 22;
-  --bg-2: 28 28 31;
-  --bg-3: 38 38 42;
+  --bg-0: 8 8 11; /* surface-0  page bg        */
+  --bg-1: 17 17 21; /* surface-1  panel/card     */
+  --bg-2: 24 24 32; /* surface-2  raised/inputs  */
+  --bg-3: 36 36 46; /* surface-3  active/elevated*/
 
-  --fg-0: 232 232 234;
-  --fg-1: 160 160 168;
-  --fg-2: 108 108 116;
+  --fg-0: 245 245 245; /* fg-primary   */
+  --fg-1: 204 204 204; /* fg-secondary */
+  --fg-2: 161 161 161; /* fg-muted     */
+  --fg-faint: 130 130 138;
   --fg-on-accent: 255 255 255;
 
-  --border: 42 42 46;
-  --border-strong: 64 64 70;
+  /* edge tint #C8C8E0 composited over surface-1:
+     subtle .163 / medium .273 / strong .437 */
+  --border-subtle: 47 47 54;
+  --border: 67 67 76; /* edge-medium (cards/inputs) */
+  --border-strong: 97 97 110;
 
-  --accent: 232 93 60;
-  --accent-hi: 240 110 77;
+  --accent: 163 230 53; /* lime-400 */
+  --accent-hi: 190 240 100;
+  --fg-on-accent: 16 18 10; /* dark text on bright lime */
   --success: 90 143 123;
-  --warning: 212 168 67;
-  --error: 212 83 67;
+  --warning: 234 179 8;
+  --error: 248 113 113;
 
-  --scene-1: 212 120 70;
-  --scene-2: 190 140 70;
-  --scene-3: 170 110 90;
+  --scene-1: 120 180 186;
+  --scene-2: 120 148 186;
+  --scene-3: 126 120 186;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
-  --tick: 18 18 20;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 16px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.6);
+  --shadow-raised: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --tick: 8 8 11;
 }
 
 [data-theme="light"] {
-  --bg-0: 245 245 243;
-  --bg-1: 255 255 255;
-  --bg-2: 240 240 238;
-  --bg-3: 228 228 226;
+  --bg-0: 250 248 244;
+  --bg-1: 244 241 235;
+  --bg-2: 234 230 221;
+  --bg-3: 219 213 201;
 
-  --fg-0: 26 26 28;
-  --fg-1: 90 90 96;
-  --fg-2: 138 138 144;
+  --fg-0: 28 25 22;
+  --fg-1: 64 58 51;
+  --fg-2: 90 84 75;
+  --fg-faint: 110 100 87;
   --fg-on-accent: 255 255 255;
 
-  --border: 224 224 222;
-  --border-strong: 200 200 198;
+  /* edge tint #302000 composited over surface-1 */
+  --border-subtle: 212 207 197;
+  --border: 190 184 171;
+  --border-strong: 158 150 132;
 
-  --accent: 201 74 44;
-  --accent-hi: 180 64 38;
+  --accent: 101 163 13; /* lime-600 */
+  --accent-hi: 77 124 15; /* lime-700 */
+  --fg-on-accent: 255 255 255;
   --success: 70 120 100;
-  --warning: 160 120 40;
-  --error: 180 60 50;
+  --warning: 161 98 7;
+  --error: 185 28 28;
 
-  --scene-1: 190 110 70;
-  --scene-2: 170 130 70;
-  --scene-3: 150 100 85;
+  --scene-1: 43 81 84;
+  --scene-2: 66 92 128;
+  --scene-3: 114 108 178;
 
   --shadow-sm: 0 1px 2px rgba(60, 50, 40, 0.08);
-  --shadow-md: 0 8px 24px rgba(60, 50, 40, 0.12);
-  --tick: 235 235 232;
+  --shadow-md: 0 6px 16px rgba(60, 50, 40, 0.12);
+  --shadow-lg: 0 12px 32px rgba(60, 50, 40, 0.16);
+  --shadow-raised: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  --tick: 244 241 235;
 }
 
 :root {
+  --r-xs: 4px;
   --r-sm: 6px;
   --r-md: 8px;
   --r-lg: 12px;
   --r-xl: 16px;
-  --motion: 150ms;
-  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --font-ui: "Space Grotesk", system-ui, "Segoe UI", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --r-pill: 9999px;
+
+  --motion-instant: 80ms;
+  --motion: 150ms; /* quick  */
+  --motion-base: 220ms;
+  --motion-soft: 320ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1); /* standard    */
+  --ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --font-ui: "Inter Variable", system-ui, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 * {
@@ -111,4 +132,24 @@ button:disabled {
 }
 svg {
   display: block;
+}
+
+/* Thin scrollbars (tscaps .thin-scroll) */
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--fg-faint) / 0.25) transparent;
+}
+.thin-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: rgb(var(--fg-faint) / 0.18);
+  border-radius: 999px;
+}
+.thin-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--fg-faint) / 0.35);
+}
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
 }

@@ -2,6 +2,8 @@
 // fframes) loads, to silence the benign mediabunny double-load warning.
 import "./lib/quiet";
 import { mount } from "svelte";
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
 import "./app.css";
 import App from "./App.svelte";
 import { store } from "./lib/state.svelte";

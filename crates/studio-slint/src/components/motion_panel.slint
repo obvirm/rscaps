@@ -1,0 +1,71 @@
+// MotionPanel - tab "Motion": entrance on/off + duration/distance override.
+// MVP fungsional: preset-per-template tetap punya entrance-nya sendiri;
+// panel mengatur static / durasi / jarak di atas default template.
+import { Theme } from "./theme.slint";
+import { DocParams } from "./params_global.slint";
+import { Section, FieldRow, Slider, Toggle } from "./controls.slint";
+import { AppButton } from "./app_button.slint";
+
+
+export component MotionPanel inherits VerticalLayout {
+    in property <bool> is-dark: Theme.is-dark;
+    spacing: 0px;
+
+    Flickable {
+        VerticalLayout {
+            spacing: 0px;
+
+            Section {
+                is-dark: root.is-dark;
+                title: "ENTRANCE";
+                first: true;
+                show-reset: false;
+                Toggle {
+                    is-dark: root.is-dark;
+                    label: "Static (no motion)";
+                    hint: "Matikan entrance — caption langsung tampil";
+                    checked <=> DocParams.motion-static;
+                    toggled(v) => { DocParams.motion-static-changed(v); }
+                }
+                FieldRow {
+                    is-dark: root.is-dark;
+                    label: "Duration";
+                    Slider {
+                        is-dark: root.is-dark;
+                        minimum: 0.0;
+                        maximum: 1500.0;
+                        suffix: "ms";
+                        value: DocParams.motion-duration-ms;
+                        changed(v) => { DocParams.motion-duration-changed(Math.round(v)); }
+                    }
+                }
+                FieldRow {
+                    is-dark: root.is-dark;
+                    label: "Distance";
+                    Slider {
+                        is-dark: root.is-dark;
+                        minimum: 0.0;
+                        maximum: 2.0;
+                        suffix: "em";
+                        value <=> DocParams.motion-distance-em;
+                        changed(v) => { DocParams.motion-distance-changed(v); }
+                    }
+                }
+            }
+
+            Text {
+                text: "0 = template default";
+                color: root.is-dark ? Theme.fg2-dark : Theme.fg2-light;
+                font-size: 10.5px;
+                horizontal-alignment: center;
+            }
+
+            AppButton {
+                is-dark: root.is-dark;
+                text: "Reset motion";
+                horizontal-stretch: 0;
+                clicked => { DocParams.reset-motion(); }
+            }
+        }
+    }
+}

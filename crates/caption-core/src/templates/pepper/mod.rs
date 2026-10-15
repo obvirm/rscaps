@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from pepper's style.scss + template.json) ─────────────
@@ -40,6 +40,25 @@ const PILL_PAD_Y_EM: f32 = 0.08; // highlight-bg-padding-y default
 const PILL_RADIUS_EM: f32 = 0.16; // highlight-bg-radius default
 const PILL_GROW: f32 = 0.05; // pill-grow control default
 const PILL_GROW_DURATION_S: f32 = 0.16; // pill-grow-duration control default
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: 0.0, // no LINE_SPACING_EM in pepper's spec
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: HIGHLIGHT_TEXT,
+    force_uppercase: true, // pepper always uppercases
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// pepper's `effects`: `gap_free` only.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -131,11 +150,13 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -146,7 +167,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         ANTON_400_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -155,16 +176,16 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
 
     // Top-aligned block: `.segment` sits at 0.75H, lines centre under it.
-    let block_top = ANCHOR_Y_FRAC * video_h as f32;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -175,9 +196,12 @@ pub fn render<'a>(
     let pill_ease = recipes::cubic_bezier(0.2, 0.9, 0.3, 1.0);
 
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\" fill=\"{PRIMARY}\" stroke=\"{STROKE_COLOR}\" \
-         stroke-width=\"{stroke_w}\" paint-order=\"stroke\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\" fill=\"{fill}\" stroke=\"{STROKE_COLOR}\" \
+         stroke-width=\"{stroke_w}\" paint-order=\"stroke\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
+        fill = ov.primary,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * line_h;
@@ -193,12 +217,16 @@ pub fn render<'a>(
             if !state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
                 continue;
             }
-            let grow = pill_grow(
-                (now_ms - word.start_ms) / 1000.0,
-                PILL_GROW_DURATION_S,
-                PILL_GROW,
-                &pill_ease,
-            );
+            let grow = if ov.motion_static {
+                1.0
+            } else {
+                pill_grow(
+                    (now_ms - word.start_ms) / 1000.0,
+                    ov.duration_or(PILL_GROW_DURATION_S),
+                    PILL_GROW,
+                    &pill_ease,
+                )
+            };
             // Negative inset past the word's text box: 0.2em a side wide,
             // 0.08em a side tall, growing about the pill's own centre.
             let pill_x = *x - PILL_PAD_X_EM * fs;
@@ -223,8 +251,12 @@ pub fn render<'a>(
             .zip(&measured.families[start..end])
         {
             let being = state::word_narration(now_ms, word.start_ms, word.end_ms).is_being();
-            let fill = if being { HIGHLIGHT_TEXT } else { PRIMARY };
-            let text = layout::escape_xml(&uppercase(&word.display));
+            let fill = if being {
+                HIGHLIGHT_TEXT
+            } else {
+                ov.primary.as_str()
+            };
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             let family_attr = if *family == FONT {
                 String::new()
             } else {
@@ -243,10 +275,20 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
-    fframes::svgr!(
-        <svg
+    // User rotation wraps the caption around the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + (lines.len() as f32 * line_h) / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
+    fframes::svgr!(        <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

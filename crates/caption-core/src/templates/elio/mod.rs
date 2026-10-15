@@ -1,4 +1,4 @@
-﻿//! Native port of the tscaps `elio` template.
+//! Native port of the tscaps `elio` template.
 //!
 //! Visual spec source of truth: `E:\project\tscaps\templates\elio\{style.scss,template.json}`.
 //! Big uppercase Bebas Neue on a centered block that always shows at least
@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (cqh/em values from elio's style.scss) ────────────────
@@ -32,6 +32,25 @@ const SHADOW_BLUR_EM: f32 = 0.25;
 const RISE_DISTANCE_EM: f32 = 0.29; // rise-in $distance
 const PRIMARY: &str = "#ffffff"; // primary-color default
 const HIGHLIGHT: &str = "#ffffff"; // highlight-color default
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: 0.0, // elio has no line-spacing (.line margin-top 0)
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: HIGHLIGHT,
+    force_uppercase: true, // elio always uppercases
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// elio's segment pipeline: sentence boundary → char limit → gap_free.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -88,11 +107,13 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs; // one side of `.word` margin
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs; // one side of `.word` margin
     let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -103,7 +124,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         BEBAS_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -115,17 +136,17 @@ pub fn render<'a>(
     // The splitter measures lines with their word margins; positions and
     // the line total add them on top of the raw widths.
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
 
     // Block centered on (0.5W, 0.5H); `.line + .line` margin-top is 0.
     let block_h = lines.len() as f32 * line_h;
-    let block_top = ANCHOR_Y_FRAC * video_h as f32 - block_h / 2.0;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32 - block_h / 2.0;
+    let center_x = ov.anchor_x * video_w as f32;
 
     // Half-leading model: line box = line-height, content area = ascent +
     // descent, baseline sits half the leading below the content-area top.
@@ -138,10 +159,14 @@ pub fn render<'a>(
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
 
-    let rise = recipes::RiseIn::with(RISE_DISTANCE_EM, 0.0);
+    let mut rise = recipes::RiseIn::with(RISE_DISTANCE_EM, 0.0);
+    rise.distance_em = ov.distance_or(rise.distance_em);
+    rise.duration_s = ov.duration_or(rise.duration_s);
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\" filter=\"url(#elio-shadow)\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\" filter=\"url(#elio-shadow)\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * line_h;
@@ -154,19 +179,23 @@ pub fn render<'a>(
             .zip(&segment.words[start..end])
             .zip(&measured.families[start..end])
         {
-            let (opacity, dy_em) = rise.eval((now_ms - word.start_ms) / 1000.0);
+            let (opacity, dy_em) = if ov.motion_static {
+                (1.0, 0.0)
+            } else {
+                rise.eval((now_ms - word.start_ms) / 1000.0)
+            };
             let y = baseline + dy_em * fs;
             let fill = if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
                 HIGHLIGHT
             } else {
-                PRIMARY
+                ov.primary.as_str()
             };
             let family_attr = if *family == FONT {
                 String::new()
             } else {
                 format!(" font-family=\"{family}\"")
             };
-            let text = layout::escape_xml(&word.display.to_uppercase());
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{y}\" fill=\"{fill}\"{family_attr} opacity=\"{opacity}\">{text}</text>"
             ));
@@ -174,10 +203,21 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
+    // User rotation wraps the block about its centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + block_h / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

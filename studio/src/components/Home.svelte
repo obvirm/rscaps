@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import { store } from "../lib/state.svelte";
   import { router } from "../lib/router.svelte";
-  import { toggleTheme } from "../lib/theme";
+  import { cycleTheme, getMode, type Theme } from "../lib/theme";
+  import { Sun, Moon, Monitor } from "@lucide/svelte";
   import { formatTimeShort, type ProjectMetadata } from "../lib/types";
   import { probeVideo, type VideoProbe } from "../lib/video";
   import NewProjectDialog from "./NewProjectDialog.svelte";
@@ -16,6 +17,8 @@
   let probeError = $state<string | null>(null);
   let openMenuId = $state<string | null>(null);
   let exportProject = $state<ProjectMetadata | null>(null);
+  let themeMode = $state<Theme>(getMode());
+  const ThemeIcon = $derived(themeMode === "light" ? Sun : themeMode === "dark" ? Moon : Monitor);
 
   onMount(() => {
     store.refreshProjects();
@@ -92,8 +95,13 @@
     <div class="chrome-inner">
       <span class="wordmark"><span class="r">rs</span><span class="c">caps</span><span class="dot">.</span></span>
       <div class="utility">
-        <button class="icon-btn" onclick={toggleTheme} title="Toggle theme" aria-label="Toggle theme">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.5" /><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" stroke="none" /></svg>
+        <button
+          class="icon-btn"
+          onclick={() => (themeMode = cycleTheme())}
+          title="Theme: {themeMode} (click to change)"
+          aria-label="Theme: {themeMode}. Click to change."
+        >
+          <ThemeIcon size={16} />
         </button>
       </div>
     </div>

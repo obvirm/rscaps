@@ -34,11 +34,11 @@ use fframes::{
     AudioData, CpuFrameRenderer, FontSource, MediaProvider, Previewer, RenderOptions,
 };
 use fframes_media::{FFmpegDecoder, FrameConvertOptions, ResizeVideoFrame};
-use slint::{ComponentHandle, Image, Model, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode};
+use slint::{ComponentHandle, Image, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode};
 
 slint::include_modules!();
 
-use crate::ui_common::{active_cue_at, fmt_dur_ms, section_rows, template_id};
+use crate::ui_common::{active_cue_at, fmt_dur_ms, section_rows, sync_params_global, template_id};
 
 /// Frame rate clock preview + satuan offset decode (== CaptionVideo::FPS;
 /// FFmpegDecoder custom_time_base = 1/TARGET_FPS sehingga offset = index frame).
@@ -357,6 +357,8 @@ fn render_caption(st: &mut CaptionState, ui: &App, frame: usize) {
         *st = make_caption(st.fonts);
     }
     let Ok(rgba) = st.previewer.render(frame, &mut st.renderer) else {
+        // TEMP debug
+        eprintln!("[caption] render FAILED at frame {frame}");
         return;
     };
     let (w, h) = (rgba.width, rgba.height);
@@ -366,6 +368,13 @@ fn render_caption(st: &mut CaptionState, ui: &App, frame: usize) {
         dst.copy_from_slice(&rgba.pixels);
         ui.set_overlay_image(Image::from_rgba8(buf));
         ui.set_overlay_live(true);
+    } else {
+        // TEMP debug
+        eprintln!(
+            "[caption] pixel len mismatch: got {} expect {} ({w}x{h})",
+            rgba.pixels.len(),
+            dst.len()
+        );
     }
 }
 
@@ -419,6 +428,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
         0x0c, 0x0c, 0x0e,
     )));
     set_models(&ui, "");
+    sync_params_global(&ui);
+    crate::ui_common::sync_style_controls(&ui);
     ui.set_status("Native MVP — buka video untuk mulai.".into());
 
     // ── shared state ───────────────────────────────────────────────────
@@ -441,6 +452,29 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let slot = frame_slot.clone();
         thread::spawn(move || video_worker(cmd_rx, ev_tx, &slot));
     }
+
+    // ══ DEBUG (temporary): portrait video + loki + cues — verifikasi koordinat ══
+    {
+        let tx = cmd_tx.clone();
+        let cap = caption.clone();
+        let cap_frame_c = cap_frame.clone();
+        let test_video = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../whisper-spike/test/portrait-test.mp4");
+        if test_video.exists() {
+            if let Ok(mut doc) = caption_core::document().write() {
+                doc.cues = vec![
+                    caption_core::Cue { start_ms: 0, end_ms: 3000, text: "Hello world".into() },
+                ];
+                doc.duration_frames = 180;
+                doc.template = "loki".into();
+            }
+            cap.borrow_mut().recreate = true;
+            cap_frame_c.set(-1);
+            let _ = tx.send(Cmd::Open(test_video));
+            open_via_new_project.set(false);
+        }
+    }
+    // ══ END DEBUG ══
 
     // ── callbacks: buka video ──────────────────────────────────────────
     // New Project (home): pilih file -> probe -> NewProjectDialog muncul
@@ -530,6 +564,71 @@ pub fn run() -> Result<(), slint::PlatformError> {
             ui.set_status_is_error(false);
         });
     }
+    // np-use-subtitle: impor .srt/.vtt via rfd (paritas jalur file-input
+    // WASM) -> parse caption-core -> masuk editor dgn cues siap.
+    {
+        let weak = ui.as_weak();
+        let playing_c = playing.clone();
+        let cap = caption.clone();
+        let cap_frame_c = cap_frame.clone();
+        ui.on_np_use_subtitle(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("Subtitle", &["srt", "vtt"])
+                .pick_file()
+            else {
+                return; // dibatalkan — dialog tetap terbuka
+            };
+            let name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    ui.set_status(format!("subtitle read failed: {e}").into());
+                    ui.set_status_is_error(true);
+                    return;
+                }
+            };
+            let fmt = if name.to_ascii_lowercase().ends_with(".vtt") {
+                caption_core::srt::Format::Vtt
+            } else {
+                caption_core::srt::Format::Srt
+            };
+            let parsed = match caption_core::srt::parse(&text, fmt) {
+                Ok(p) => p,
+                Err(e) => {
+                    ui.set_status(format!("subtitle parse failed: {e}").into());
+                    ui.set_status_is_error(true);
+                    return;
+                }
+            };
+            let n = parsed.cues.len();
+            if let Ok(mut doc) = caption_core::document().write() {
+                doc.cues = parsed.cues;
+                // Jangan pendekkan timeline video — perpanjang hanya jika
+                // cue melewati durasi video yang sudah terbuka.
+                if parsed.duration_frames > doc.duration_frames {
+                    doc.duration_frames = parsed.duration_frames;
+                }
+            }
+            cap.borrow_mut().recreate = true;
+            cap_frame_c.set(-1);
+            playing_c.set(false);
+            ui.set_playing(false);
+            ui.set_has_video(true);
+            ui.set_show_new_project(false);
+            ui.set_route("editor".into());
+            let tpl = ui.get_np_template_selected();
+            if let Ok(mut doc) = caption_core::document().write() {
+                doc.template = template_id(tpl);
+            }
+            ui.set_status(format!("Impor {n} cue dari {name}.").into());
+            crate::ui_common::sync_cue_list(&ui);
+            ui.set_status_is_error(false);
+        });
+    }
 
     // ── play / pause ───────────────────────────────────────────────────
     {
@@ -599,6 +698,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
             if let Ok(mut doc) = caption_core::document().write() {
                 doc.template = template_id(i);
             }
+            crate::ui_common::sync_style_controls(&ui);
             // Durasi tak berubah (tak perlu recreate) — render ulang frame
             // sekarang agar caption langsung ganti.
             cap_frame_c.set(-1);
@@ -614,6 +714,30 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 set_models(&ui, q.as_str());
             }
         });
+    }
+
+    // ── DocParams global: panel callbacks → caption-core ────────────────
+    // Shared wiring (ui_common): patch → refresh. Native tanpa undo history.
+    {
+        let cap = caption.clone();
+        let cap_frame_c = cap_frame.clone();
+        let refresh = move |ui: &App| {
+            cap.borrow_mut().recreate = true;
+            cap_frame_c.set(-1);
+            let f = ui.get_frame().max(0);
+            render_caption(&mut cap.borrow_mut(), ui, f.max(0) as usize);
+        };
+        let cap2 = caption.clone();
+        let cap_frame_c2 = cap_frame.clone();
+        let refresh2 = move |ui: &App| {
+            cap2.borrow_mut().recreate = true;
+            cap_frame_c2.set(-1);
+            let f = ui.get_frame().max(0);
+            render_caption(&mut cap2.borrow_mut(), ui, f.max(0) as usize);
+        };
+        crate::ui_common::wire_doc_params(&ui, |_| {}, refresh);
+        crate::ui_common::wire_doc_cues(&ui, |_| {}, refresh2);
+        crate::ui_common::sync_cue_list(&ui);
     }
 
     // Timer frame-pump/ui.slint memanggil dua callback ini — native tidak
@@ -678,6 +802,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
                                 format!("Video terbuka · {w}×{h} · {d:.1}s").into(),
                             );
                         }
+                        // Segarkan panel yang membaca dokumen (cue list,
+                        // style controls template aktif) setelah buka.
+                        crate::ui_common::sync_style_controls(&ui);
+                        crate::ui_common::sync_cue_list(&ui);
                         ui.set_status_is_error(false);
                     }
                     Ev::Ended => {

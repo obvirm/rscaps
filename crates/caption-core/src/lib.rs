@@ -40,6 +40,131 @@ pub struct CaptionParams {
     /// embedded Latin run) instead of flipping the whole line to LTR.
     #[serde(default = "default_direction")]
     pub direction: String,
+
+    // ── Typography overrides (None = template default) ─────────────────────
+    /// Letter spacing in `em`. `None` keeps the template's constant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letter_spacing_em: Option<f32>,
+    /// Word spacing in `em`. `None` keeps the template's constant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_spacing_em: Option<f32>,
+    /// Extra line gap in `em` (added on top of the line height).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_spacing_em: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    /// `"none"` | `"uppercase"` | `"lowercase"`. `None` = template default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_case: Option<String>,
+    /// Screen-side horizontal text alignment: `"left"` | `"center"` |
+    /// `"right"`. `None` = template default (center).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_align: Option<String>,
+
+    // ── Position overrides (None = template default) ───────────────────────
+    /// Screen-side block anchor horizontal: `"left"` | `"center"` | `"right"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h_align: Option<String>,
+    /// Horizontal offset 0..1 measured from the LEFT edge of the frame
+    /// (screen-side, independent of reading direction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h_offset: Option<f32>,
+    /// Block anchor vertical: `"top"` | `"center"` | `"bottom"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v_align: Option<String>,
+    /// Vertical offset 0..1 measured from the TOP edge (replaces the
+    /// template's `ANCHOR_Y_FRAC` when set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v_offset: Option<f32>,
+    /// Segment rotation in degrees, −180..180. `None` = no rotation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle_deg: Option<f32>,
+
+    // ── Motion overrides (None = template default entrance) ────────────────
+    /// Entrance preset id: `""` = template default, `"static"` = no motion,
+    /// else a preset id from the motion catalog (`pop-in`, `rise-in`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_duration_ms: Option<u32>,
+    /// Rise/travel distance in `em` (presets that travel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_distance_em: Option<f32>,
+
+    // ── Effects (tri-state: None = template default, Some = force) ─────────
+    #[serde(default)]
+    pub effects: EffectsParams,
+
+    // ── Layout overrides (None = template default) ─────────────────────────
+    /// Balanced line splitter: max lines per segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lines: Option<u32>,
+    /// Balanced line splitter: max line width as fraction of frame width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width_frac: Option<f32>,
+    /// Segment char-limit override (boundary_score_limit_by_chars.maxChars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chars: Option<u32>,
+
+    // ── Template style controls (data-driven per template.json) ───────────
+    /// Per-control values keyed by control id (`"highlight-color"` → …).
+    /// Merged (not replaced) by `patch_params_json`; consumed in
+    /// `overrides::resolve` (`primary-color`, `highlight-color` first).
+    #[serde(default)]
+    pub style_values: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Document-transform effects as user overrides. Every flag is tri-state:
+/// `None` = inherit the template's declared effect, `Some(true)` = force
+/// on, `Some(false)` = force off (tscaps `UpdateEffectsAction` parity).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EffectsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap_free: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_punctuation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smart_punctuation: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry_quotes: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smart_lowercase: Option<bool>,
+    /// Emoji placement: `"segment-below"` | `"segment-above"` | `"word"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji_placement: Option<String>,
+    /// Emoji size multiplier (tscaps default 1.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji_size: Option<f32>,
+    /// Emoji gap in em (tscaps default 0.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji_gap: Option<f32>,
+}
+
+/// The REAL size of the registered source video (the project's own width ×
+/// height), falling back to the controller's default 1920×1080 canvas when no
+/// source is registered yet (unit tests, cold boot).
+///
+/// The fframes controller hardwires `ctx.current_video_size` to `TVideo`'s
+/// compile-time consts, so templates must read dimensions through this
+/// helper — it is the single place that consults `media_source`. Portrait and
+/// odd-sized videos then lay out, wrap and anchor on their own pixel grid
+/// (viewBox = width × height → uniform scale when mapped onto the video box).
+pub fn ctx_video_size(ctx: &fframes::FFramesContext<'_, '_>) -> fframes::VideoSize {
+    if let Some(provider) = ctx.media_source {
+        for (video, _) in provider.get_all_video_data() {
+            if let Some(meta) = &video.metadata {
+                return fframes::VideoSize {
+                    width: meta.width as usize,
+                    height: meta.height as usize,
+                };
+            }
+        }
+    }
+    ctx.current_video_size.clone()
 }
 
 // ── Canonical defaults ─────────────────────────────────────────────────────
@@ -47,19 +172,19 @@ pub struct CaptionParams {
 // other apps) must obtain them via `default_document_json()` / the wasm
 // bridge instead of hardcoding their own copy — a second set of defaults is
 // a guarantee of drift.
-fn default_font_family() -> String {
+pub(crate) fn default_font_family() -> String {
     "Arial".to_string()
 }
-fn default_font_size() -> f32 {
+pub(crate) fn default_font_size() -> f32 {
     110.0
 }
-fn default_font_weight() -> u16 {
+pub(crate) fn default_font_weight() -> u16 {
     400
 }
-fn default_color() -> String {
+pub(crate) fn default_color() -> String {
     "#ffdd57".to_string()
 }
-fn default_y_frac() -> f32 {
+pub(crate) fn default_y_frac() -> f32 {
     0.78
 }
 fn default_width_frac() -> f32 {
@@ -87,6 +212,27 @@ impl Default for CaptionParams {
             pop_in_ms: default_pop_in_ms(),
             travel_px: default_travel_px(),
             direction: default_direction(),
+            letter_spacing_em: None,
+            word_spacing_em: None,
+            line_spacing_em: None,
+            italic: None,
+            underline: None,
+            strikethrough: None,
+            text_case: None,
+            text_align: None,
+            h_align: None,
+            h_offset: None,
+            v_align: None,
+            v_offset: None,
+            angle_deg: None,
+            motion_preset: None,
+            motion_duration_ms: None,
+            motion_distance_em: None,
+            effects: EffectsParams::default(),
+            max_lines: None,
+            max_width_frac: None,
+            max_chars: None,
+            style_values: serde_json::Map::new(),
         }
     }
 }
@@ -168,6 +314,54 @@ pub fn replace_cues_json(json: &str) -> Result<(), String> {
         .map_err(|_| "document lock poisoned".to_string())?;
     guard.cues = cues;
     Ok(())
+}
+
+/// Merge a partial params JSON object onto the live document's params —
+/// the patch API the studio panels use (typography/position/effects/…).
+///
+/// Only the keys present in `patch_json` are written; everything else keeps
+/// its current value. Nested `effects` merges per-key as well. Also refreshes
+/// the live font/color strings so the v0 renderer follows immediately.
+pub fn patch_params_json(patch_json: &str) -> Result<(), String> {
+    let patch: serde_json::Value =
+        serde_json::from_str(patch_json).map_err(|err| format!("invalid params patch: {err}"))?;
+    if !patch.is_object() {
+        return Err("params patch must be a JSON object".to_string());
+    }
+    let mut guard = document()
+        .write()
+        .map_err(|_| "document lock poisoned".to_string())?;
+    let mut current = serde_json::to_value(&guard.params)
+        .map_err(|err| format!("serialize current params: {err}"))?;
+    merge_json(&mut current, patch);
+    let next: CaptionParams = serde_json::from_value(current)
+        .map_err(|err| format!("invalid params after merge: {err}"))?;
+    if let Ok(mut live) = LIVE_FONT_FAMILY.write() {
+        *live = leak_str(&next.font_family);
+    }
+    if let Ok(mut live) = LIVE_TEXT_COLOR.write() {
+        *live = leak_str(&next.color);
+    }
+    guard.params = next;
+    Ok(())
+}
+
+/// Recursively merge `patch` into `base` (objects merge per-key; anything
+/// else replaces).
+fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
+    match (base, patch) {
+        (serde_json::Value::Object(base_map), serde_json::Value::Object(patch_map)) => {
+            for (key, value) in patch_map {
+                match base_map.get_mut(&key) {
+                    Some(slot) => merge_json(slot, value),
+                    None => {
+                        base_map.insert(key, value);
+                    }
+                }
+            }
+        }
+        (slot, patch) => *slot = patch,
+    }
 }
 
 /// Parse a subtitle file (`.srt` / `.vtt`) → JSON
@@ -257,12 +451,39 @@ impl Video for CaptionVideo {
         let opacity = eased;
         let dy = (1.0 - eased) * params.travel_px;
 
-        let width = ctx.current_video_size.width;
-        let height = ctx.current_video_size.height;
+        // v0 honouring the new override fields (position/align/case).
+        let align = match params.text_align.as_deref() {
+            Some("left") => TextAlign::Left,
+            Some("right") => TextAlign::Right,
+            _ => TextAlign::Center,
+        };
+        let anchor_x = match params.h_align.as_deref() {
+            Some("left") => params.h_offset.unwrap_or(0.0).clamp(0.0, 1.0),
+            Some("right") => 1.0 - params.h_offset.unwrap_or(0.0).clamp(0.0, 1.0),
+            Some("center") => 0.5,
+            _ => params.h_offset.unwrap_or(0.5).clamp(0.0, 1.0),
+        };
+        let anchor_y = match params.v_align.as_deref() {
+            Some("top") => params.v_offset.unwrap_or(0.0).clamp(0.0, 1.0),
+            Some("bottom") => 1.0 - params.v_offset.unwrap_or(0.0).clamp(0.0, 1.0),
+            Some("center") => 0.5,
+            _ => params
+                .v_offset
+                .unwrap_or(params.y_frac)
+                .clamp(0.0, 1.0),
+        };
+        let text = match params.text_case.as_deref() {
+            Some("uppercase") => cue.text.to_uppercase(),
+            Some("lowercase") => cue.text.to_lowercase(),
+            _ => cue.text.clone(),
+        };
+
+        let width = ctx_video_size(ctx).width;
+        let height = ctx_video_size(ctx).height;
         let body = frame
             .text_break_lines(
                 ctx,
-                cue.text.as_str(),
+                text.as_str(),
                 BreakLinesOpts {
                     font: FontQuery {
                         family: live_family(),
@@ -272,12 +493,16 @@ impl Video for CaptionVideo {
                     },
                     width: ((width as f32) * params.width_frac.clamp(0.1, 1.0)) as usize,
                     line_height: 1.1,
-                    x: ((width as f32) / 2.0) as i32,
-                    y: ((height as f32) * params.y_frac.clamp(0.0, 1.0)) as i32,
-                    align: TextAlign::Center,
+                    x: ((width as f32) * anchor_x) as i32,
+                    y: ((height as f32) * anchor_y) as i32,
+                    align,
                     fill: live_color(),
                     dominant_baseline: "middle",
-                    text_anchor: "middle",
+                    text_anchor: match align {
+                        TextAlign::Left => "start",
+                        TextAlign::Right => "end",
+                        TextAlign::Center => "middle",
+                    },
                     opacity: 1.0,
                 },
             )
@@ -286,7 +511,7 @@ impl Video for CaptionVideo {
         fframes::svgr!(
             <svg
                 xmlns="http://www.w3.org/2000/svg"
-                viewBox="0 0 1920 1080"
+                viewBox={format!("0 0 {} {}", width, height)}
                 width={width}
                 height={height}
             >
@@ -295,5 +520,57 @@ impl Video for CaptionVideo {
                 </g>
             </svg>
         )
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn params_patch_merges_partial_json() {
+        let original = CaptionParams::default();
+        let mut doc = CaptionDocument {
+            params: original.clone(),
+            ..Default::default()
+        };
+        doc.params.letter_spacing_em = Some(0.05);
+        *document().write().unwrap() = doc;
+
+        patch_params_json(r#"{"font_size": 90, "effects": {"gap_free": true}}"#).unwrap();
+
+        let guard = document().read().unwrap();
+        assert_eq!(guard.params.font_size, 90.0);
+        assert_eq!(guard.params.effects.gap_free, Some(true));
+        // Unpatched fields survive the merge.
+        assert_eq!(guard.params.letter_spacing_em, Some(0.05));
+        assert_eq!(guard.params.color, original.color);
+    }
+
+    #[test]
+    fn params_patch_rejects_non_object() {
+        assert!(patch_params_json("[1,2,3]").is_err());
+        assert!(patch_params_json("not json").is_err());
+    }
+
+    #[test]
+    fn old_documents_without_new_fields_deserialize() {
+        // A pre-extension document JSON (only the original 9 fields).
+        let json = r##"{
+            "duration_frames": 900,
+            "cues": [{"start_ms": 0, "end_ms": 1000, "text": "hi"}],
+            "params": {
+                "font_family": "Arial", "font_size": 110.0, "font_weight": 400,
+                "color": "#ffdd57", "y_frac": 0.78, "width_frac": 0.78,
+                "pop_in_ms": 250, "travel_px": 48.0, "direction": "auto"
+            },
+            "template": ""
+        }"##;
+        let doc: CaptionDocument = serde_json::from_str(json).unwrap();
+        assert!(doc.params.letter_spacing_em.is_none());
+        assert!(doc.params.effects.gap_free.is_none());
+        assert!(doc.params.max_lines.is_none());
     }
 }

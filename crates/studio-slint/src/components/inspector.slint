@@ -4,6 +4,13 @@ import { PlaceholderPanel } from "./placeholder_panel.slint";
 import { TemplateItem } from "./template_item.slint";
 import { TemplatesPanel } from "./templates_panel.slint";
 import { Theme } from "./theme.slint";
+import { TypographyPanel } from "./typography_panel.slint";
+import { PositionPanel } from "./position_panel.slint";
+import { EffectsPanel } from "./effects_panel.slint";
+import { LayoutPanel } from "./layout_panel.slint";
+import { StylePanel } from "./style_panel.slint";
+import { MotionPanel } from "./motion_panel.slint";
+import { TranscriptPanel } from "./transcript_panel.slint";
 
 
 // ── Inspector ──────────────────────────────────────────────────────────────
@@ -62,7 +69,35 @@ export component Inspector inherits Rectangle {
                     apply => { root.apply(); }
                     direction-chosen(i) => { root.direction-chosen(i); }
                 }
-                if root.active-rail != "templates" && root.active-rail != "code": PlaceholderPanel {
+                if root.active-rail == "transcript": TranscriptPanel {
+                    is-dark: root.is-dark;
+                    horizontal-stretch: 1; vertical-stretch: 1;
+                }
+                if root.active-rail == "typography": TypographyPanel {
+                    is-dark: root.is-dark;
+                    horizontal-stretch: 1; vertical-stretch: 1;
+                }
+                if root.active-rail == "position": PositionPanel {
+                    is-dark: root.is-dark;
+                    horizontal-stretch: 1; vertical-stretch: 1;
+                }
+                if root.active-rail == "effects": EffectsPanel {
+                    is-dark: root.is-dark;
+                    horizontal-stretch: 1; vertical-stretch: 1;
+                }
+                if root.active-rail == "layout": LayoutPanel {
+                    is-dark: root.is-dark;
+                    horizontal-stretch: 1; vertical-stretch: 1;
+                }
+                if root.active-rail == "style": StylePanel {
+                    is-dark: root.is-dark;
+                    horizontal-stretch: 1; vertical-stretch: 1;
+                }
+                if root.active-rail == "motion": MotionPanel {
+                    is-dark: root.is-dark;
+                    horizontal-stretch: 1; vertical-stretch: 1;
+                }
+                if root.active-rail != "templates" && root.active-rail != "code" && root.active-rail != "transcript" && root.active-rail != "typography" && root.active-rail != "position" && root.active-rail != "effects" && root.active-rail != "layout" && root.active-rail != "style" && root.active-rail != "motion": PlaceholderPanel {
                     is-dark: root.is-dark;
                     horizontal-stretch: 1; vertical-stretch: 1;
                     label: root.title;

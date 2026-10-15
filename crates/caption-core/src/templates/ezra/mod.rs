@@ -36,7 +36,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from ezra's style.scss + template.json) ───────────────
@@ -78,6 +78,25 @@ const BIG_FILL_FRAC: f32 = 0.86;
 const MIN_LETTERS: usize = 4;
 const MIN_SECONDS: f32 = 0.8;
 const FALLBACK_SECONDS: f32 = 0.6;
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: 0.0, // ezra has no letter-spacing
+    word_spacing_em: WORD_MARGIN_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: false, // ezra keeps the spoken case
+    min_lines: 1, // ezra wraps greedily, never balances
+    max_lines: 1,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// ezra's `segmentSplitters`: boundary + boundary_score_limit_by_chars
 /// 6/35, `effects: [gap_free]`.
@@ -268,15 +287,18 @@ pub fn render<'a>(
         return Svgr::empty();
     }
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
     let w = video_w as f32;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let margin = WORD_MARGIN_EM * fs;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
-    let max_row_w = MAX_WIDTH_RATIO * w;
-    let block_left = ANCHOR_X_FRAC * w;
-    let block_top = ANCHOR_Y_FRAC * video_h as f32;
+    let max_row_w = ov.max_width_ratio * w;
+    let block_left = ov.anchor_x * w;
+    let block_top = ov.anchor_y * video_h as f32;
 
     let inter_stack = stack::Stack::for_latin(FONT);
     let big_stack = stack::Stack::for_latin(BIG_FONT);
@@ -291,10 +313,10 @@ pub fn render<'a>(
         &segment.words,
         &inter_stack,
         INTER_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
-        0.0,
+        ls_px,
         false,
     );
     let widths = measured.widths;
@@ -303,7 +325,8 @@ pub fn render<'a>(
     // left is the text's x (the margin sits outside the inline-block)
     // and the box bottom is baseline + descent + half-leading (the box
     // is one 1.1em line).
-    let scale_in = scale_in();
+    let mut scale_in = scale_in();
+    scale_in.duration_s = ov.duration_or(scale_in.duration_s);
 
     let mut body = String::new();
     let mut right_extent = block_left;
@@ -311,7 +334,11 @@ pub fn render<'a>(
 
     // small_word with optional family override for non-Latin words.
     let small_word_with_family = |body: &mut String, x: f32, baseline: f32, text: &str, start_ms: f32, family: &str| {
-        let (opacity, scale) = scale_in.eval((now_ms - start_ms) / 1000.0);
+        let (opacity, scale) = if ov.motion_static {
+            (1.0, 1.0)
+        } else {
+            scale_in.eval((now_ms - start_ms) / 1000.0)
+        };
         let text = layout::escape_xml(text);
         let transform = if (scale - 1.0).abs() > 1e-4 {
             let ox = x;
@@ -335,8 +362,9 @@ pub fn render<'a>(
             format!(" font-family=\"{family}\"")
         };
         body.push_str(&format!(
-            "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
-             filter=\"url(#ezra-shadow)\"{transform}{opacity}>{text}</text>"
+            "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
+             filter=\"url(#ezra-shadow)\"{transform}{opacity}>{text}</text>",
+            primary = ov.primary.as_str(),
         ));
     };
 
@@ -346,7 +374,10 @@ pub fn render<'a>(
         // is narrated, rows greedy-wrapped at the segment's 88cqw.
         None => {
             body.push_str(&format!(
-                "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
+                "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+                 letter-spacing=\"{ls_px}\">",
+                font = ov.font_family,
+                weight = ov.font_weight,
             ));
             let mut y = block_top;
             for (start, end) in wrap_rows(&widths, margin, max_row_w) {
@@ -367,7 +398,10 @@ pub fn render<'a>(
         Some(iso) => {
             // ── line 1: the words before the big one (small type) ──
             body.push_str(&format!(
-                "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
+                "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+                 letter-spacing=\"{ls_px}\">",
+                font = ov.font_family,
+                weight = ov.font_weight,
             ));
             let mut y = block_top;
             for (start, end) in wrap_rows(&widths[..iso], margin, max_row_w) {
@@ -385,7 +419,7 @@ pub fn render<'a>(
             // The gap sits on the small line above the big one
             // (`.first:not(.last) { margin-bottom: 0.1em }`, resolved
             // against the small line's font-size).
-            y += LINE_SPACING_EM * fs;
+            y += ov.line_spacing_em * fs;
 
             // ── line 2: the big word alone, Playfair, trimmed to its
             //    cap height, sliding in from off-frame left ──
@@ -410,10 +444,16 @@ pub fn render<'a>(
             let baseline_big = y + cap_px;
             right_extent = right_extent.max(block_left + big_em * f_big);
 
-            let slide = slide_in(w);
-            let (opacity, dx) = slide.eval((now_ms - big_word.start_ms) / 1000.0);
+            let mut slide = slide_in(w);
+            slide.duration_s = ov.duration_or(slide.duration_s);
+            slide.distance_em = ov.distance_or(slide.distance_em);
+            let (opacity, dx) = if ov.motion_static {
+                (1.0, 0.0)
+            } else {
+                slide.eval((now_ms - big_word.start_ms) / 1000.0)
+            };
             let text = layout::escape_xml(&big_word.display);
-            let x = block_left + WORD_MARGIN_EM * f_big;
+            let x = block_left + ov.word_spacing_em * f_big;
             let transform = if dx.abs() > 0.05 {
                 format!(" transform=\"translate({dx} 0)\"")
             } else {
@@ -425,10 +465,11 @@ pub fn render<'a>(
                 String::new()
             };
             body.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline_big}\" fill=\"{PRIMARY}\" \
+                "<text x=\"{x}\" y=\"{baseline_big}\" fill=\"{primary}\" \
                  font-family=\"{big_family}\" font-weight=\"{BIG_FONT_WEIGHT}\" \
                  font-size=\"{f_big}\" filter=\"url(#ezra-shadow)\"{transform}{opacity}>\
-                 {text}</text>"
+                 {text}</text>",
+                primary = ov.primary.as_str(),
             ));
             y += cap_px;
 
@@ -440,7 +481,7 @@ pub fn render<'a>(
                 let tail = &widths[iso + 1..];
                 let w3: f32 = tail.iter().map(|w| w + 2.0 * margin).sum();
                 let delta = (big_em * f_big - w3).max(0.0);
-                y += LINE_SPACING_EM * fs;
+                y += ov.line_spacing_em * fs;
                 let left3 = block_left + delta;
                 for (start, end) in wrap_rows(tail, margin, (max_row_w - delta).max(0.0)) {
                     let abs_start = iso + 1 + start;
@@ -459,6 +500,17 @@ pub fn render<'a>(
             }
             bottom = y;
         }
+    }
+
+    // User rotation wraps the block about its centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = block_left;
+        let cy = (block_top + bottom) / 2.0;
+        body = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = body,
+        );
     }
 
     // The shadow chain lives in user space around the block so the
@@ -482,7 +534,7 @@ pub fn render<'a>(
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

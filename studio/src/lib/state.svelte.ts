@@ -5,8 +5,10 @@ import {
   formatTime,
   newProjectId,
   type CaptionDocument,
+  type CaptionParams,
   type Cue,
   type Direction,
+  type EffectsParams,
   type ProjectMetadata,
   type RscapsProject,
   type TemplateEntry,
@@ -82,12 +84,17 @@ class StudioState {
   exporting = $state(false);
   status = $state("idle");
   statusIsError = $state(false);
+  /** Save button status (tscaps SaveButtonStatus). */
+  saveState = $state<"idle" | "saving" | "saved" | "error">("saved");
+  dirty = $state(false);
   docText = $state("");
   svg = $state("");
   fontFaceCss = $state("");
   bootError = $state<string | null>(null);
   /** Template catalog from caption-core (populated on wasm boot). */
   templates = $state<TemplateEntry[]>([]);
+  /** Canonical default params (sentinels for template-wins resolution). */
+  defaultParams = $state<CaptionParams | null>(null);
 
   // ── Home state ──────────────────────────────────────────────────────────
   projects = $state<ProjectMetadata[]>([]);
@@ -108,6 +115,15 @@ class StudioState {
 
   // ── Derived ─────────────────────────────────────────────────────────────
   aspect = $derived(`${this.videoWidth} / ${this.videoHeight}`);
+  doc = $derived.by<CaptionDocument | null>(() => {
+    try {
+      return JSON.parse(this.docText) as CaptionDocument;
+    } catch {
+      return null;
+    }
+  });
+  params = $derived(this.doc?.params ?? null);
+  activeTemplate = $derived(this.templates.find((t) => t.id === this.doc?.template) ?? null);
   cues = $derived.by<Cue[]>(() => {
     try {
       const doc = JSON.parse(this.docText) as CaptionDocument;
@@ -158,6 +174,7 @@ class StudioState {
       this.wasm = loaded;
       this.fontFaceCss = loaded.fontFaceCss;
       this.templates = loaded.templateCatalog;
+      this.defaultParams = loaded.defaultDocument.params;
       this.setStatus("ready");
     } catch (err) {
       console.error(err);
@@ -221,6 +238,17 @@ class StudioState {
     this.backend = opts.backend;
     this.model = opts.model;
     this.setVideoBlob(opts.video);
+    // Register real video dimensions with the engine so templates lay out on
+    // the project's own pixel grid (viewBox = width × height).
+    if (this.wasm && this.objectUrl) {
+      this.wasm.bridge.add_video_source_placeholder(
+        opts.videoName || "video",
+        this.objectUrl,
+        opts.width,
+        opts.height,
+        opts.durationSec,
+      );
+    }
     if (this.videoEl) {
       this.videoEl.src = this.videoUrl!;
       this.videoEl.load();
@@ -257,6 +285,16 @@ class StudioState {
     const blob = await loadVideo(id);
     if (blob) {
       this.setVideoBlob(blob);
+      // Real video dimensions for the engine (see createProject).
+      if (this.wasm && this.objectUrl) {
+        this.wasm.bridge.add_video_source_placeholder(
+          project.videoName || "video",
+          this.objectUrl,
+          this.videoWidth,
+          this.videoHeight,
+          this.durationFrames / this.fps,
+        );
+      }
       if (this.videoEl) {
         this.videoEl.src = this.videoUrl!;
         this.videoEl.load();
@@ -321,31 +359,40 @@ class StudioState {
 
   async saveCurrent(): Promise<void> {
     if (!this.currentId) return;
-    const existing = await getProject(this.currentId);
-    const doc = this.currentDoc();
-    if (!doc) return;
-    const now = new Date().toISOString();
-    const project: RscapsProject = {
-      id: this.currentId,
-      name: this.projectName || "Untitled",
-      createdAt: existing?.createdAt || now,
-      updatedAt: now,
-      doc,
-      settings: {
-        fps: this.fps,
-        width: this.videoWidth,
-        height: this.videoHeight,
-        backend: this.backend,
-        model: this.model,
-      },
-      videoName: this.videoName ?? undefined,
-      thumbnail: await this.makeThumbnail(),
-    };
-    await dbSave(project);
+    this.saveState = "saving";
+    try {
+      const existing = await getProject(this.currentId);
+      const doc = this.currentDoc();
+      if (!doc) return;
+      const now = new Date().toISOString();
+      const project: RscapsProject = {
+        id: this.currentId,
+        name: this.projectName || "Untitled",
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+        doc,
+        settings: {
+          fps: this.fps,
+          width: this.videoWidth,
+          height: this.videoHeight,
+          backend: this.backend,
+          model: this.model,
+        },
+        videoName: this.videoName ?? undefined,
+        thumbnail: await this.makeThumbnail(),
+      };
+      await dbSave(project);
+      this.saveState = "saved";
+      this.dirty = false;
+    } catch (err) {
+      this.saveState = "error";
+      throw err;
+    }
   }
 
   scheduleSave(): void {
     if (!this.currentId) return;
+    this.dirty = true;
     clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
       this.saveCurrent()
@@ -361,9 +408,21 @@ class StudioState {
   }
 
   // ── Rendering ───────────────────────────────────────────────────────────
+  /**
+   * The engine renders in a fixed 1920×1080 viewBox space (fframes
+   * `current_video_size` is hardwired there). The preview must map that box
+   * onto the video rect EXACTLY the way export does (`drawImage` stretch),
+   * otherwise letterboxing shifts anchors on non-16:9 videos. Inject
+   * `preserveAspectRatio="none"` so the SVG fills the box like the export.
+   */
+  private toPreviewSvg(raw: string): string {
+    if (!raw || raw.includes("preserveAspectRatio")) return raw;
+    return raw.replace("<svg ", '<svg preserveAspectRatio="none" ');
+  }
+
   renderAt(f: number): void {
     if (!this.wasm) return;
-    this.svg = this.wasm.bridge.render_frame(BigInt(f));
+    this.svg = this.toPreviewSvg(this.wasm.bridge.render_frame(BigInt(f)));
     this.frame = f;
     this.syncVideoToFrame(f);
   }
@@ -371,7 +430,7 @@ class StudioState {
   // Render caption without touching the video element (used by playback loop).
   private renderCaption(f: number): void {
     if (!this.wasm) return;
-    this.svg = this.wasm.bridge.render_frame(BigInt(f));
+    this.svg = this.toPreviewSvg(this.wasm.bridge.render_frame(BigInt(f)));
     this.frame = f;
   }
 
@@ -524,6 +583,123 @@ class StudioState {
     });
   }
 
+  // ── Param overrides (panel wiring) ──────────────────────────────────────
+  /** Re-render overlay without preparing (cue timing unchanged) or seeking. */
+  private applyParams(): void {
+    if (!this.wasm) return;
+    this.wasm.setDocumentJson(this.docText);
+    const f = Math.min(this.frame, Math.max(this.durationFrames - 1, 0));
+    this.svg = this.toPreviewSvg(this.wasm.bridge.render_frame(BigInt(f)));
+    this.frame = f;
+  }
+
+  /** Merge a params patch, re-render the overlay, mark the project dirty. */
+  setParams(patch: Partial<CaptionParams>): boolean {
+    const ok = this.updateDoc((doc) => {
+      doc.params = { ...(doc.params ?? this.defaultDocument().params), ...patch };
+    });
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  /** Merge into `params.effects` (tri-state overrides). */
+  setEffectsParams(patch: Partial<EffectsParams>): boolean {
+    const ok = this.updateDoc((doc) => {
+      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
+      doc.params.effects = { ...(doc.params.effects ?? {}), ...patch };
+    });
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  /** Set one data-driven style control value (`params.style_values`). */
+  setStyleValue(id: string, value: string | number | boolean): boolean {
+    const ok = this.updateDoc((doc) => {
+      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
+      doc.params.style_values = { ...(doc.params.style_values ?? {}), [id]: value };
+    });
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  /** Apply a template variant (preset) by merging its overrides. */
+  applyVariantOverrides(overrides: Record<string, string | number | boolean>): boolean {
+    const ok = this.updateDoc((doc) => {
+      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
+      doc.params.style_values = { ...(doc.params.style_values ?? {}), ...overrides };
+    });
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  /** Switch template: full re-prepare (new splitters/animation timing). */
+  async applyTemplate(id: string): Promise<void> {
+    if (!this.setTemplate(id)) return;
+    await this.applyDocument();
+    this.scheduleSave();
+  }
+
+  // ── Cue editing (Transcript panel) ──────────────────────────────────────
+  /** Patch one cue. Timing changes re-prepare (duration), text-only re-renders. */
+  async editCue(index: number, patch: Partial<Cue>): Promise<void> {
+    const ok = this.updateDoc((doc) => {
+      const cue = doc.cues[index];
+      if (!cue) return;
+      Object.assign(cue, patch);
+      if (cue.end_ms < cue.start_ms) cue.end_ms = cue.start_ms;
+      doc.cues.sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
+    });
+    if (!ok) return;
+    const timing = patch.start_ms !== undefined || patch.end_ms !== undefined;
+    if (timing) {
+      await this.applyDocument();
+    } else {
+      this.applyParams();
+    }
+    this.scheduleSave();
+  }
+
+  async addCue(afterIndex?: number): Promise<void> {
+    const ok = this.updateDoc((doc) => {
+      const prev = afterIndex !== undefined ? doc.cues[afterIndex] : undefined;
+      const start = prev ? prev.end_ms : (doc.cues.at(-1)?.end_ms ?? 0);
+      const cue: Cue = { start_ms: start, end_ms: start + 2000, text: "New caption" };
+      doc.cues.splice((afterIndex ?? doc.cues.length - 1) + 1, 0, cue);
+      doc.duration_frames = Math.max(
+        doc.duration_frames,
+        Math.ceil((cue.end_ms / 1000) * this.fps),
+      );
+    });
+    if (!ok) return;
+    await this.applyDocument();
+    this.scheduleSave();
+  }
+
+  async removeCue(index: number): Promise<void> {
+    const ok = this.updateDoc((doc) => {
+      if (doc.cues.length <= 1) {
+        doc.cues[0] = { start_ms: 0, end_ms: 1000, text: "" };
+        return;
+      }
+      doc.cues.splice(index, 1);
+    });
+    if (!ok) return;
+    await this.applyDocument();
+    this.scheduleSave();
+  }
+
   // ── Import / export ─────────────────────────────────────────────────────
   async importSubtitleFile(file: File): Promise<void> {
     if (!this.wasm) return;
@@ -606,6 +782,16 @@ class StudioState {
       // Point the caption bridge at this document so render_frame draws the
       // right cues regardless of what is open in the editor.
       this.wasm.setDocumentJson(docJson);
+      // Register real dimensions so non-16:9 exports lay out on their own
+      // pixel grid (same as the editor preview).
+      const durationSec = ((isCurrent ? this.durationFrames : project.doc.duration_frames) || 1) / fps;
+      this.wasm.bridge.add_video_source_placeholder(
+        project.videoName || "video",
+        "",
+        srcW,
+        srcH,
+        durationSec,
+      );
       await this.wasm.bridge.prepare(fps);
 
       const { width, height } = computeOutputSize(srcW, srcH, opts.resolution);

@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from levi's style.scss + template.json) ───────────────
@@ -36,6 +36,25 @@ const GRADIENT_BLACK_SHARE: f32 = 0.18;
 // text-shadow: soft-drop-shadow(0.03, 0.12) via filter: drop-shadow(...)
 const SHADOW_DY_EM: f32 = 0.03;
 const SHADOW_BLUR_EM: f32 = 0.12;
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: 0.0, // levi has no letter-spacing
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: true, // levi always uppercases
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// levi's pipeline: sentence boundary → char limit → gap_free.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -110,12 +129,15 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
-    let line_gap = LINE_SPACING_EM * fs;
+    let line_gap = ov.line_spacing_em * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) = line_metrics(stack::dominant_family(&segment.words, &script_stack));
     let rtl = segment.direction.is_rtl();
@@ -124,23 +146,23 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         ANTON_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
-        0.0,
+        ls_px,
         true,
     );
     let widths = measured.widths;
     let display_texts: Vec<String> = segment
         .words
         .iter()
-        .map(|w| w.display.to_uppercase())
+        .map(|w| ov.text_case.apply(&w.display))
         .collect();
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
@@ -148,8 +170,8 @@ pub fn render<'a>(
     // Centered vertically (anchor 0.4H), left-aligned at 0.04W; lines are
     // stacked with a 0.09em gap between them, not inside the first.
     let block_h = lines.len() as f32 * line_h + lines.len().saturating_sub(1) as f32 * line_gap;
-    let block_top = ANCHOR_Y_FRAC * video_h as f32 - block_h / 2.0;
-    let block_left = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32 - block_h / 2.0;
+    let block_left = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -157,12 +179,20 @@ pub fn render<'a>(
 
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
-    let gradient_bottom = mixed_down(PRIMARY, GRADIENT_BLACK_SHARE);
-    let rise = recipes::RiseIn::custom(0.0, 0.0, RISE_DURATION_S, recipes::ease_out);
+    let gradient_bottom = mixed_down(ov.primary.as_str(), GRADIENT_BLACK_SHARE);
+    let rise = recipes::RiseIn::custom(
+        ov.distance_or(0.0),
+        0.0,
+        ov.duration_or(RISE_DURATION_S),
+        recipes::ease_out,
+    );
 
     let mut defs_svg = String::new();
     let mut lines_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
+         letter-spacing=\"{ls_px}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * (line_h + line_gap);
@@ -172,7 +202,11 @@ pub fn render<'a>(
 
         // The line rises in when its own narration starts (first word).
         let line_span = state::LineSpan::of_words(&segment.words[start..end]);
-        let line_opacity = rise.eval((now_ms - line_span.start_ms) / 1000.0).0;
+        let line_opacity = if ov.motion_static {
+            1.0
+        } else {
+            rise.eval((now_ms - line_span.start_ms) / 1000.0).0
+        };
 
         // Per-line 180° gradient across the line box (background-clip:
         // text maps the background over the element's box, not the glyphs).
@@ -180,10 +214,11 @@ pub fn render<'a>(
         defs_svg.push_str(&format!(
             "<linearGradient id=\"{grad_id}\" gradientUnits=\"userSpaceOnUse\" \
              x1=\"0\" y1=\"{line_top}\" x2=\"0\" y2=\"{}\">\
-             <stop offset=\"0\" stop-color=\"{PRIMARY}\"/>\
+             <stop offset=\"0\" stop-color=\"{primary}\"/>\
              <stop offset=\"1\" stop-color=\"{gradient_bottom}\"/>\
              </linearGradient>",
-            line_top + line_h
+            line_top + line_h,
+            primary = ov.primary.as_str(),
         ));
 
         lines_svg.push_str(&format!(
@@ -208,10 +243,21 @@ pub fn render<'a>(
     }
     lines_svg.push_str("</g>");
 
+    // User rotation wraps the block about its anchor.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = block_left;
+        let cy = block_top + block_h / 2.0;
+        lines_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = lines_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

@@ -18,7 +18,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from luca's style.scss + template.json) ───────────────
@@ -63,6 +63,25 @@ const ANCHOR_LINE_HEIGHT: f32 = 0.95; // line-height: 0.95
 const ANCHOR_LETTER_SPACING_EM: f32 = -0.01; // letter-spacing: -0.01em
 const PRIMARY: &str = "#ffffff"; // primary-color default
 const BLEND: &str = "#ffffff"; // blend-color default
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_GAP_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: true, // the anchor word uppercases; the rest pass through
+    min_lines: 1, // luca splits with fixed-tail, never balances
+    max_lines: 1,
+    max_width_ratio: 0.88, // unused — no splitter
+};
 
 /// luca's `effects` array: `gap_free`, `remove_punctuation`.
 const SPLIT: pipeline::SplitConfig = pipeline::SplitConfig {
@@ -118,12 +137,6 @@ fn line_metrics(latin: &str, dominant: &str) -> (f32, f32, f32) {
     } else {
         stack::script_metrics(dominant).expect("script face")
     }
-}
-
-/// `text-transform: uppercase` — the uppercased form is what gets measured
-/// *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
 }
 
 // ── splitting helpers ─────────────────────────────────────────────────────
@@ -202,14 +215,16 @@ pub fn render<'a>(
     };
     let segment = &segments[index];
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let gap = WORD_GAP_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let gap = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let pad_x = PAD_X_EM * fs;
     let pad_y = PAD_Y_EM * fs;
-    let line_spacing = LINE_SPACING_EM * fs;
+    let line_spacing = ov.line_spacing_em * fs;
 
     let main_stack = stack::Stack::for_latin(FONT);
     let anton_stack = stack::Stack::for_latin(ANTON_FONT);
@@ -223,10 +238,10 @@ pub fn render<'a>(
         &segment.words,
         &main_stack,
         CAVEAT_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
-        LETTER_SPACING_EM * fs,
+        ov.letter_spacing_em * fs,
         false,
     );
     let widths = measured.widths;
@@ -237,7 +252,7 @@ pub fn render<'a>(
     // The anchor word: its own font, size, case and tracking.
     let anchor_word = if anchor {
         let word = &segment.words[lines[1].0];
-        let text = uppercase(&word.display);
+        let text = ov.text_case.apply(&word.display);
         // `--word-char-count` counts the display text's code points, but
         // `text-transform: uppercase` runs after it and can change the
         // length, so count the pre-transform text.
@@ -285,8 +300,8 @@ pub fn render<'a>(
     // top edge matters here — the anchor is `verticalAlign: top`.
     let content_w = line_widths.iter().cloned().fold(0.0, f32::max);
     let box_w = content_w + 2.0 * pad_x;
-    let box_top = ANCHOR_Y_FRAC * video_h as f32;
-    let box_left = ANCHOR_X_FRAC * video_w as f32 - box_w / 2.0;
+    let box_top = ov.anchor_y * video_h as f32;
+    let box_left = ov.anchor_x * video_w as f32 - box_w / 2.0;
     let content_left = box_left + pad_x;
     let mut cursor_top = box_top + pad_y;
 
@@ -298,21 +313,22 @@ pub fn render<'a>(
     // Entrance: `--on-segment-starts`, 0.25s (0.4s at a breathing point).
     let elapsed_s = (now_ms - segment.start_ms) / 1000.0;
     let breathing = is_breathing(&segments, index);
-    let duration = if breathing {
+    let duration = ov.duration_or(if breathing {
         ANIM_DURATION_BREATH_S
     } else {
         ANIM_DURATION_S
-    };
+    });
+    let slide_em = ov.distance_or(SLIDE_EM);
     // Line 1 enters as a whole from the left; the words of line 2 enter
     // from the right; the anchor word only fades.
     let first_line = recipes::SlideIn {
-        distance_em: if breathing { -SLIDE_EM } else { 0.0 },
+        distance_em: if breathing { -slide_em } else { 0.0 },
         from_opacity: 0.0,
         duration_s: duration,
         ease: recipes::ease_entrance,
     };
     let word_slide = recipes::SlideIn {
-        distance_em: if breathing { SLIDE_EM } else { 0.0 },
+        distance_em: if breathing { slide_em } else { 0.0 },
         from_opacity: 0.0,
         duration_s: duration,
         ease: recipes::ease_entrance,
@@ -323,7 +339,9 @@ pub fn render<'a>(
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
 
     let mut words_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     for (i, &(start, end)) in lines.iter().enumerate() {
         let line_top = cursor_top;
@@ -334,7 +352,11 @@ pub fn render<'a>(
         if i == 0 {
             // `.line:first-child` carries the entrance; its words are
             // `animation: none`.
-            let (opacity, dx_em) = first_line.eval(elapsed_s);
+            let (opacity, dx_em) = if ov.motion_static {
+                (1.0, 0.0)
+            } else {
+                first_line.eval(elapsed_s)
+            };
             words_svg.push_str(&format!(
                 "<g opacity=\"{opacity}\" transform=\"translate({})\">",
                 dx_em * fs
@@ -353,8 +375,9 @@ pub fn render<'a>(
                     format!(" font-family=\"{family}\"")
                 };
                 words_svg.push_str(&format!(
-                    "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
-                     filter=\"url(#luca-shadow)\">{text}</text>"
+                    "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
+                     filter=\"url(#luca-shadow)\">{text}</text>",
+                    primary = ov.primary.as_str(),
                 ));
                 x += width + gap;
             }
@@ -372,7 +395,11 @@ pub fn render<'a>(
                 let big_top = line_top + (grid_h - big_h) / 2.0;
                 let big_hl = (big_h - (anton_asc + anton_desc) * fs_big) / 2.0;
                 let big_baseline = big_top + big_hl + anton_asc * fs_big;
-                let opacity = anchor_fade.eval(elapsed_s);
+                let opacity = if ov.motion_static {
+                    1.0
+                } else {
+                    anchor_fade.eval(elapsed_s)
+                };
                 let escaped = layout::escape_xml(text);
                 words_svg.push_str(&format!(
                     "<text x=\"{content_left}\" y=\"{big_baseline}\" fill=\"{BLEND}\" \
@@ -388,7 +415,11 @@ pub fn render<'a>(
                     let row_top = line_top + offset as f32 * row;
                     let small_top = row_top + (row - line_h) / 2.0;
                     let baseline = small_top + half_leading + ascent;
-                    let (opacity, dx_em) = word_slide.eval(elapsed_s);
+                    let (opacity, dx_em) = if ov.motion_static {
+                        (1.0, 0.0)
+                    } else {
+                        word_slide.eval(elapsed_s)
+                    };
                     let text = layout::escape_xml(&segment.words[word_index].display);
                     let family_attr = if *family == FONT {
                         String::new()
@@ -396,10 +427,11 @@ pub fn render<'a>(
                         format!(" font-family=\"{family}\"")
                     };
                     words_svg.push_str(&format!(
-                        "<text x=\"{col2_x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
+                        "<text x=\"{col2_x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
                          opacity=\"{opacity}\" transform=\"translate({})\" \
                          filter=\"url(#luca-shadow)\">{text}</text>",
-                        dx_em * fs
+                        dx_em * fs,
+                        primary = ov.primary.as_str(),
                     ));
                 }
             }
@@ -411,7 +443,11 @@ pub fn render<'a>(
                     .zip(&widths[start..end])
                     .zip(&measured.families[start..end])
                 {
-                    let (opacity, dx_em) = word_slide.eval(elapsed_s);
+                    let (opacity, dx_em) = if ov.motion_static {
+                        (1.0, 0.0)
+                    } else {
+                        word_slide.eval(elapsed_s)
+                    };
                     let text = layout::escape_xml(&word.display);
                     let family_attr = if *family == FONT {
                         String::new()
@@ -419,10 +455,11 @@ pub fn render<'a>(
                         format!(" font-family=\"{family}\"")
                     };
                     words_svg.push_str(&format!(
-                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr} \
+                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
                          opacity=\"{opacity}\" transform=\"translate({})\" \
                          filter=\"url(#luca-shadow)\">{text}</text>",
-                        dx_em * fs
+                        dx_em * fs,
+                        primary = ov.primary.as_str(),
                     ));
                     x += width + gap;
                 }
@@ -431,10 +468,24 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
+    // User rotation wraps the shrink-to-fit box about its centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let block_h = 2.0 * pad_y
+            + line_heights.iter().sum::<f32>()
+            + line_spacing * lines.len().saturating_sub(1) as f32;
+        let cx = ov.anchor_x * video_w as f32;
+        let cy = box_top + block_h / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

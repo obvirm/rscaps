@@ -6,6 +6,18 @@ export interface Cue {
   text: string;
 }
 
+/** Effects overrides — tri-state: absent = template default, else force. */
+export interface EffectsParams {
+  gap_free?: boolean;
+  remove_punctuation?: boolean;
+  smart_punctuation?: boolean;
+  carry_quotes?: boolean;
+  smart_lowercase?: boolean;
+  emoji_placement?: string;
+  emoji_size?: number;
+  emoji_gap?: number;
+}
+
 export interface CaptionParams {
   font_family: string;
   font_size: number;
@@ -16,6 +28,33 @@ export interface CaptionParams {
   pop_in_ms: number;
   travel_px: number;
   direction: Direction;
+  // Typography overrides (absent = template default)
+  letter_spacing_em?: number;
+  word_spacing_em?: number;
+  line_spacing_em?: number;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  text_case?: string;
+  text_align?: string;
+  // Position overrides
+  h_align?: string;
+  h_offset?: number;
+  v_align?: string;
+  v_offset?: number;
+  angle_deg?: number;
+  // Motion overrides
+  motion_preset?: string;
+  motion_duration_ms?: number;
+  motion_distance_em?: number;
+  // Effects (tri-state)
+  effects?: EffectsParams;
+  // Layout overrides
+  max_lines?: number;
+  max_width_frac?: number;
+  max_chars?: number;
+  // Data-driven style control values, keyed by control id
+  style_values?: Record<string, string | number | boolean>;
 }
 
 export interface CaptionDocument {
@@ -23,6 +62,67 @@ export interface CaptionDocument {
   cues: Cue[];
   params: CaptionParams;
   template?: string;
+}
+
+// ── Template catalog (straight from caption-core) ─────────────────────────
+
+export type StyleControlType =
+  | "color"
+  | "integer"
+  | "float"
+  | "select"
+  | "toggle"
+  | "text"
+  | "image"
+  | "font";
+
+export interface StyleControl {
+  id: string;
+  label: string;
+  type: StyleControlType;
+  default?: string | number | boolean;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  group?: string;
+  subgroup?: string;
+  options?: Array<{ label: string; [key: string]: unknown }>;
+  legend?: string;
+  valueOn?: string | number;
+  valueOff?: string | number;
+}
+
+export interface TemplateVariant {
+  label: string;
+  overrides: Record<string, string | number | boolean>;
+}
+
+/** template.json defaults (per bagian) — untuk nilai efektif panel. */
+export interface TemplateDefaults {
+  typography?: Record<string, unknown>;
+  alignment?: {
+    verticalAlign?: string;
+    verticalOffset?: number;
+    horizontalAlign?: string;
+    horizontalOffset?: number;
+  };
+  rendering?: Record<string, unknown>;
+  segmentSplitters?: Array<Record<string, unknown>>;
+  lineSplitter?: Record<string, unknown>;
+  features?: Record<string, unknown>;
+  effects?: Array<Record<string, unknown>>;
+}
+
+/** One entry of the template catalog exported by caption-core. */
+export interface TemplateEntry {
+  id: string;
+  label: string;
+  category?: string;
+  galleryOrder?: number;
+  styleControls?: StyleControl[];
+  variants?: TemplateVariant[];
+  defaults?: TemplateDefaults;
 }
 
 export interface PrepareMeta {
@@ -35,16 +135,17 @@ export interface ParsedSubtitle {
   duration_frames: number;
 }
 
-/** One entry of the template catalog exported by caption-core. */
-export interface TemplateEntry {
-  id: string;
-  label: string;
-}
-
 export interface WasmBridge {
   render_frame(frame: bigint): string;
   prepare(fps: number): Promise<PrepareMeta>;
   ingest_font(bytes: Uint8Array): unknown;
+  add_video_source_placeholder(
+    file: string,
+    url: string,
+    width: number,
+    height: number,
+    duration: number,
+  ): void;
 }
 
 // ── Project model ─────────────────────────────────────────────────────────

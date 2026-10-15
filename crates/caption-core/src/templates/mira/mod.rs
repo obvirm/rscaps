@@ -21,7 +21,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack};
 use crate::CaptionDocument;
 
 // ── spec constants (from mira's style.scss + template.json) ───────────────
@@ -57,6 +57,25 @@ const OUTLINE_COLOR: &str = "#000000";
 const SHADOW_DY_EM: f32 = 0.08;
 const SHADOW_BLUR_EM: f32 = 0.4;
 const SHADOW_COLOR: &str = "#000000"; // --tscaps-shadow-color default
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: 0.0, // no LINE_SPACING_EM in mira's spec
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: false,
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// mira's `effects` array: `gap_free`, `remove_punctuation`,
 /// `carry_quotes`, `smart_punctuation`, `smart_lowercase`.
@@ -134,12 +153,15 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
     // Type, metrics and shadows all scale with the segment's length.
-    let fs = FONT_SIZE_CQH * video_h as f32 * font_size_scale(segment_char_count(&segment.words));
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs;
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32)
+        * font_size_scale(segment_char_count(&segment.words));
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -150,7 +172,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         MONTSERRAT_600_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -159,9 +181,9 @@ pub fn render<'a>(
     let widths = measured.widths;
 
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let split_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let lines = splitter.split(&split_widths);
@@ -169,8 +191,8 @@ pub fn render<'a>(
     // Bottom-aligned block: the block's bottom edge sits at 0.65H; the
     // single line centers horizontally.
     let block_h = lines.len() as f32 * line_h;
-    let block_top = ANCHOR_Y_FRAC * video_h as f32 - block_h;
-    let center_x = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32 - block_h;
+    let center_x = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -178,12 +200,16 @@ pub fn render<'a>(
 
     // The segment settles in as a whole: `--on-segment-starts`.
     let settle = recipes::SettleIn {
-        distance_em: SETTLE_DISTANCE_EM,
+        distance_em: ov.distance_or(SETTLE_DISTANCE_EM),
         from_opacity: SETTLE_FROM_OPACITY,
-        duration_s: SETTLE_DURATION_S,
+        duration_s: ov.duration_or(SETTLE_DURATION_S),
         ease: recipes::ease_settle,
     };
-    let (opacity, ty_em) = settle.eval((now_ms - segment.start_ms) / 1000.0);
+    let (opacity, ty_em) = if ov.motion_static {
+        (1.0, 0.0)
+    } else {
+        settle.eval((now_ms - segment.start_ms) / 1000.0)
+    };
     let ty = ty_em * fs;
 
     // Shadow geometry (px from em ratios).
@@ -191,12 +217,13 @@ pub fn render<'a>(
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
     let stroke_px = OUTLINE_THICKNESS_EM * fs;
 
-    let font_family_attr = stack::svg_font_family(FONT);
+    let font_family_attr = stack::svg_font_family(&ov.font_family);
     let mut words_svg = format!(
         "<g transform=\"translate(0,{ty})\" opacity=\"{opacity}\">\
-         <g font-family=\"{font_family_attr}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\" \
+         <g font-family=\"{font_family_attr}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
          letter-spacing=\"{ls_px}\" stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
-         paint-order=\"stroke\" filter=\"url(#mira-shadow)\">"
+         paint-order=\"stroke\" filter=\"url(#mira-shadow)\">",
+        weight = ov.font_weight,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * line_h;
@@ -209,23 +236,35 @@ pub fn render<'a>(
             .zip(&segment.words[start..end])
             .zip(&measured.families[start..end])
         {
-            let text = layout::escape_xml(&word.display);
+            let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             let family_attr = if *family == FONT {
                 String::new()
             } else {
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}>{text}</text>",
+                fill = ov.primary,
             ));
         }
     }
     words_svg.push_str("</g></g>");
 
+    // User rotation wraps the caption around the block centre.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = center_x;
+        let cy = block_top + block_h / 2.0;
+        words_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = words_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

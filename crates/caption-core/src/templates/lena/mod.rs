@@ -11,7 +11,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state};
 use crate::CaptionDocument;
 
 // ── spec constants (from lena's style.scss + template.json) ───────────────
@@ -55,6 +55,25 @@ const TAIL_POINTS: [(f32, f32); 5] = [
     (0.75, 1.0),
     (0.87, 0.3),
 ];
+
+/// The template's spec — handed to `overrides::resolve` every frame so
+/// user params win over these constants when set.
+const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
+    font_size_cqh: FONT_SIZE_CQH,
+    letter_spacing_em: LETTER_SPACING_EM,
+    word_spacing_em: WORD_SPACING_EM,
+    line_spacing_em: LINE_SPACING_EM,
+    anchor_x: ANCHOR_X_FRAC,
+    anchor_y: ANCHOR_Y_FRAC,
+    font: FONT,
+    font_weight: FONT_WEIGHT,
+    primary: PRIMARY,
+    highlight: "",
+    force_uppercase: false, // lena keeps the spoken case
+    min_lines: MIN_LINES,
+    max_lines: MAX_LINES,
+    max_width_ratio: MAX_WIDTH_RATIO,
+};
 
 /// lena's `effects` array: `gap_free`, `emoji` (skipped — decorations
 /// need data the word stream does not carry), `smart_punctuation`.
@@ -157,16 +176,18 @@ pub fn render<'a>(
         return Svgr::empty();
     };
 
-    let video_w = ctx.current_video_size.width;
-    let video_h = ctx.current_video_size.height;
-    let fs = FONT_SIZE_CQH * video_h as f32;
-    let ls_px = LETTER_SPACING_EM * fs;
-    let margin = WORD_SPACING_EM * fs;
+    let video_w = crate::ctx_video_size(ctx).width;
+    let video_h = crate::ctx_video_size(ctx).height;
+    // User overrides (params) win over the template's spec constants.
+    let ov = overrides::resolve(&doc.params, DEFAULTS);
+    let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
+    let ls_px = ov.letter_spacing_em * fs;
+    let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
     let pad_x = PAD_X_EM * fs;
     let pad_y = PAD_Y_EM * fs;
     let box_h = line_h + 2.0 * pad_y;
-    let gap = LINE_SPACING_EM * fs;
+    let gap = ov.line_spacing_em * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
@@ -176,7 +197,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         INTER_TTF,
-        FONT_WEIGHT,
+        ov.font_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -186,17 +207,17 @@ pub fn render<'a>(
 
     let run_widths: Vec<f32> = widths.iter().map(|w| w + 2.0 * margin).collect();
     let splitter = layout::BalancedPixelWidth {
-        min_lines: MIN_LINES,
-        max_lines: MAX_LINES,
-        max_width: (video_w as f32 * MAX_WIDTH_RATIO).round(),
+        min_lines: ov.min_lines,
+        max_lines: ov.max_lines,
+        max_width: (video_w as f32 * ov.max_width_ratio).round(),
     };
     let lines = splitter.split(&run_widths);
 
     // Bottom-left anchored stack: every bubble hangs off the frame's left
     // edge (0.06W), the stack's bottom edge sits at 0.85H.
     let block_h = lines.len() as f32 * box_h + lines.len().saturating_sub(1) as f32 * gap;
-    let block_top = ANCHOR_Y_FRAC * video_h as f32 - block_h;
-    let block_left = ANCHOR_X_FRAC * video_w as f32;
+    let block_top = ov.anchor_y * video_h as f32 - block_h;
+    let block_left = ov.anchor_x * video_w as f32;
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -206,10 +227,17 @@ pub fn render<'a>(
     let radius_bl = RADIUS_BL_EM * fs;
     let shade_dy = SHADE_DY_EM * fs;
     let shade_std = SHADE_BLUR_EM * fs / 2.0;
-    let rise = recipes::RiseIn::custom(RISE_EM, 0.0, RISE_DURATION_S, ease_lena);
+    let rise = recipes::RiseIn::custom(
+        ov.distance_or(RISE_EM),
+        0.0,
+        ov.duration_or(RISE_DURATION_S),
+        ease_lena,
+    );
 
     let mut lines_svg = format!(
-        "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" font-size=\"{fs}\">"
+        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\">",
+        font = ov.font_family,
+        weight = ov.font_weight,
     );
     let last_line = lines.len().saturating_sub(1);
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
@@ -223,7 +251,11 @@ pub fn render<'a>(
 
         // `rise-in` fires when the line's own narration starts.
         let span = state::LineSpan::of_words(&segment.words[start..end]);
-        let (opacity, dy_em) = rise.eval((now_ms - span.start_ms) / 1000.0);
+        let (opacity, dy_em) = if ov.motion_static {
+            (1.0, 0.0)
+        } else {
+            rise.eval((now_ms - span.start_ms) / 1000.0)
+        };
         lines_svg.push_str(&format!(
             "<g opacity=\"{opacity}\" transform=\"translate(0 {})\">",
             dy_em * fs
@@ -261,17 +293,29 @@ pub fn render<'a>(
                 format!(" font-family=\"{family}\"")
             };
             lines_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{PRIMARY}\"{family_attr}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr}>{text}</text>",
+                primary = ov.primary.as_str(),
             ));
         }
         lines_svg.push_str("</g>");
     }
     lines_svg.push_str("</g>");
 
+    // User rotation wraps the bubble stack about its anchor.
+    if ov.angle_deg.abs() > f32::EPSILON {
+        let cx = block_left;
+        let cy = block_top + block_h / 2.0;
+        lines_svg = format!(
+            "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
+            angle = ov.angle_deg,
+            inner = lines_svg,
+        );
+    }
+
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1920 1080"
+            viewBox={format!("0 0 {} {}", video_w, video_h)}
             width={video_w}
             height={video_h}
         >

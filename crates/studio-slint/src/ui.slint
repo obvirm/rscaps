@@ -7,6 +7,11 @@ import { ProjectMeta } from "./components/project_meta.slint";
 import { TemplateItem } from "./components/template_item.slint";
 import { Theme } from "./components/theme.slint";
 import { TranscribeOverlay } from "./components/transcribe_overlay.slint";
+// Shared params global (sidebar panels ↔ Rust). Imported + re-exported
+// from the root file — Slint only exposes globals to Rust when they are
+// exported from the ROOT file.
+import { DocParams, StyleColorItem, StyleFloatItem } from "./components/params_global.slint";
+export { DocParams, StyleColorItem, StyleFloatItem }
 
 
 // ── App root ───────────────────────────────────────────────────────────────
