@@ -95,6 +95,9 @@ class StudioState {
   templates = $state<TemplateEntry[]>([]);
   /** Canonical default params (sentinels for template-wins resolution). */
   defaultParams = $state<CaptionParams | null>(null);
+  /** Preview SVG per template (dokumen mock) untuk galeri. */
+  previews = $state<Record<string, string>>({});
+  private previewsBuilt = false;
 
   // ── Home state ──────────────────────────────────────────────────────────
   projects = $state<ProjectMetadata[]>([]);
@@ -649,6 +652,53 @@ class StudioState {
     if (!this.setTemplate(id)) return;
     await this.applyDocument();
     this.scheduleSave();
+  }
+
+  /**
+   * Pilih template + RESET style values ke default template baru
+   * (perilaku tscaps SetTemplateAction: tak ada carry-over edit manual).
+   */
+  async applyTemplateFresh(id: string): Promise<void> {
+    const ok = this.updateDoc((doc) => {
+      doc.template = id;
+      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
+      delete doc.params.style_values;
+    });
+    if (!ok) return;
+    await this.applyDocument();
+    this.scheduleSave();
+  }
+
+  /**
+   * Render preview statis untuk semua template (galeri): pasang dokumen mock
+   * satu kata, render tiap template di puncak narasi, lalu RESTORE dokumen
+   * proyek (engine menyimpan satu dokumen global — restore wajib).
+   */
+  buildTemplatePreviews(): void {
+    if (this.previewsBuilt || !this.wasm || this.templates.length === 0) return;
+    this.previewsBuilt = true;
+    try {
+      const mock = this.defaultDocument();
+      mock.cues = [{ start_ms: 0, end_ms: 4000, text: "rscaps" }];
+      mock.duration_frames = Math.max(this.durationFrames, Math.round(this.fps * 4));
+      // Puncak narasi kata: 450ms — entrance selesai, highlight aktif.
+      const frame = Math.max(1, Math.round(this.fps * 0.45));
+      const out: Record<string, string> = {};
+      for (const t of this.templates) {
+        mock.template = t.id;
+        try {
+          this.wasm.setDocumentJson(JSON.stringify(mock));
+          out[t.id] = this.wasm.bridge.render_frame(BigInt(frame));
+        } catch {
+          out[t.id] = "";
+        }
+      }
+      this.previews = out;
+    } finally {
+      // Restore dokumen + ukuran video proyek (ukuran tidak berubah — hanya
+      // dokumen yang ditukar), lalu gambar ulang overlay saat ini.
+      this.applyParams();
+    }
   }
 
   // ── Cue editing (Transcript panel) ──────────────────────────────────────
