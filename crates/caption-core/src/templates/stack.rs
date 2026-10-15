@@ -94,7 +94,7 @@ pub fn script_metrics(family: &str) -> Option<(f32, f32, f32)> {
 /// "Bricolage Grotesque 96pt ExtraBold", …). Templates MUST emit
 /// `font-family` through this helper: the result is a CSS font stack whose
 /// first name the browser matches against `@font-face`, while usvgr/fontdb
-/// (the studio-slint / export rasterizer) tries every name in order, so the
+/// (the native rasterizer / measurement path) tries every name in order, so the
 /// text survives both renderers. A family without a known alternate is
 /// returned unchanged.
 pub fn svg_font_family(family: &str) -> String {

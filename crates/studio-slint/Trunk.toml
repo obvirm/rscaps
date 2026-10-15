@@ -1,7 +1,0 @@
-# Trunk config for studio-slint.
-[build]
-# SRI on same-origin modulepreload/preload adds nothing here and Chrome
-# warns: "The integrity attribute is currently ignored for preload
-# destinations that do not support subresource integrity" (crbug/981419).
-# Drop the hashes so the console stays clean.
-no_sri = true
