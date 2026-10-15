@@ -243,6 +243,10 @@ pub fn render<'a>(
         );
     }
 
+    // tscaps cleo memakai text-shadow multi-layer (CSS): tiap layer
+    // INDEPENDEN di atas SourceAlpha lalu digabung — bukan feDropShadow
+    // berantai (yang membuat bayangan menumpuk → awan gelap). Merge dari
+    // layer bawah ke atas, SourceGraphic paling atas.
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -252,10 +256,29 @@ pub fn render<'a>(
         >
             <defs>
                 <filter id="cleo-shadow" x="-150%" y="-250%" width="400%" height="600%">
-                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={tight_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="t"/>
-                    <feDropShadow in="t" dx={0.0} dy={soft_dy} stdDeviation={soft_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="s1"/>
-                    <feDropShadow in="s1" dx={0.0} dy={soft_dy} stdDeviation={soft_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="s2"/>
-                    <feDropShadow in="s2" dx={0.0} dy={soft_dy} stdDeviation={soft_std} flood-color={SHADOW_COLOR} flood-opacity={1.0}/>
+                    <feOffset in="SourceAlpha" dx={0.0} dy={0.0} result="t-o"/>
+                    <feGaussianBlur in="t-o" stdDeviation={tight_std} result="t-b"/>
+                    <feFlood flood-color={SHADOW_COLOR} flood-opacity={1.0} result="t-f"/>
+                    <feComposite in="t-f" in2="t-b" operator="in" result="t"/>
+                    <feOffset in="SourceAlpha" dx={0.0} dy={soft_dy} result="l1-o"/>
+                    <feGaussianBlur in="l1-o" stdDeviation={soft_std} result="l1-b"/>
+                    <feFlood flood-color={SHADOW_COLOR} flood-opacity={1.0} result="l1-f"/>
+                    <feComposite in="l1-f" in2="l1-b" operator="in" result="l1"/>
+                    <feOffset in="SourceAlpha" dx={0.0} dy={soft_dy} result="l2-o"/>
+                    <feGaussianBlur in="l2-o" stdDeviation={soft_std} result="l2-b"/>
+                    <feFlood flood-color={SHADOW_COLOR} flood-opacity={1.0} result="l2-f"/>
+                    <feComposite in="l2-f" in2="l2-b" operator="in" result="l2"/>
+                    <feOffset in="SourceAlpha" dx={0.0} dy={soft_dy} result="l3-o"/>
+                    <feGaussianBlur in="l3-o" stdDeviation={soft_std} result="l3-b"/>
+                    <feFlood flood-color={SHADOW_COLOR} flood-opacity={1.0} result="l3-f"/>
+                    <feComposite in="l3-f" in2="l3-b" operator="in" result="l3"/>
+                    <feMerge>
+                        <feMergeNode in="l3"/>
+                        <feMergeNode in="l2"/>
+                        <feMergeNode in="l1"/>
+                        <feMergeNode in="t"/>
+                        <feMergeNode in="SourceGraphic"/>
+                    </feMerge>
                 </filter>
             </defs>
             {words_svg}

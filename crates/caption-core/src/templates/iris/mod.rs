@@ -71,7 +71,7 @@ const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
 };
 
 /// The bundled watercolour stroke (alpha-only PNG), base64, as emitted
-/// into the `data:` URL. Source: `tscaps/templates/_assets/marker-stroke.png`.
+/// into the `data:` URL. Source: `tscaps/templates/_assets/marker-stroke.png`, recolored WHITE (RGB=255, alpha asli) supaya benar di mode mask luminance (SVG `<mask>` default, atribut `mask-type` diabaikan Chrome) maupun alpha.
 const MARKER_STROKE_B64: &str = include_str!("marker-stroke.b64");
 
 /// iris's `effects` array: `gap_free` only.
@@ -119,25 +119,39 @@ fn normalize(text: &str) -> String {
 
 // ── stroke mask + brush outline ───────────────────────────────────────────
 
-/// The `.segment::before` watercolour stroke: the bundled PNG as an
-/// alpha-typed `<mask>` stretched over the bleed box (CSS
-/// `mask-size: 100% 100%`), plus the highlight-coloured rect painted
-/// through it. `block_left/top/w/h` are the *text* block; the bleed
-/// grows the mask box by the padding controls.
-fn stroke_defs(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: f32) -> String {
+/// Geometry mask/rect bersama (bleed box).
+fn stroke_box(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: f32) -> (f32, f32, f32, f32) {
     let px = MASK_PAD_X_EM * fs;
     let py = MASK_PAD_Y_EM * fs;
-    let x = block_left - px;
-    let y = block_top - py + MASK_OFFSET_Y_EM * fs;
-    let w = block_w + 2.0 * px;
-    let h = block_h + 2.0 * py;
+    (
+        block_left - px,
+        block_top - py + MASK_OFFSET_Y_EM * fs,
+        block_w + 2.0 * px,
+        block_h + 2.0 * py,
+    )
+}
+
+/// The `.segment::before` watercolour stroke MASK: the bundled PNG as an
+/// alpha-typed `<mask>` stretched over the bleed box (CSS
+/// `mask-size: 100% 100%`). Hanya `<mask>` — tempatnya DI DALAM `<defs>`.
+fn stroke_defs(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: f32) -> String {
+    let (x, y, w, h) = stroke_box(block_left, block_top, block_w, block_h, fs);
     format!(
         "<mask id=\"iris-stroke\" mask-type=\"alpha\" x=\"{x}\" y=\"{y}\" width=\"{w}\" \
          height=\"{h}\" maskUnits=\"userSpaceOnUse\">\
          <image href=\"data:image/png;base64,{MARKER_STROKE_B64}\" x=\"{x}\" y=\"{y}\" \
          width=\"{w}\" height=\"{h}\" preserveAspectRatio=\"none\"/>\
-         </mask>\
-         <rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"{STROKE_COLOR}\" \
+         </mask>"
+    )
+}
+
+/// Highlight-coloured rect painted THROUGH the mask — elemen KONTEN (di depan
+/// defs, di belakang kata-kata), bukan bagian defs (defs tidak pernah
+/// dirender — rect di sana = brush hilang total).
+fn stroke_rect(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: f32) -> String {
+    let (x, y, w, h) = stroke_box(block_left, block_top, block_w, block_h, fs);
+    format!(
+        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"{STROKE_COLOR}\" \
          mask=\"url(#iris-stroke)\"/>"
     )
 }
@@ -270,8 +284,12 @@ pub fn render<'a>(
     }
 
     // Stroke first (z-index: -1 in scss), then the words on top.
-    let stroke = stroke_defs(block_left, block_top, block_w, block_h, fs);
-    let defs = format!("{stroke}{}", filter_defs(fs));
+    let stroke = stroke_rect(block_left, block_top, block_w, block_h, fs);
+    let defs = format!(
+        "{}{}",
+        stroke_defs(block_left, block_top, block_w, block_h, fs),
+        filter_defs(fs)
+    );
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -282,6 +300,7 @@ pub fn render<'a>(
             <defs>
                 {defs}
             </defs>
+            {stroke}
             {words_svg}
         </svg>
     )
@@ -333,14 +352,17 @@ mod tests {
         // Bleed: x 58 (=100-42), y 175 (=200-28+3), w 284, h 136.
         assert!(defs.contains("x=\"58\" y=\"175\" width=\"284\""), "{defs}");
         assert!(defs.contains("height=\"136\""), "{defs}");
+        // Rect highlight = konten (di luar defs — defs tidak pernah dirender).
+        let rect = stroke_rect(100.0, 200.0, 200.0, 80.0, 50.0);
         assert!(
-            defs.contains(&format!("fill=\"{STROKE_COLOR}\" mask=\"url(#iris-stroke)\"")),
-            "{defs}"
+            rect.contains(&format!("fill=\"{STROKE_COLOR}\" mask=\"url(#iris-stroke)\"")),
+            "{rect}"
         );
+        assert!(!defs.contains("<rect"), "defs hanya mask/filter: {defs}");
         assert_eq!(STROKE_COLOR, "#ffe066");
         assert_eq!(MASK_OFFSET_Y_EM, 0.06);
         // The stroke PNG is the 21624-byte marker-stroke asset.
-        assert_eq!(MARKER_STROKE_B64.len(), 28832, "base64 of 21624 bytes");
+        assert_eq!(MARKER_STROKE_B64.len(), 51640, "base64 of 38729 bytes");
     }
 
     #[test]

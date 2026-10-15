@@ -344,14 +344,20 @@ pub fn collect_segments(doc: &crate::CaptionDocument, cfg: &SplitConfig) -> Vec<
     let mut groups: Vec<Vec<TimedWord>> = Vec::new();
     // Layout override: user max_chars wins over the template's limit.
     let max_chars = doc.params.max_chars.unwrap_or(cfg.max_chars as u32) as usize;
+    // Satu ALIRAN kata lintas cue (paritas tscaps: subtitle import = satu Line
+    // berisi semua kata; batas cue hanya sumber timing — pemecahan scene
+    // sepenuhnya tugas splitter. Tanpa ini, cue tanpa terminator pemisah
+    // (mis. cue berdempetan tanpa tanda baca) selalu pecah di tepi cue dan
+    // scene-nya beda dengan tscaps).
+    let mut stream: Vec<TimedWord> = Vec::new();
     for cue in &doc.cues {
         let tokens = tokenize(&cue.text);
-        let words = spread(&tokens, cue.start_ms as f32, cue.end_ms as f32);
-        for sentence in split_boundary(&words, cfg.boundary) {
-            for chunk in split_char_limit(sentence, max_chars, cfg.min_chars) {
-                if !chunk.is_empty() {
-                    groups.push(chunk);
-                }
+        stream.extend(spread(&tokens, cue.start_ms as f32, cue.end_ms as f32));
+    }
+    for sentence in split_boundary(&stream, cfg.boundary) {
+        for chunk in split_char_limit(sentence, max_chars, cfg.min_chars) {
+            if !chunk.is_empty() {
+                groups.push(chunk);
             }
         }
     }

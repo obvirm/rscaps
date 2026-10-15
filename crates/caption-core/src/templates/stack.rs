@@ -97,14 +97,29 @@ pub fn script_metrics(family: &str) -> Option<(f32, f32, f32)> {
 /// (the native rasterizer / measurement path) tries every name in order, so the
 /// text survives both renderers. A family without a known alternate is
 /// returned unchanged.
+///
+/// Daftar ini juga dipakai [`font_stack_names`] untuk RESOLVE saat mengukur
+/// (fontsource menyimpan nama aneh di name-table — ID1/ID16 bisa berbeda
+/// dari nama @font-face).
+const FONT_ALTERNATES: &[(&str, &str)] = &[
+    ("Montserrat", "Montserrat Thin"),
+    ("Bricolage Grotesque", "Bricolage Grotesque 96pt ExtraBold"),
+    ("Manrope", "Manrope ExtraLight"),
+    ("Poppins", "Poppins Black"),
+];
+
+/// Semua kandidat nama keluarga untuk `family`: nama utama + alternate
+/// name-table (urutan = urutan resolve saat mengukur lebar kata).
+pub fn font_stack_names(family: &str) -> impl Iterator<Item = &str> + '_ {
+    let alternate: Option<&str> = FONT_ALTERNATES
+        .iter()
+        .find(|(name, _)| *name == family)
+        .map(|(_, alt)| *alt);
+    std::iter::once(family).chain(alternate)
+}
+
 pub fn svg_font_family(family: &str) -> String {
-    const ALTERNATES: &[(&str, &str)] = &[
-        ("Montserrat", "Montserrat Thin"),
-        ("Bricolage Grotesque", "Bricolage Grotesque 96pt ExtraBold"),
-        ("Manrope", "Manrope ExtraLight"),
-        ("Poppins", "Poppins Black"),
-    ];
-    match ALTERNATES.iter().find(|(name, _)| *name == family) {
+    match FONT_ALTERNATES.iter().find(|(name, _)| *name == family) {
         Some((name, alternate)) => format!("{name}, {alternate}"),
         None => family.to_string(),
     }
@@ -330,7 +345,12 @@ pub fn measure_words<'a>(
                 weight,
                 ..Default::default()
             };
-            faces[i] = source.resolve_font(family, probe.weight, probe.style, probe.stretch);
+            // Coba semua nama dalam font-stack: name-table fontsource kadang
+            // hanya mengenal alternate ("Poppins Black", "Montserrat Thin", …).
+            // Tanpa ini resolve gagal → fallback 0.5em/char → kata tumpang
+            // tindih saat dirender dengan lebar asli.
+            faces[i] = font_stack_names(family)
+                .find_map(|name| source.resolve_font(name, probe.weight, probe.style, probe.stretch));
         }
     }
 
