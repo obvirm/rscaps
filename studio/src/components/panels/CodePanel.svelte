@@ -1,41 +1,56 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { store } from "../../lib/state.svelte";
   import type { Direction } from "../../lib/types";
 
+  let srtText = $state("");
+  let paramsText = $state("");
+  let applying = $state(false);
+
   let direction = $derived.by<Direction>(() => {
     try {
-      const doc = JSON.parse(store.docText);
-      return (doc.params?.direction as Direction) || "auto";
+      const params = JSON.parse(paramsText);
+      return (params?.direction as Direction) || "auto";
     } catch {
       return "auto";
     }
   });
 
+  onMount(() => {
+    srtText = store.codeSrtText();
+    paramsText = store.codeParamsText();
+  });
+
   async function onApply() {
+    if (applying) return;
+    applying = true;
     try {
-      await store.applyDocument();
+      await store.applyCodePanel(srtText, paramsText);
     } catch (err) {
       store.setStatus(String(err), true);
+    } finally {
+      applying = false;
     }
   }
 
-  async function onDirection(e: Event) {
+  function onDirection(e: Event) {
     const dir = (e.currentTarget as HTMLSelectElement).value as Direction;
-    if (!store.setDirection(dir)) {
-      store.setStatus("invalid document JSON", true);
-      return;
-    }
     try {
-      await store.applyDocument();
-    } catch (err) {
-      store.setStatus(String(err), true);
+      const params = JSON.parse(paramsText || "{}");
+      params.direction = dir;
+      paramsText = JSON.stringify(params, null, 2);
+    } catch {
+      /* params sedang tidak valid — biarkan user perbaiki dulu */
     }
   }
 </script>
 
 <div class="code-panel">
-  <label class="section-label" for="doc">document (JSON)</label>
-  <textarea id="doc" spellcheck="false" bind:value={store.docText}></textarea>
+  <label class="section-label" for="srt">captions (SRT)</label>
+  <textarea id="srt" class="srt" spellcheck="false" bind:value={srtText}></textarea>
+
+  <label class="section-label" for="params">settings (JSON · params)</label>
+  <textarea id="params" class="params" spellcheck="false" bind:value={paramsText}></textarea>
 
   <div class="actions">
     <label class="dir-field">Direction
@@ -45,7 +60,9 @@
         <option value="rtl">RTL</option>
       </select>
     </label>
-    <button class="btn accent" onclick={onApply}>Apply + prepare</button>
+    <button class="btn accent" onclick={onApply} disabled={applying}>
+      {applying ? "Applying…" : "Apply + prepare"}
+    </button>
   </div>
 </div>
 
@@ -65,8 +82,6 @@
     color: rgb(var(--fg-2));
   }
   textarea {
-    flex: 1;
-    min-height: 120px;
     width: 100%;
     resize: none;
     background: rgb(var(--bg-0));
@@ -79,6 +94,14 @@
   }
   textarea:focus {
     border-color: rgb(var(--accent));
+  }
+  .srt {
+    flex: 1.2;
+    min-height: 100px;
+  }
+  .params {
+    flex: 1;
+    min-height: 80px;
   }
   .actions {
     display: flex;
@@ -114,7 +137,10 @@
     background: rgb(var(--accent));
     color: rgb(var(--fg-on-accent));
   }
-  .btn.accent:hover {
+  .btn.accent:hover:not(:disabled) {
     background: rgb(var(--accent-hi));
+  }
+  .btn:disabled {
+    opacity: 0.6;
   }
 </style>

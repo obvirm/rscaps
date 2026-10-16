@@ -1184,6 +1184,62 @@ class StudioState {
     this.setStatus(`exported ${doc.cues.length} cues as .${format}`);
   }
 
+  /** SRT teks untuk panel Code (cues dokumen aktif). */
+  codeSrtText(): string {
+    if (!this.wasm) return "";
+    const doc = this.currentDoc();
+    if (!doc) return "";
+    try {
+      return this.wasm.formatSubtitle(JSON.stringify(doc.cues), "srt");
+    } catch {
+      return "";
+    }
+  }
+
+  /** JSON params (TANPA cues) untuk panel Code. */
+  codeParamsText(): string {
+    const doc = this.currentDoc();
+    if (!doc) return "{}";
+    return JSON.stringify(doc.params ?? {}, null, 2);
+  }
+
+  /**
+   * Apply panel Code: SRT (cues) + JSON params digabung ke dokumen lalu
+   * prepare ulang. Cues di-edit sebagai SRT; setting sebagai JSON params —
+   * tidak perlu scroll seluruh dokumen.
+   */
+  async applyCodePanel(srtText: string, paramsText: string): Promise<void> {
+    await this.bootWasm();
+    if (!this.wasm) throw new Error("wasm not ready");
+    let cues: Cue[];
+    try {
+      const parsed = JSON.parse(this.wasm.parseSubtitle(srtText, "srt")) as {
+        cues: Cue[];
+        duration_frames: number;
+      };
+      cues = parsed.cues;
+    } catch (err) {
+      throw new Error(`invalid SRT: ${err}`);
+    }
+    let params: CaptionParams;
+    try {
+      params = JSON.parse(paramsText) as CaptionParams;
+      if (!params || typeof params !== "object" || Array.isArray(params)) {
+        throw new Error("params must be a JSON object");
+      }
+    } catch (err) {
+      throw new Error(`invalid params JSON: ${err}`);
+    }
+    const ok = this.updateDoc((doc) => {
+      doc.cues = cues;
+      doc.params = params;
+    }, "code");
+    if (!ok) throw new Error("invalid document");
+    await this.applyDocument();
+    this.scheduleSave();
+    this.setStatus(`applied ${cues.length} cues + params`);
+  }
+
   async exportPng(): Promise<void> {
     const canvas = await this.renderToCanvas(this.frame, 1920);
     if (!canvas) return;
