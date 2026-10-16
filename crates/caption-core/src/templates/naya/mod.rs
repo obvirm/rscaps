@@ -15,7 +15,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{layout, overrides, pipeline, recipes, stack, state};
+use super::{layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from naya's style.scss + template.json) ───────────────
@@ -118,14 +118,14 @@ fn uppercase(text: &str) -> String {
 /// dilation, composite it back in) merged under `SourceGraphic`. The
 /// region is the recipe's host declaration — the visible thickness *is*
 /// the radius, so the box has to leave room for it.
-fn filter_defs(fs: f32) -> String {
-    let radius = OUTLINE_THICKNESS_EM * fs;
+fn filter_defs(fs: f32, outline_color: &str, outline_thickness_em: f32) -> String {
+    let radius = outline_thickness_em * fs;
     format!(
         "<filter id=\"naya-hype-outline\" x=\"-10%\" y=\"-20%\" width=\"120%\" height=\"140%\" \
          color-interpolation-filters=\"sRGB\">\
          <feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"{radius}\" \
          result=\"outline-shape\"/>\
-         <feFlood flood-color=\"{OUTLINE_COLOR}\" result=\"outline-ink\"/>\
+         <feFlood flood-color=\"{outline_color}\" result=\"outline-ink\"/>\
          <feComposite in=\"outline-ink\" in2=\"outline-shape\" operator=\"in\" \
          result=\"outline\"/>\
          <feMerge><feMergeNode in=\"outline\"/><feMergeNode in=\"SourceGraphic\"/></feMerge>\
@@ -169,6 +169,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "naya");
+    let highlight = st.color("highlight-color", HIGHLIGHT);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -260,7 +263,7 @@ pub fn render<'a>(
                 pop.eval((now_ms - word.start_ms) / 1000.0)
             };
             let fill = if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
-                HIGHLIGHT
+                highlight.as_str()
             } else {
                 ov.primary.as_str()
             };
@@ -304,7 +307,7 @@ pub fn render<'a>(
         );
     }
 
-    let defs = filter_defs(fs);
+    let defs = filter_defs(fs, &st.color("outline-color", OUTLINE_COLOR), st.f32("outline-thickness", OUTLINE_THICKNESS_EM));
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -355,7 +358,7 @@ mod tests {
     #[test]
     fn hype_outline_dilates_the_glyph_ring_and_merges_it_under_the_source() {
         let fs = 48.0;
-        let defs = filter_defs(fs);
+        let defs = filter_defs(fs, OUTLINE_COLOR, OUTLINE_THICKNESS_EM);
         // The recipe, expanded: dilate → flood → composite, then the ring
         // under SourceGraphic inside the host's region.
         assert!(defs.contains("id=\"naya-hype-outline\""), "{defs}");

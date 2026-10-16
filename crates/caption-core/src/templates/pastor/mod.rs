@@ -36,7 +36,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from pastor's style.scss + template.json) ─────────────
@@ -161,8 +161,9 @@ fn line_metrics(latin: &str, dominant: &str) -> (f32, f32, f32) {
 /// `clamp(4cqh, behind-fill × 100cqw / line-width-em, 30cqh)` — the line
 /// fills the frame whatever letters it holds, until the vertical ceiling
 /// takes over on a wide frame.
-fn behind_font_size(line_w_em: f32, video_w: f32, video_h: f32) -> f32 {
-    (BEHIND_FILL * video_w / line_w_em).clamp(BEHIND_MIN_CQH * video_h, BEHIND_MAX_CQH * video_h)
+fn behind_font_size(line_w_em: f32, video_w: f32, video_h: f32, st: &style::Style) -> f32 {
+    let fill = st.f32("behind-fill", BEHIND_FILL);
+    (fill * video_w / line_w_em).clamp(BEHIND_MIN_CQH * video_h, BEHIND_MAX_CQH * video_h)
 }
 
 /// The `soft-drop-shadow(0.06, 0.35)` chain: `copies` identical opaque
@@ -200,8 +201,14 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "pastor");
 
     // The register picks the face, the case, the metrics and the anchor.
+    // `behind-font-family` overrides the family the behind register emits;
+    // the stack/metrics stay on the embedded `BEHIND_FONT` (only that face
+    // has metrics available), so the control changes the SVG's font-family
+    // without breaking measurement.
     let (svg_font, font_weight) = if BEHIND_ACTOR {
         (BEHIND_FONT, BEHIND_FONT_WEIGHT)
     } else {
@@ -246,7 +253,7 @@ pub fn render<'a>(
             .iter()
             .map(|w| w + 2.0 * ov.word_spacing_em)
             .sum();
-        behind_font_size(line_w_em, video_w as f32, video_h as f32)
+        behind_font_size(line_w_em, video_w as f32, video_h as f32, &st)
     } else {
         overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32)
     };
@@ -271,7 +278,7 @@ pub fn render<'a>(
     // Quiet: top edge on the 0.75H anchor. Behind: the scss re-anchors the
     // box so its top edge lands on `behind-y` however tall it grew.
     let block_top = if BEHIND_ACTOR {
-        BEHIND_Y_FRAC * video_h as f32
+        st.f32("behind-y", BEHIND_Y_FRAC) * video_h as f32
     } else {
         ov.anchor_y * video_h as f32
     };
@@ -296,7 +303,14 @@ pub fn render<'a>(
     );
 
     let family = if BEHIND_ACTOR { svg_font } else { ov.font_family.as_str() };
-    let svg_font_attr = stack::svg_font_family(family);
+    // The behind register's family can be overridden by the
+    // `behind-font-family` control; measurement stays on the embedded face.
+    let family = if BEHIND_ACTOR {
+        st.str("behind-font-family", family)
+    } else {
+        family.to_string()
+    };
+    let svg_font_attr = stack::svg_font_family(&family);
     let mut words_svg = format!(
         "<g font-family=\"{svg_font_attr}\" font-weight=\"{font_weight}\" font-size=\"{fs}\" \
          letter-spacing=\"{ls_px}\" fill=\"{fill}\">",
@@ -430,14 +444,20 @@ mod tests {
 
     #[test]
     fn behind_line_size_is_solved_from_width_then_clamped() {
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "pastor");
         // A line costing ten em fills 98% of the frame width.
-        let fs = behind_font_size(10.0, 1920.0, 1080.0);
+        let fs = behind_font_size(10.0, 1920.0, 1080.0, &st);
         assert!((fs - (0.98 * 1920.0 / 10.0)).abs() < 1e-3, "fs {fs}");
         // One em would ask for a fifth of the frame's height twice over —
         // the 30cqh ceiling takes over.
-        assert!((behind_font_size(1.0, 1920.0, 1080.0) - 0.30 * 1080.0).abs() < 1e-6);
+        assert!(
+            (behind_font_size(1.0, 1920.0, 1080.0, &st) - 0.30 * 1080.0).abs() < 1e-6
+        );
         // A hundred em cannot reach the width either — the 4cqh floor.
-        assert!((behind_font_size(100.0, 1920.0, 1080.0) - 0.04 * 1080.0).abs() < 1e-6);
+        assert!(
+            (behind_font_size(100.0, 1920.0, 1080.0, &st) - 0.04 * 1080.0).abs() < 1e-6
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from sol's style.scss + template.json) ────────────────
@@ -250,6 +250,10 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "sol");
+    let highlight = st.color("highlight-color", HIGHLIGHT);
+    let glow_color = st.color("glow-color", GLOW_COLOR);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -328,9 +332,9 @@ pub fn render<'a>(
         defs.push_str(&format!(
             "<filter id=\"sol-glow\" x=\"-300%\" y=\"-300%\" width=\"700%\" height=\"700%\">\
              <feDropShadow dx=\"0\" dy=\"0\" stdDeviation=\"{glow1_std}\" \
-             flood-color=\"{GLOW_COLOR}\" flood-opacity=\"{GLOW_ALPHA}\" result=\"g1\"/>\
+             flood-color=\"{glow_color}\" flood-opacity=\"{GLOW_ALPHA}\" result=\"g1\"/>\
              <feDropShadow in=\"g1\" dx=\"0\" dy=\"0\" stdDeviation=\"{glow2_std}\" \
-             flood-color=\"{GLOW_COLOR}\" flood-opacity=\"{GLOW_ALPHA}\" result=\"g2\"/>\
+             flood-color=\"{glow_color}\" flood-opacity=\"{GLOW_ALPHA}\" result=\"g2\"/>\
              <feDropShadow in=\"g2\" dx=\"0\" dy=\"{contact_dy}\" stdDeviation=\"{contact_std}\" \
              flood-color=\"#000000\" flood-opacity=\"0.5\" result=\"g3\"/>\
              <feDropShadow in=\"g3\" dx=\"0\" dy=\"{bounce_dy}\" stdDeviation=\"{bounce_std}\" \
@@ -354,7 +358,7 @@ pub fn render<'a>(
                 tag_desc_ratio,
                 TAG_FONT,
                 TAG_FONT_WEIGHT,
-                HIGHLIGHT,
+                highlight.as_str(),
                 &tag_stack,
             )
         } else {

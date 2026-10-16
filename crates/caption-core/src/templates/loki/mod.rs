@@ -20,7 +20,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from loki's style.scss + template.json) ──────────────
@@ -135,8 +135,13 @@ fn uppercase(text: &str) -> String {
 /// drop-shadow offset/blur/flood/composite off `outline-shape`, all
 /// stacked shadow → glow → outline → SourceGraphic. Em values resolve to
 /// px at font size `fs`.
-fn filter_defs(fs: f32) -> String {
-    let radius = OUTLINE_THICKNESS_EM * fs;
+fn filter_defs(
+    fs: f32,
+    outline_color: &str,
+    outline_thickness_em: f32,
+    glow_color: &str,
+) -> String {
+    let radius = outline_thickness_em * fs;
     let glow_sigma = GLOW_RADIUS_EM * fs;
     let shadow_dy = SHADOW_DISTANCE_EM * fs;
     let shadow_sigma = SHADOW_BLUR_EM * fs;
@@ -145,11 +150,11 @@ fn filter_defs(fs: f32) -> String {
          color-interpolation-filters=\"sRGB\">\
          <feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"{radius}\" \
          result=\"outline-shape\"/>\
-         <feFlood flood-color=\"{OUTLINE_COLOR}\" result=\"outline-ink\"/>\
+         <feFlood flood-color=\"{outline_color}\" result=\"outline-ink\"/>\
          <feComposite in=\"outline-ink\" in2=\"outline-shape\" operator=\"in\" \
          result=\"outline\"/>\
          <feGaussianBlur in=\"SourceAlpha\" stdDeviation=\"{glow_sigma}\" result=\"glowSpread\"/>\
-         <feFlood flood-color=\"{GLOW_COLOR}\" result=\"glowFlood\"/>\
+         <feFlood flood-color=\"{glow_color}\" result=\"glowFlood\"/>\
          <feComposite in=\"glowFlood\" in2=\"glowSpread\" operator=\"in\" result=\"glow\"/>\
          <feOffset in=\"outline-shape\" dx=\"0\" dy=\"{shadow_dy}\" result=\"shadow-offset\"/>\
          <feGaussianBlur in=\"shadow-offset\" stdDeviation=\"{shadow_sigma}\" \
@@ -198,6 +203,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "loki");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -276,8 +283,9 @@ pub fn render<'a>(
             .zip(&measured.families[start..end])
         {
             let text = layout::escape_xml(&ov.text_case.apply(&word.display));
+            let highlight = st.color("highlight-color", HIGHLIGHT);
             let fill = if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
-                HIGHLIGHT
+                highlight.as_str()
             } else {
                 ov.primary.as_str()
             };
@@ -317,7 +325,7 @@ pub fn render<'a>(
         );
     }
 
-    let defs = filter_defs(fs);
+    let defs = filter_defs(fs, &st.color("outline-color", OUTLINE_COLOR), st.f32("outline-thickness", OUTLINE_THICKNESS_EM), &st.color("glow-color", GLOW_COLOR));
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -370,7 +378,7 @@ mod tests {
     #[test]
     fn beast_outline_stacks_shadow_glow_ring_then_source() {
         let fs = 54.0; // 4.5cqh at 1200px
-        let defs = filter_defs(fs);
+        let defs = filter_defs(fs, OUTLINE_COLOR, OUTLINE_THICKNESS_EM, GLOW_COLOR);
         assert!(defs.contains("id=\"loki-beast-outline\""), "{defs}");
         assert!(
             defs.contains("x=\"-15%\" y=\"-15%\" width=\"130%\" height=\"130%\""),

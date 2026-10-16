@@ -21,7 +21,7 @@
 
 use fframes::{FFramesContext, FontQuery, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from pico's style.scss + template.json) ───────────────
@@ -42,6 +42,7 @@ const MIN_LINES: usize = 1; // balanced-pixel-width minLines default
 const MAX_LINES: usize = 3; // lineSplitter.maxLines
 const MAX_WIDTH_RATIO: f32 = 0.72; // balanced-pixel-width maxWidthRatio default
 const MIN_WIDTH_CQH: f32 = 0.30; // min-width: max(30cqh, fixed-width 0cqw)
+const FIXED_WIDTH_CQW: f32 = 0.805; // fixed-width toggle valueOn: 80.5cqw
 const SHOW_LINE_NUMBERS: bool = true; // --tscaps-show-line-numbers default 1
 // --chrome-unit = font-size × chrome-scale(1) → one chrome unit is `fs`.
 const WIN_BG: &str = "#1e1e1e"; // --tscaps-window-bg default
@@ -316,8 +317,12 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "pico");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
-    let chrome = fs; // --chrome-unit: font-size × chrome-scale(1)
+    // --chrome-unit = font-size × chrome-scale.
+    let chrome = fs * st.f32("chrome-scale", 1.0);
+    let show_line_numbers = st.bool("show-line-numbers", SHOW_LINE_NUMBERS);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
@@ -358,12 +363,17 @@ pub fn render<'a>(
         .map(|&(s, e)| split_widths[s..e].iter().sum::<f32>())
         .fold(0.0, f32::max);
     let pad_left = PAD_X_EM * fs
-        + if SHOW_LINE_NUMBERS {
+        + if show_line_numbers {
             GUTTER_PAD_C * chrome
         } else {
             0.0
         };
-    let win_w = (content_w + pad_left + PAD_X_EM * fs).max(MIN_WIDTH_CQH * video_h as f32);
+    let min_w = if st.bool("fixed-width", false) {
+        FIXED_WIDTH_CQW * video_w as f32
+    } else {
+        MIN_WIDTH_CQH * video_h as f32
+    };
+    let win_w = (content_w + pad_left + PAD_X_EM * fs).max(min_w);
     let lines_h = lines.len() as f32 * line_h
         + lines.len().saturating_sub(1) as f32 * ov.line_spacing_em * fs;
     let win_h = PAD_TOP_C * chrome + lines_h + PAD_BOTTOM_EM * fs;
@@ -394,16 +404,20 @@ pub fn render<'a>(
     let title_ls = TITLE_LS_EM * title_fs;
 
     // ── chrome: window shadow, title bar, traffic lights, title text ──
+    let win_bg = st.color("window-bg", WIN_BG);
+    let titlebar_bg = st.color("titlebar-bg", TITLEBAR_BG);
+    let titlebar_text = st.color("titlebar-text", TITLEBAR_TEXT);
+    let title = layout::escape_xml(&st.str("title", TITLE_TEXT));
     let bar_h = TITLEBAR_H_C * chrome;
     let bar_path = titlebar_path(win_x, win_y, win_w, bar_h, WIN_RADIUS_C * chrome);
     let mut chrome_svg = format!(
         "<rect x=\"{win_x}\" y=\"{win_y}\" width=\"{win_w}\" height=\"{win_h}\" \
-         rx=\"{}\" ry=\"{}\" fill=\"{WIN_BG}\" filter=\"url(#pico-shadow)\"/>",
+         rx=\"{}\" ry=\"{}\" fill=\"{win_bg}\" filter=\"url(#pico-shadow)\"/>",
         WIN_RADIUS_C * chrome,
         WIN_RADIUS_C * chrome
     );
     chrome_svg.push_str(&format!(
-        "<path d=\"{bar_path}\" fill=\"{TITLEBAR_BG}\"/>"
+        "<path d=\"{bar_path}\" fill=\"{titlebar_bg}\"/>"
     ));
     for (x_c, color) in LIGHTS {
         chrome_svg.push_str(&format!(
@@ -418,19 +432,20 @@ pub fn render<'a>(
         "<text x=\"{}\" y=\"{title_baseline}\" text-anchor=\"middle\" \
          font-family=\"{FONT_TITLE}\" font-weight=\"{FONT_TITLE_WEIGHT}\" \
          font-size=\"{title_fs}\" letter-spacing=\"{title_ls}\" \
-         fill=\"{TITLEBAR_TEXT}\">{TITLE_TEXT}</text>",
+         fill=\"{titlebar_text}\">{title}</text>",
         win_x + win_w / 2.0
     ));
 
     // ── gutter numbers (drawn before the text, like the DOM order) ──
-    let numbers_svg = if SHOW_LINE_NUMBERS {
+    let numbers_svg = if show_line_numbers {
+        let gutter_color = st.color("gutter-color", GUTTER_COLOR);
         let num_fs = NUM_FONT_SIZE_EM * fs;
         let num_lh = LINE_HEIGHT * num_fs;
         let num_half = (num_lh - (asc_ratio + desc_ratio) * num_fs) / 2.0;
         let number_right = content_left + number_right_dx(chrome);
         let mut svg = format!(
             "<g font-family=\"{FONT}\" font-weight=\"{FONT_WEIGHT}\" \
-             font-size=\"{num_fs}\" fill=\"{GUTTER_COLOR}\">"
+             font-size=\"{num_fs}\" fill=\"{gutter_color}\">"
         );
         for (line_idx, _) in lines.iter().enumerate() {
             let line_top = content_top + line_idx as f32 * (line_h + LINE_SPACING_EM * fs);
@@ -500,8 +515,9 @@ pub fn render<'a>(
                 // 0.06em × 1em rect from top 0.05em of the letter box
                 // (ending on the baseline).
                 if caret_shown(now_ms, word.start_ms, word.end_ms, i, count, false) {
+                    let caret_color = st.color("caret-color", CARET_COLOR);
                     carets_svg.push_str(&format!(
-                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{CARET_COLOR}\"/>",
+                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{caret_color}\"/>",
                         cursor + ch_w,
                         line_top + CARET_TOP_EM * fs,
                         CARET_W_EM * fs,

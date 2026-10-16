@@ -43,6 +43,7 @@ pub mod selene;
 pub mod sol;
 pub mod stack;
 pub mod state;
+pub mod style;
 pub mod tala;
 pub mod theo;
 pub mod tito;

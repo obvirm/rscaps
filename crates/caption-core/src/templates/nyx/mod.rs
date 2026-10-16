@@ -19,7 +19,7 @@
 
 use fframes::{FFramesContext, FontQuery, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from nyx's style.scss + template.json) ────────────────
@@ -40,6 +40,7 @@ const MIN_LINES: usize = 1; // balanced-pixel-width minLines default
 const MAX_LINES: usize = 2; // lineSplitter.maxLines
 const MAX_WIDTH_RATIO: f32 = 0.72; // balanced-pixel-width maxWidthRatio default
 const MIN_WIDTH_CQH: f32 = 0.25; // min-width: max(25cqh, fixed-width 0cqw)
+const FIXED_WIDTH_CQW: f32 = 0.722; // fixed-width toggle valueOn: 72.2cqw
 // --chrome-unit = font-size × chrome-scale(1) → one chrome unit is `fs`.
 const WIN_BG: &str = "#0d1117"; // --tscaps-window-bg default
 const WIN_RADIUS_C: f32 = 0.227; // border-radius: 0.227 × chrome-unit
@@ -280,8 +281,11 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "nyx");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
-    let chrome = fs; // --chrome-unit: font-size × chrome-scale(1)
+    // --chrome-unit = font-size × chrome-scale.
+    let chrome = fs * st.f32("chrome-scale", 1.0);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
@@ -315,13 +319,19 @@ pub fn render<'a>(
     let lines = splitter.split(&split_widths);
 
     // Window (border-box): the widest line plus its side padding, floored
-    // at the 25cqh min-width; height stacks the title-bar clearance, the
-    // lines (0.045em apart) and the bottom padding.
+    // at the 25cqh min-width (or the fixed-width toggle's 72.2cqw); height
+    // stacks the title-bar clearance, the lines (0.045em apart) and the
+    // bottom padding.
     let content_w = lines
         .iter()
         .map(|&(s, e)| split_widths[s..e].iter().sum::<f32>())
         .fold(0.0, f32::max);
-    let win_w = (content_w + 2.0 * PAD_X_EM * fs).max(MIN_WIDTH_CQH * video_h as f32);
+    let min_w = if st.bool("fixed-width", false) {
+        FIXED_WIDTH_CQW * video_w as f32
+    } else {
+        MIN_WIDTH_CQH * video_h as f32
+    };
+    let win_w = (content_w + 2.0 * PAD_X_EM * fs).max(min_w);
     let lines_h = lines.len() as f32 * line_h
         + lines.len().saturating_sub(1) as f32 * ov.line_spacing_em * fs;
     let win_h = PAD_TOP_C * chrome + lines_h + PAD_BOTTOM_EM * fs;
@@ -353,16 +363,20 @@ pub fn render<'a>(
     let title_ls = TITLE_LS_EM * title_fs;
 
     // ── chrome: window shadow, title bar, traffic lights, title text ──
+    let win_bg = st.color("window-bg", WIN_BG);
+    let titlebar_bg = st.color("titlebar-bg", TITLEBAR_BG);
+    let titlebar_text = st.color("titlebar-text", TITLEBAR_TEXT);
+    let title = layout::escape_xml(&st.str("title", TITLE_TEXT));
     let bar_h = TITLEBAR_H_C * chrome;
     let bar_path = titlebar_path(win_x, win_y, win_w, bar_h, WIN_RADIUS_C * chrome);
     let mut chrome_svg = format!(
         "<rect x=\"{win_x}\" y=\"{win_y}\" width=\"{win_w}\" height=\"{win_h}\" \
-         rx=\"{}\" ry=\"{}\" fill=\"{WIN_BG}\" filter=\"url(#nyx-shadow)\"/>",
+         rx=\"{}\" ry=\"{}\" fill=\"{win_bg}\" filter=\"url(#nyx-shadow)\"/>",
         WIN_RADIUS_C * chrome,
         WIN_RADIUS_C * chrome
     );
     chrome_svg.push_str(&format!(
-        "<path d=\"{bar_path}\" fill=\"{TITLEBAR_BG}\"/>"
+        "<path d=\"{bar_path}\" fill=\"{titlebar_bg}\"/>"
     ));
     for (x_c, color) in LIGHTS {
         chrome_svg.push_str(&format!(
@@ -377,7 +391,7 @@ pub fn render<'a>(
         "<text x=\"{}\" y=\"{title_baseline}\" text-anchor=\"middle\" \
          font-family=\"{FONT_TITLE}\" font-weight=\"{FONT_TITLE_WEIGHT}\" \
          font-size=\"{title_fs}\" letter-spacing=\"{title_ls}\" \
-         fill=\"{TITLEBAR_TEXT}\">{TITLE_TEXT}</text>",
+         fill=\"{titlebar_text}\">{title}</text>",
         win_x + win_w / 2.0
     ));
 
@@ -463,7 +477,8 @@ pub fn render<'a>(
     defs_svg.push_str(&format!(
         "<filter id=\"nyx-glow\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\">\
          <feDropShadow dx=\"0\" dy=\"0\" stdDeviation=\"{glow_std}\" \
-         flood-color=\"{PRIMARY}\" flood-opacity=\"1\"/></filter>"
+         flood-color=\"{glow}\" flood-opacity=\"1\"/></filter>",
+        glow = ov.primary
     ));
     for (_, color) in LIGHTS {
         defs_svg.push_str(&format!(

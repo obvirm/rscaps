@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from pepper's style.scss + template.json) ─────────────
@@ -154,6 +154,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "pepper");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -191,9 +193,18 @@ pub fn render<'a>(
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
 
-    let stroke_w = STROKE_EM * fs;
-    let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
+    let stroke_w = st.f32("outline-thickness", STROKE_EM) * fs;
+    // `0 calc(0.04em * shadow-scale) calc(0.16em * shadow-scale)` — the
+    // baked defaults (dy 0.06em, blur 0.24em) come from scale 1.5.
+    let shadow_scale = st.f32("shadow-scale", 1.5);
+    let shadow_dy = SHADOW_DY_EM / 1.5 * shadow_scale * fs;
+    let shadow_std = SHADOW_BLUR_EM / 1.5 * shadow_scale * fs / 2.0;
     let pill_ease = recipes::cubic_bezier(0.2, 0.9, 0.3, 1.0);
+    let pill_bg = st.color("highlight-bg-color", PILL_COLOR);
+    let pill_pad_x = st.f32("highlight-bg-padding-x", PILL_PAD_X_EM) * fs;
+    let pill_pad_y = st.f32("highlight-bg-padding-y", PILL_PAD_Y_EM) * fs;
+    let pill_r = st.f32("highlight-bg-radius", PILL_RADIUS_EM) * fs;
+    let highlight_text = st.color("highlight-text-color", HIGHLIGHT_TEXT);
 
     let mut words_svg = format!(
         "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
@@ -229,16 +240,16 @@ pub fn render<'a>(
             };
             // Negative inset past the word's text box: 0.2em a side wide,
             // 0.08em a side tall, growing about the pill's own centre.
-            let pill_x = *x - PILL_PAD_X_EM * fs;
-            let pill_w = widths[start + i] + 2.0 * PILL_PAD_X_EM * fs;
-            let pill_y = baseline - ascent - PILL_PAD_Y_EM * fs;
-            let pill_h = ascent + descent + 2.0 * PILL_PAD_Y_EM * fs;
-            let radius = PILL_RADIUS_EM * fs;
+            let pill_x = *x - pill_pad_x;
+            let pill_w = widths[start + i] + 2.0 * pill_pad_x;
+            let pill_y = baseline - ascent - pill_pad_y;
+            let pill_h = ascent + descent + 2.0 * pill_pad_y;
+            let radius = pill_r;
             let cx = pill_x + pill_w / 2.0;
             let cy = pill_y + pill_h / 2.0;
             words_svg.push_str(&format!(
                 "<rect x=\"{pill_x}\" y=\"{pill_y}\" width=\"{pill_w}\" height=\"{pill_h}\" \
-                 rx=\"{radius}\" ry=\"{radius}\" fill=\"{PILL_COLOR}\" stroke=\"none\" \
+                 rx=\"{radius}\" ry=\"{radius}\" fill=\"{pill_bg}\" stroke=\"none\" \
                  transform=\"translate({cx},{cy}) scale({grow}) translate({nx},{ny})\"/>",
                 nx = -cx,
                 ny = -cy,
@@ -252,7 +263,7 @@ pub fn render<'a>(
         {
             let being = state::word_narration(now_ms, word.start_ms, word.end_ms).is_being();
             let fill = if being {
-                HIGHLIGHT_TEXT
+                highlight_text.as_str()
             } else {
                 ov.primary.as_str()
             };
@@ -294,7 +305,7 @@ pub fn render<'a>(
         >
             <defs>
                 <filter id="pepper-shadow" x="-30%" y="-60%" width="160%" height="260%">
-                    <feDropShadow dx="0" dy={SHADOW_DY_EM * fs} stdDeviation={shadow_std}
+                    <feDropShadow dx="0" dy={shadow_dy} stdDeviation={shadow_std}
                         flood-color={STROKE_COLOR} flood-opacity="1.0" />
                 </filter>
             </defs>

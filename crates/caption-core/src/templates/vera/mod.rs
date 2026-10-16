@@ -16,7 +16,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack, state};
+use super::{effects, layout, overrides, pipeline, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from vera's style.scss + template.json) ──────────────
@@ -108,11 +108,11 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
 /// Text colour from the narration state — upcoming words grey, the word
 /// being spoken and every finished word white (`.word-being-narrated` and
 /// `.word-already-narrated` share `primary-color` here).
-fn word_fill(now_ms: f32, word: &pipeline::TimedWord) -> &'static str {
+fn word_fill(now_ms: f32, word: &pipeline::TimedWord, st: &style::Style) -> String {
     if state::word_narration(now_ms, word.start_ms, word.end_ms) == state::Narration::NotYet {
-        UPCOMING
+        st.color("upcoming-color", UPCOMING)
     } else {
-        PRIMARY
+        PRIMARY.to_string()
     }
 }
 
@@ -135,14 +135,16 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "vera");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs; // word-layout: full spacing per side
     let line_h = LINE_HEIGHT * fs;
-    let plate_pad_x = PLATE_PAD_X_EM * fs;
-    let plate_pad_y = PLATE_PAD_Y_EM * fs;
-    let pill_pad_x = PILL_PAD_X_EM * fs;
-    let pill_pad_y = PILL_PAD_Y_EM * fs;
+    let plate_pad_x = st.f32("bg-padding-x", PLATE_PAD_X_EM) * fs;
+    let plate_pad_y = st.f32("bg-padding-y", PLATE_PAD_Y_EM) * fs;
+    let pill_pad_x = st.f32("highlight-bg-padding-x", PILL_PAD_X_EM) * fs;
+    let pill_pad_y = st.f32("highlight-bg-padding-y", PILL_PAD_Y_EM) * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
@@ -177,8 +179,11 @@ pub fn render<'a>(
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
-    let plate_r = PLATE_RADIUS_EM * fs;
-    let pill_r = PILL_RADIUS_EM * fs;
+    let plate_r = st.f32("bg-radius", PLATE_RADIUS_EM) * fs;
+    let plate_bg = st.color("bg-color", PLATE_BG);
+    let plate_opacity = st.f32("bg-opacity", PLATE_OPACITY);
+    let pill_r = st.f32("highlight-bg-radius", PILL_RADIUS_EM) * fs;
+    let pill_bg = st.color("highlight-bg-color", PILL_BG);
 
     let mut body = format!(
         "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
@@ -202,7 +207,7 @@ pub fn render<'a>(
         let plate_top = line_top - plate_pad_y;
         body.push_str(&format!(
             "<rect x=\"{plate_left}\" y=\"{plate_top}\" width=\"{plate_w}\" height=\"{plate_h}\" \
-             rx=\"{plate_r}\" ry=\"{plate_r}\" fill=\"{PLATE_BG}\" fill-opacity=\"{PLATE_OPACITY}\"/>"
+             rx=\"{plate_r}\" ry=\"{plate_r}\" fill=\"{plate_bg}\" fill-opacity=\"{plate_opacity}\"/>"
         ));
 
         // 2) The active-word pill — word box grown by its own insets,
@@ -217,7 +222,7 @@ pub fn render<'a>(
             let pill_top = line_top - pill_pad_y;
             body.push_str(&format!(
                 "<rect x=\"{pill_left}\" y=\"{pill_top}\" width=\"{pill_w}\" height=\"{pill_h}\" \
-                 rx=\"{pill_r}\" ry=\"{pill_r}\" fill=\"{PILL_BG}\"/>"
+                 rx=\"{pill_r}\" ry=\"{pill_r}\" fill=\"{pill_bg}\"/>"
             ));
         }
 
@@ -228,10 +233,8 @@ pub fn render<'a>(
             .zip(&measured.families[start..end])
         {
             let text = layout::escape_xml(&ov.text_case.apply(&word.display));
-            let fill = match word_fill(now_ms, word) {
-                PRIMARY => ov.primary.as_str(),
-                f => f,
-            };
+            let fill = word_fill(now_ms, word, &st);
+            let fill = if fill == PRIMARY { ov.primary.as_str() } else { fill.as_str() };
             let family_attr = if *family == FONT {
                 String::new()
             } else {
@@ -325,16 +328,18 @@ mod tests {
             }],
             ..Default::default()
         };
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "vera");
         let segments = pipeline::collect_segments(&doc, &SPLIT);
         let words = &segments[0].words;
         // At word 0's start: word 0 is on its pill (Being) and gold-white,
         // word 1 is upcoming grey with no pill.
         assert!(state::word_narration(words[0].start_ms, words[0].start_ms, words[0].end_ms)
             .is_being());
-        assert_eq!(word_fill(words[0].start_ms, &words[0]), PRIMARY);
-        assert_eq!(word_fill(words[0].start_ms, &words[1]), UPCOMING);
+        assert_eq!(word_fill(words[0].start_ms, &words[0], &st), PRIMARY);
+        assert_eq!(word_fill(words[0].start_ms, &words[1], &st), UPCOMING);
         // After the segment, both are white again and no pill remains.
-        assert_eq!(word_fill(words[1].end_ms, &words[1]), PRIMARY);
+        assert_eq!(word_fill(words[1].end_ms, &words[1], &st), PRIMARY);
         assert!(!state::word_narration(
             words[1].end_ms,
             words[1].start_ms,

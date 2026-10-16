@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from enzo's style.scss + template.json) ───────────────
@@ -111,6 +111,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "enzo");
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -154,7 +157,7 @@ pub fn render<'a>(
     // glyphs — dy is negative on purpose.
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
-    let stroke_px = OUTLINE_THICKNESS_EM * fs;
+    let stroke_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
 
     // Each word fades in on its own narration clock.
     let fade = recipes::FadeIn::with(0.0, ov.duration_or(FADE_DURATION_S));
@@ -189,7 +192,7 @@ pub fn render<'a>(
             let text = layout::escape_xml(&word.display);
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
-                 stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
+                 stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\" opacity=\"{opacity}\">{text}</text>",
                 primary = ov.primary.as_str(),
             ));

@@ -11,7 +11,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from ivo's style.scss + template.json) ────────────────
@@ -129,12 +129,14 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "ivo");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
-    let pad_x = BG_PAD_X_EM * fs;
-    let pad_y = BG_PAD_Y_EM * fs;
+    let pad_x = st.f32("bg-padding-x", BG_PAD_X_EM) * fs;
+    let pad_y = st.f32("bg-padding-y", BG_PAD_Y_EM) * fs;
     let box_h = line_h + 2.0 * pad_y;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
@@ -173,6 +175,10 @@ pub fn render<'a>(
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
+    let primary_bg = st.color("primary-bg", PRIMARY_BG);
+    let accent = st.color("accent-color", ACCENT);
+    let accent_bg = st.color("accent-bg", ACCENT_BG);
+    let box_radius = st.f32("bg-radius", BG_RADIUS_EM) * fs;
 
     let elapsed_s = (now_ms - segment.start_ms) / 1000.0;
     let mut anim = scale_in();
@@ -207,11 +213,11 @@ pub fn render<'a>(
         // A lone line is both :first-child and :last-child — the
         // tape wins (later rule in the scss).
         let (bg, fg): (&str, &str) = if is_last {
-            (ACCENT_BG, ACCENT)
+            (accent_bg.as_str(), accent.as_str())
         } else {
-            (PRIMARY_BG, ov.primary.as_str())
+            (primary_bg.as_str(), ov.primary.as_str())
         };
-        let r = BG_RADIUS_EM * fs;
+        let r = box_radius;
         if is_last {
             let angle = if ov.motion_static {
                 LINE_ROTATE_DEG

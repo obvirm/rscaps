@@ -18,7 +18,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{layout, overrides, pipeline, recipes, stack, state};
+use super::{layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from rhea's style.scss + template.json) ───────────────
@@ -101,12 +101,12 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
 }
 
 /// The spoken line carries the segment's 700; every other line rests
-/// at the control's default 300 (`.line-not-narrated-yet` /
+/// at the control's weight (`.line-not-narrated-yet` /
 /// `.line-already-narrated`).
-fn line_weight(narration: state::Narration) -> u16 {
+fn line_weight(narration: state::Narration, resting: u16) -> u16 {
     match narration {
         state::Narration::Being => FONT_WEIGHT,
-        _ => RESTING_WEIGHT,
+        _ => resting,
     }
 }
 
@@ -147,6 +147,11 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "rhea");
+    // The spoken line carries the 700; every other line rests at this
+    // control's weight (the `resting-line-weight` default is 300).
+    let resting_weight = st.f32("resting-line-weight", RESTING_WEIGHT as f32) as u16;
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -174,7 +179,7 @@ pub fn render<'a>(
         &segment.words,
         &script_stack,
         MONTSERRAT_300_TTF,
-        RESTING_WEIGHT,
+        resting_weight,
         ctx.font_source,
         fs,
         ls_px,
@@ -229,7 +234,7 @@ pub fn render<'a>(
         let line_top = block_top + line_idx as f32 * line_h;
         let baseline = line_top + half_leading + ascent;
         let words = &segment.words[start..end];
-        let weight = line_weight(state::LineSpan::of_words(words).narration_at(now_ms));
+        let weight = line_weight(state::LineSpan::of_words(words).narration_at(now_ms), resting_weight);
         // The spoken line wears the (possibly overridden) heavy weight.
         let emit_weight = if weight == FONT_WEIGHT {
             ov.font_weight
@@ -359,9 +364,9 @@ mod tests {
 
     #[test]
     fn the_spoken_line_wears_700_and_the_rest_300() {
-        assert_eq!(line_weight(state::Narration::Being), 700);
-        assert_eq!(line_weight(state::Narration::NotYet), 300);
-        assert_eq!(line_weight(state::Narration::Already), 300);
+        assert_eq!(line_weight(state::Narration::Being, RESTING_WEIGHT), 700);
+        assert_eq!(line_weight(state::Narration::NotYet, RESTING_WEIGHT), 300);
+        assert_eq!(line_weight(state::Narration::Already, RESTING_WEIGHT), 300);
         assert_eq!(FONT_WEIGHT, 700);
         assert_eq!(RESTING_WEIGHT, 300);
     }

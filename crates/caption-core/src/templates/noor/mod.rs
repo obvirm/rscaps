@@ -19,7 +19,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from noor's style.scss + template.json) ───────────────
@@ -56,9 +56,10 @@ const OUTLINE_COLOR: &str = "#000000";
 const SHADOW_DY_EM: f32 = 0.08;
 const SHADOW_SIGMA_EM: f32 = 0.5;
 // glow-filter(0.12): halves the radius for `drop-shadow`, which is why the
-// halo ends up at the same σ the `glow(0.12)` text-shadow would give.
+// halo ends up at the same σ the `glow(0.12)` text-shadow would give. The
+// halo's ink is `var(--tscaps-primary-color, #ffd84d)` → the effective
+// primary (wired via `ov.primary` in the filter below).
 const GLOW_SIGMA_EM: f32 = 0.12 / 2.0;
-const GLOW_COLOR: &str = "#ffd84d"; // var(--tscaps-primary-color, #ffd84d)
 // .word background: 180deg, black-mixed stops at 0% / 100% around the fill
 // at 25% — `color-mix(in srgb, $primary, #000 N%)`.
 const GRADIENT_TOP_SHARE: f32 = 0.28;
@@ -186,6 +187,10 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "noor");
+    let quote_color = st.color("quote-color", "#9ce874");
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32)
         * font_size_scale(segment_char_count(&segment.words));
     let ls_px = ov.letter_spacing_em * fs;
@@ -245,12 +250,15 @@ pub fn render<'a>(
     };
     let ty = ty_em * fs;
 
-    let outline = OUTLINE_THICKNESS_EM * fs;
+    let outline = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_sigma = SHADOW_SIGMA_EM * fs;
     let glow_sigma = GLOW_SIGMA_EM * fs;
-    let grad_top = mixed_down(PRIMARY, GRADIENT_TOP_SHARE);
-    let grad_bottom = mixed_down(PRIMARY, GRADIENT_BOTTOM_SHARE);
+    // The fill gradient and the halo key off the effective primary
+    // (style control → user color → template default).
+    let primary = ov.primary.clone();
+    let grad_top = mixed_down(&primary, GRADIENT_TOP_SHARE);
+    let grad_bottom = mixed_down(&primary, GRADIENT_BOTTOM_SHARE);
 
     // One gradient per line: every word in a line shares its box top and
     // height, so `.word`'s own 180° background lands on the same stops.
@@ -262,7 +270,7 @@ pub fn render<'a>(
             "<linearGradient id=\"{grad_id}\" gradientUnits=\"userSpaceOnUse\" \
              x1=\"0\" y1=\"{line_top}\" x2=\"0\" y2=\"{}\">\
              <stop offset=\"0\" stop-color=\"{grad_top}\"/>\
-             <stop offset=\"0.25\" stop-color=\"{PRIMARY}\"/>\
+             <stop offset=\"0.25\" stop-color=\"{primary}\"/>\
              <stop offset=\"1\" stop-color=\"{grad_bottom}\"/>\
              </linearGradient>",
             line_top + line_h
@@ -283,8 +291,9 @@ pub fn render<'a>(
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
         let grad_id = format!("noor-grad-{line_idx}");
-        for ((x, text), family) in xs
+        for (((x, word), text), family) in xs
             .iter()
+            .zip(&segment.words[start..end])
             .zip(&display_texts[start..end])
             .zip(&measured.families[start..end])
         {
@@ -294,8 +303,15 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
+            // `.quote` words take the whole-word quote colour instead of
+            // the gold gradient (semantik tag quote tscaps).
+            let fill = if style::word_has_quote(&word.display) {
+                quote_color.clone()
+            } else {
+                format!("url(#{grad_id})")
+            };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"url(#{grad_id})\"{family_attr}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}>{text}</text>"
             ));
         }
     }
@@ -323,12 +339,12 @@ pub fn render<'a>(
         >
             <defs>
                 <filter id="noor-fx" x="-50%" y="-120%" width="200%" height="340%">
-                    <feDropShadow dx={outline} dy={0.0} stdDeviation={0.0} flood-color={OUTLINE_COLOR} flood-opacity={1.0} result="p1"/>
-                    <feDropShadow in="p1" dx={-outline} dy={0.0} stdDeviation={0.0} flood-color={OUTLINE_COLOR} flood-opacity={1.0} result="p2"/>
-                    <feDropShadow in="p2" dx={0.0} dy={outline} stdDeviation={0.0} flood-color={OUTLINE_COLOR} flood-opacity={1.0} result="p3"/>
-                    <feDropShadow in="p3" dx={0.0} dy={-outline} stdDeviation={0.0} flood-color={OUTLINE_COLOR} flood-opacity={1.0} result="p4"/>
+                    <feDropShadow dx={outline} dy={0.0} stdDeviation={0.0} flood-color={outline_color.as_str()} flood-opacity={1.0} result="p1"/>
+                    <feDropShadow in="p1" dx={-outline} dy={0.0} stdDeviation={0.0} flood-color={outline_color.as_str()} flood-opacity={1.0} result="p2"/>
+                    <feDropShadow in="p2" dx={0.0} dy={outline} stdDeviation={0.0} flood-color={outline_color.as_str()} flood-opacity={1.0} result="p3"/>
+                    <feDropShadow in="p3" dx={0.0} dy={-outline} stdDeviation={0.0} flood-color={outline_color.as_str()} flood-opacity={1.0} result="p4"/>
                     <feDropShadow in="p4" dx={0.0} dy={shadow_dy} stdDeviation={shadow_sigma} flood-color="#000000" flood-opacity={1.0} result="p5"/>
-                    <feDropShadow in="p5" dx={0.0} dy={0.0} stdDeviation={glow_sigma} flood-color={GLOW_COLOR} flood-opacity={1.0}/>
+                    <feDropShadow in="p5" dx={0.0} dy={0.0} stdDeviation={glow_sigma} flood-color={primary.as_str()} flood-opacity={1.0}/>
                 </filter>
                 {defs_svg}
             </defs>

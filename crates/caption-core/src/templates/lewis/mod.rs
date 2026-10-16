@@ -10,7 +10,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from lewis's style.scss + template.json) ──────────────
@@ -130,6 +130,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "lewis");
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -185,7 +188,7 @@ pub fn render<'a>(
         entrance.eval((now_ms - segment.start_ms) / 1000.0)
     };
 
-    let stroke_px = OUTLINE_THICKNESS_EM * fs;
+    let stroke_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
     let halo_std = HALO_BLUR_EM * fs / 2.0;
     let shade_dy = SHADE_DY_EM * fs;
     let shade_std = SHADE_BLUR_EM * fs / 2.0;
@@ -218,7 +221,7 @@ pub fn render<'a>(
             let text = layout::escape_xml(&word.display);
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
-                 stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
+                 stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\" filter=\"url(#lewis-lit)\">{text}</text>",
                 primary = ov.primary.as_str(),
             ));

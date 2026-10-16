@@ -11,7 +11,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack, state};
+use super::{effects, layout, overrides, pipeline, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from kel's style.scss + template.json) ────────────────
@@ -97,20 +97,20 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
 // ── narration state (`.word-not-narrated-yet` / `-being-` / `-already-`) ──
 
 /// Glyph colour for the word's narration state.
-fn fill_at(now_ms: f32, word_start: f32, word_end: f32) -> &'static str {
+fn fill_at(now_ms: f32, word_start: f32, word_end: f32, st: &style::Style) -> String {
     match state::word_narration(now_ms, word_start, word_end) {
-        state::Narration::NotYet => UPCOMING,
-        state::Narration::Being => HIGHLIGHT,
-        state::Narration::Already => PRIMARY,
+        state::Narration::NotYet => st.color("upcoming-color", UPCOMING),
+        state::Narration::Being => st.color("highlight-color", HIGHLIGHT),
+        state::Narration::Already => PRIMARY.to_string(),
     }
 }
 
 /// Plate colour: only the spoken word swaps its background.
-fn bg_at(now_ms: f32, word_start: f32, word_end: f32) -> &'static str {
+fn bg_at(now_ms: f32, word_start: f32, word_end: f32, st: &style::Style) -> String {
     if state::word_narration(now_ms, word_start, word_end).is_being() {
-        HIGHLIGHT_BG
+        st.color("highlight-bg-color", HIGHLIGHT_BG)
     } else {
-        BG
+        st.color("bg-color", BG)
     }
 }
 
@@ -145,9 +145,9 @@ fn plate_path(x: f32, y: f32, w: f32, h: f32, tl: f32, tr: f32, br: f32, bl: f32
 
 /// Which corners the word at `index` of a `count`-word line rounds: the
 /// painted strip's ends, never the first/last word *spoken*.
-fn rounded_corners(index: usize, count: usize) -> (f32, f32, f32, f32) {
-    let left = (index == 0) as usize as f32 * RADIUS_EM;
-    let right = (index + 1 == count) as usize as f32 * RADIUS_EM;
+fn rounded_corners(index: usize, count: usize, radius_em: f32) -> (f32, f32, f32, f32) {
+    let left = (index == 0) as usize as f32 * radius_em;
+    let right = (index + 1 == count) as usize as f32 * radius_em;
     (left, right, right, left)
 }
 
@@ -170,12 +170,14 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "kel");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs; // negative: plates touch/overlap
     let line_h = LINE_HEIGHT * fs;
-    let pad_x = PAD_X_EM * fs;
-    let pad_y = PAD_Y_EM * fs;
+    let pad_x = st.f32("word-padding-x", PAD_X_EM) * fs;
+    let pad_y = st.f32("word-padding-y", PAD_Y_EM) * fs;
     let box_h = line_h + 2.0 * pad_y;
     let gap = ov.line_spacing_em * fs;
     let script_stack = stack::Stack::for_latin(FONT);
@@ -217,6 +219,7 @@ pub fn render<'a>(
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
+    let radius_em = st.f32("bg-radius", RADIUS_EM);
 
     let mut plates_svg = String::new();
     let mut words_svg = format!(
@@ -234,12 +237,12 @@ pub fn render<'a>(
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&box_widths[start..end], margin, line_left, line_w, rtl);
         for (j, x) in xs.iter().enumerate() {
-            let (tl, tr, br, bl) = rounded_corners(j, count);
+            let (tl, tr, br, bl) = rounded_corners(j, count, radius_em);
             let d = plate_path(*x, box_top, box_widths[start + j], box_h, tl, tr, br, bl);
             let word = &segment.words[start + j];
             plates_svg.push_str(&format!(
                 "<path d=\"{d}\" fill=\"{}\"/>",
-                bg_at(now_ms, word.start_ms, word.end_ms)
+                bg_at(now_ms, word.start_ms, word.end_ms, &st)
             ));
         }
         for ((x, word), family) in xs
@@ -253,9 +256,9 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
-            let fill = fill_at(now_ms, word.start_ms, word.end_ms);
+            let fill = fill_at(now_ms, word.start_ms, word.end_ms, &st);
             // The template's own primary ink yields to the user's colour.
-            let fill = if fill == PRIMARY { ov.primary.as_str() } else { fill };
+            let fill = if fill == PRIMARY { ov.primary.as_str() } else { fill.as_str() };
             words_svg.push_str(&format!(
                 "<text x=\"{}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}>{text}</text>",
                 x + pad_x
@@ -326,12 +329,15 @@ mod tests {
     fn only_the_ends_of_the_strip_round() {
         // Two-word line: left box rounds its left pair, right box its
         // right pair, and the touching pair stays square.
-        assert_eq!(rounded_corners(0, 2), (RADIUS_EM, 0.0, 0.0, RADIUS_EM));
-        assert_eq!(rounded_corners(1, 2), (0.0, RADIUS_EM, RADIUS_EM, 0.0));
+        assert_eq!(rounded_corners(0, 2, RADIUS_EM), (RADIUS_EM, 0.0, 0.0, RADIUS_EM));
+        assert_eq!(rounded_corners(1, 2, RADIUS_EM), (0.0, RADIUS_EM, RADIUS_EM, 0.0));
         // A single-word line is the whole strip: all four corners.
-        assert_eq!(rounded_corners(0, 1), (RADIUS_EM, RADIUS_EM, RADIUS_EM, RADIUS_EM));
+        assert_eq!(
+            rounded_corners(0, 1, RADIUS_EM),
+            (RADIUS_EM, RADIUS_EM, RADIUS_EM, RADIUS_EM)
+        );
         // Interior word of a long line rounds nothing.
-        assert_eq!(rounded_corners(1, 3), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(rounded_corners(1, 3, RADIUS_EM), (0.0, 0.0, 0.0, 0.0));
         // The path spans the plate box exactly: top-left corner in, right
         // side straight down (square), bottom-left corner back out.
         let d = plate_path(8.0, 16.0, 64.0, 32.0, 8.0, 0.0, 0.0, 8.0);
@@ -343,12 +349,14 @@ mod tests {
 
     #[test]
     fn plates_and_glyphs_follow_the_narration_state() {
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "kel");
         // 100..200 is the narration window.
-        assert_eq!(fill_at(50.0, 100.0, 200.0), UPCOMING);
-        assert_eq!(fill_at(150.0, 100.0, 200.0), HIGHLIGHT);
-        assert_eq!(fill_at(250.0, 100.0, 200.0), PRIMARY);
-        assert_eq!(bg_at(50.0, 100.0, 200.0), BG);
-        assert_eq!(bg_at(150.0, 100.0, 200.0), HIGHLIGHT_BG);
-        assert_eq!(bg_at(250.0, 100.0, 200.0), BG);
+        assert_eq!(fill_at(50.0, 100.0, 200.0, &st), UPCOMING);
+        assert_eq!(fill_at(150.0, 100.0, 200.0, &st), HIGHLIGHT);
+        assert_eq!(fill_at(250.0, 100.0, 200.0, &st), PRIMARY);
+        assert_eq!(bg_at(50.0, 100.0, 200.0, &st), BG);
+        assert_eq!(bg_at(150.0, 100.0, 200.0, &st), HIGHLIGHT_BG);
+        assert_eq!(bg_at(250.0, 100.0, 200.0, &st), BG);
     }
 }

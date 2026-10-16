@@ -25,7 +25,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from iris's style.scss + template.json) ──────────────
@@ -120,12 +120,20 @@ fn normalize(text: &str) -> String {
 // ── stroke mask + brush outline ───────────────────────────────────────────
 
 /// Geometry mask/rect bersama (bleed box).
-fn stroke_box(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: f32) -> (f32, f32, f32, f32) {
-    let px = MASK_PAD_X_EM * fs;
-    let py = MASK_PAD_Y_EM * fs;
+fn stroke_box(
+    block_left: f32,
+    block_top: f32,
+    block_w: f32,
+    block_h: f32,
+    fs: f32,
+    st: &style::Style,
+) -> (f32, f32, f32, f32) {
+    let px = st.f32("mask-padding-x", MASK_PAD_X_EM) * fs;
+    let py = st.f32("mask-padding-y", MASK_PAD_Y_EM) * fs;
+    let offset = st.f32("mask-offset-y", MASK_OFFSET_Y_EM) * fs;
     (
         block_left - px,
-        block_top - py + MASK_OFFSET_Y_EM * fs,
+        block_top - py + offset,
         block_w + 2.0 * px,
         block_h + 2.0 * py,
     )
@@ -134,8 +142,15 @@ fn stroke_box(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: f
 /// The `.segment::before` watercolour stroke MASK: the bundled PNG as an
 /// alpha-typed `<mask>` stretched over the bleed box (CSS
 /// `mask-size: 100% 100%`). Hanya `<mask>` — tempatnya DI DALAM `<defs>`.
-fn stroke_defs(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: f32) -> String {
-    let (x, y, w, h) = stroke_box(block_left, block_top, block_w, block_h, fs);
+fn stroke_defs(
+    block_left: f32,
+    block_top: f32,
+    block_w: f32,
+    block_h: f32,
+    fs: f32,
+    st: &style::Style,
+) -> String {
+    let (x, y, w, h) = stroke_box(block_left, block_top, block_w, block_h, fs, st);
     format!(
         "<mask id=\"iris-stroke\" mask-type=\"alpha\" x=\"{x}\" y=\"{y}\" width=\"{w}\" \
          height=\"{h}\" maskUnits=\"userSpaceOnUse\">\
@@ -148,10 +163,18 @@ fn stroke_defs(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: 
 /// Highlight-coloured rect painted THROUGH the mask — elemen KONTEN (di depan
 /// defs, di belakang kata-kata), bukan bagian defs (defs tidak pernah
 /// dirender — rect di sana = brush hilang total).
-fn stroke_rect(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: f32) -> String {
-    let (x, y, w, h) = stroke_box(block_left, block_top, block_w, block_h, fs);
+fn stroke_rect(
+    block_left: f32,
+    block_top: f32,
+    block_w: f32,
+    block_h: f32,
+    fs: f32,
+    color: &str,
+    st: &style::Style,
+) -> String {
+    let (x, y, w, h) = stroke_box(block_left, block_top, block_w, block_h, fs, st);
     format!(
-        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"{STROKE_COLOR}\" \
+        "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" fill=\"{color}\" \
          mask=\"url(#iris-stroke)\"/>"
     )
 }
@@ -160,19 +183,30 @@ fn stroke_rect(block_left: f32, block_top: f32, block_w: f32, block_h: f32, fs: 
 /// recipe at the control-default thickness, merged under SourceGraphic.
 /// Sits on each `.word`, not the segment, so the dilation stays scoped
 /// to glyph silhouettes.
-fn filter_defs(fs: f32) -> String {
-    let radius = OUTLINE_THICKNESS_EM * fs;
+fn filter_defs(fs: f32, st: &style::Style) -> String {
+    let radius = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
     format!(
         "<filter id=\"iris-brush-outline\" x=\"-20%\" y=\"-30%\" width=\"140%\" height=\"160%\" \
          color-interpolation-filters=\"sRGB\">\
          <feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"{radius}\" \
          result=\"outline-shape\"/>\
-         <feFlood flood-color=\"{OUTLINE_COLOR}\" result=\"outline-ink\"/>\
+         <feFlood flood-color=\"{outline_color}\" result=\"outline-ink\"/>\
          <feComposite in=\"outline-ink\" in2=\"outline-shape\" operator=\"in\" \
          result=\"outline\"/>\
          <feMerge><feMergeNode in=\"outline\"/><feMergeNode in=\"SourceGraphic\"/></feMerge>\
          </filter>"
     )
+}
+
+/// tscaps `SegmentColorRotation.hashStringToInt`: 32-bit rolling
+/// `(h << 5) - h + unit` over the UTF-16 units, absolute value.
+fn hash_string(s: &str) -> usize {
+    let mut h: i32 = 0;
+    for unit in s.encode_utf16() {
+        h = h.wrapping_shl(5).wrapping_sub(h).wrapping_add(unit as i32);
+    }
+    h.unsigned_abs() as usize
 }
 
 // ── render ────────────────────────────────────────────────────────────────
@@ -194,6 +228,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "iris");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -283,12 +319,51 @@ pub fn render<'a>(
         );
     }
 
+    // Stroke colour: the `color-recipe` select rotates the
+    // highlight-color-1..5 palette per segment (port of tscaps
+    // SegmentColorRotation). `single` (default) = palette[0];
+    // `sequential` = index within the segment list; `random` = stable
+    // hash of the segment's own words so re-renders stay put.
+    let palette: [String; 5] = [
+        st.color("highlight-color-1", STROKE_COLOR),
+        st.color("highlight-color-2", "#ffb3b3"),
+        st.color("highlight-color-3", "#a3d8f5"),
+        st.color("highlight-color-4", "#b3e5b8"),
+        st.color("highlight-color-5", "#ffc89e"),
+    ];
+    let recipe = st.str("color-recipe", "single");
+    let seg_index = segments
+        .iter()
+        .position(|s| std::ptr::eq(s, segment))
+        .unwrap_or(0);
+    let stroke_color: &str = match recipe.as_str() {
+        "sequential" => palette[seg_index % palette.len()].as_str(),
+        "random" => {
+            let key = segment
+                .words
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            palette[hash_string(&key) % palette.len()].as_str()
+        }
+        _ => palette[0].as_str(),
+    };
+
     // Stroke first (z-index: -1 in scss), then the words on top.
-    let stroke = stroke_rect(block_left, block_top, block_w, block_h, fs);
+    let stroke = stroke_rect(
+        block_left,
+        block_top,
+        block_w,
+        block_h,
+        fs,
+        stroke_color,
+        &st,
+    );
     let defs = format!(
         "{}{}",
-        stroke_defs(block_left, block_top, block_w, block_h, fs),
-        filter_defs(fs)
+        stroke_defs(block_left, block_top, block_w, block_h, fs, &st),
+        filter_defs(fs, &st)
     );
     fframes::svgr!(
         <svg
@@ -341,7 +416,9 @@ mod tests {
     #[test]
     fn stroke_mask_covers_the_bleed_box_and_tints_it_highlight() {
         // Text block 200×80 at (100, 200), fs 50 → pad 42 / 28, offset 3.
-        let defs = stroke_defs(100.0, 200.0, 200.0, 80.0, 50.0);
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "iris");
+        let defs = stroke_defs(100.0, 200.0, 200.0, 80.0, 50.0, &st);
         assert!(defs.contains("id=\"iris-stroke\""), "{defs}");
         assert!(defs.contains("mask-type=\"alpha\""), "{defs}");
         assert!(defs.contains("preserveAspectRatio=\"none\""), "{defs}");
@@ -353,7 +430,7 @@ mod tests {
         assert!(defs.contains("x=\"58\" y=\"175\" width=\"284\""), "{defs}");
         assert!(defs.contains("height=\"136\""), "{defs}");
         // Rect highlight = konten (di luar defs — defs tidak pernah dirender).
-        let rect = stroke_rect(100.0, 200.0, 200.0, 80.0, 50.0);
+        let rect = stroke_rect(100.0, 200.0, 200.0, 80.0, 50.0, STROKE_COLOR, &st);
         assert!(
             rect.contains(&format!("fill=\"{STROKE_COLOR}\" mask=\"url(#iris-stroke)\"")),
             "{rect}"
@@ -368,7 +445,9 @@ mod tests {
     #[test]
     fn brush_outline_dilates_each_word_and_rings_under_the_source() {
         let fs = 54.0; // 4.5cqh at 1200px
-        let defs = filter_defs(fs);
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "iris");
+        let defs = filter_defs(fs, &st);
         assert!(defs.contains("id=\"iris-brush-outline\""), "{defs}");
         assert!(
             defs.contains("x=\"-20%\" y=\"-30%\" width=\"140%\" height=\"160%\""),

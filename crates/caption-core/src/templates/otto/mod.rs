@@ -20,7 +20,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack, state};
+use super::{effects, layout, overrides, pipeline, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from otto's style.scss + template.json) ───────────────
@@ -106,12 +106,8 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
 
 /// `.word-being-narrated { color: highlight }` — the gold follows the
 /// word's own narration window, not the line's.
-fn word_fill(now_ms: f32, word: &pipeline::TimedWord) -> &'static str {
-    if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
-        HIGHLIGHT
-    } else {
-        PRIMARY
-    }
+fn word_being(now_ms: f32, word: &pipeline::TimedWord) -> bool {
+    state::word_narration(now_ms, word.start_ms, word.end_ms).is_being()
 }
 
 // ── render ────────────────────────────────────────────────────────────────
@@ -133,12 +129,14 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "otto");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
-    let pad_x = PILL_PAD_X_EM * fs;
-    let pad_y = PILL_PAD_Y_EM * fs;
+    let pad_x = st.f32("bg-padding-x", PILL_PAD_X_EM) * fs;
+    let pad_y = st.f32("bg-padding-y", PILL_PAD_Y_EM) * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
@@ -174,7 +172,10 @@ pub fn render<'a>(
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
-    let pill_r = PILL_RADIUS_EM * fs;
+    let pill_r = st.f32("bg-radius", PILL_RADIUS_EM) * fs;
+    let pill_bg = st.color("bg-color", PILL_BG);
+    let highlight = st.color("highlight-color", HIGHLIGHT);
+    let pill_mode = st.str("pill-mode", "line");
 
     let mut body = format!(
         "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
@@ -182,6 +183,26 @@ pub fn render<'a>(
         font = ov.font_family,
         weight = ov.font_weight,
     );
+    if pill_mode == "segment" {
+        // One pill wraps the whole segment block (every line stacked).
+        let pill_block_w: f32 = lines
+            .iter()
+            .map(|&(start, end)| {
+                widths[start..end]
+                    .iter()
+                    .map(|w| w + 2.0 * margin)
+                    .sum::<f32>()
+            })
+            .fold(0.0, f32::max)
+            + 2.0 * pad_x;
+        let pill_block_h = block_h + 2.0 * pad_y;
+        let box_left = center_x - pill_block_w / 2.0;
+        let box_top = block_top - pad_y;
+        body.push_str(&format!(
+            "<rect x=\"{box_left}\" y=\"{box_top}\" width=\"{pill_block_w}\" height=\"{pill_block_h}\" \
+             rx=\"{pill_r}\" ry=\"{pill_r}\" fill=\"{pill_bg}\"/>"
+        ));
+    }
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * (line_h + LINE_SPACING_EM * fs);
         let ws = &widths[start..end];
@@ -189,14 +210,16 @@ pub fn render<'a>(
 
         // The pill: line box grown by the negative insets, painted first
         // so it sits behind the glyphs (`z-index: -1`).
-        let box_w = run + 2.0 * pad_x;
-        let box_left = center_x - box_w / 2.0;
-        let box_h = line_h + 2.0 * pad_y;
-        let box_top = line_top - pad_y;
-        body.push_str(&format!(
-            "<rect x=\"{box_left}\" y=\"{box_top}\" width=\"{box_w}\" height=\"{box_h}\" \
-             rx=\"{pill_r}\" ry=\"{pill_r}\" fill=\"{PILL_BG}\"/>"
-        ));
+        if pill_mode != "segment" {
+            let box_w = run + 2.0 * pad_x;
+            let box_left = center_x - box_w / 2.0;
+            let box_h = line_h + 2.0 * pad_y;
+            let box_top = line_top - pad_y;
+            body.push_str(&format!(
+                "<rect x=\"{box_left}\" y=\"{box_top}\" width=\"{box_w}\" height=\"{box_h}\" \
+             rx=\"{pill_r}\" ry=\"{pill_r}\" fill=\"{pill_bg}\"/>"
+            ));
+        }
 
         let baseline = line_top + half_leading + ascent;
         let line_left = center_x - run / 2.0;
@@ -207,9 +230,10 @@ pub fn render<'a>(
             .zip(&measured.families[start..end])
         {
             let text = layout::escape_xml(&ov.text_case.apply(&word.display));
-            let fill = match word_fill(now_ms, word) {
-                PRIMARY => ov.primary.as_str(),
-                f => f,
+            let fill = if word_being(now_ms, word) {
+                highlight.as_str()
+            } else {
+                ov.primary.as_str()
             };
             let family_attr = if *family == FONT {
                 String::new()
@@ -331,8 +355,8 @@ mod tests {
         };
         let segments = pipeline::collect_segments(&doc, &SPLIT);
         let words = &segments[0].words;
-        assert_eq!(word_fill(words[0].start_ms, &words[0]), HIGHLIGHT);
-        assert_eq!(word_fill(words[0].end_ms, &words[0]), PRIMARY);
-        assert_eq!(word_fill(words[0].start_ms, &words[1]), PRIMARY);
+        assert!(word_being(words[0].start_ms, &words[0]));
+        assert!(!word_being(words[0].end_ms, &words[0]));
+        assert!(!word_being(words[0].start_ms, &words[1]));
     }
 }

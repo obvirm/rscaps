@@ -30,7 +30,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from selene's style.scss + template.json) ─────────────
@@ -157,33 +157,38 @@ fn plate_box(
 
 /// CSS `border-radius` clamping: the radii scale uniformly until they fit
 /// each edge, so a 2em corner on a plate shorter than 4em becomes a
-/// capsule.
-fn corner_radius(fs: f32, w: f32, h: f32) -> f32 {
-    (CORNER_RADIUS_EM * fs).min(w / 2.0).min(h / 2.0)
+/// capsule. The `corner-radius` control supplies the em radius.
+fn corner_radius(fs: f32, w: f32, h: f32, st: &style::Style) -> f32 {
+    (st.f32("corner-radius", CORNER_RADIUS_EM) * fs)
+        .min(w / 2.0)
+        .min(h / 2.0)
 }
 
 /// The six `.segment::after` inset hairlines over a plate box `(x, y,
 /// w, h)`, each `0.04em`, emitted in CSS paint order — the box-shadow
 /// list reversed, so the first-listed inset lands on top: the four white
 /// border bands, the black bottom edge, then the white top highlight.
-/// The caller clips the group to the plate's rounded silhouette.
-fn hairlines_svg(fs: f32, x: f32, y: f32, w: f32, h: f32) -> String {
+/// The caller clips the group to the plate's rounded silhouette. The
+/// `border-opacity` and `highlight-opacity` controls drive the band opacities.
+fn hairlines_svg(fs: f32, x: f32, y: f32, w: f32, h: f32, st: &style::Style) -> String {
     let hair = HAIRLINE_EM * fs;
     let bottom = y + h - hair;
     let right = x + w - hair;
+    let border_alpha = st.f32("border-opacity", BORDER_ALPHA);
+    let top_alpha = st.f32("highlight-opacity", TOP_HIGHLIGHT_ALPHA);
     format!(
         "<rect x=\"{right}\" y=\"{y}\" width=\"{hair}\" height=\"{h}\" \
-         fill=\"#ffffff\" fill-opacity=\"{BORDER_ALPHA}\"/>\
+         fill=\"#ffffff\" fill-opacity=\"{border_alpha}\"/>\
          <rect x=\"{x}\" y=\"{y}\" width=\"{hair}\" height=\"{h}\" \
-         fill=\"#ffffff\" fill-opacity=\"{BORDER_ALPHA}\"/>\
+         fill=\"#ffffff\" fill-opacity=\"{border_alpha}\"/>\
          <rect x=\"{x}\" y=\"{bottom}\" width=\"{w}\" height=\"{hair}\" \
-         fill=\"#ffffff\" fill-opacity=\"{BORDER_ALPHA}\"/>\
+         fill=\"#ffffff\" fill-opacity=\"{border_alpha}\"/>\
          <rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{hair}\" \
-         fill=\"#ffffff\" fill-opacity=\"{BORDER_ALPHA}\"/>\
+         fill=\"#ffffff\" fill-opacity=\"{border_alpha}\"/>\
          <rect x=\"{x}\" y=\"{bottom}\" width=\"{w}\" height=\"{hair}\" \
          fill=\"#000000\" fill-opacity=\"{BOTTOM_EDGE_ALPHA}\"/>\
          <rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{hair}\" \
-         fill=\"#ffffff\" fill-opacity=\"{TOP_HIGHLIGHT_ALPHA}\"/>"
+         fill=\"#ffffff\" fill-opacity=\"{top_alpha}\"/>"
     )
 }
 
@@ -206,6 +211,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "selene");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -248,7 +255,7 @@ pub fn render<'a>(
         plate_box(fs, content_w, lines.len(), video_w as f32, video_h as f32);
     let plate_x = ov.anchor_x * video_w as f32 - plate_w / 2.0;
     let plate_y = ov.anchor_y * video_h as f32;
-    let radius = corner_radius(fs, plate_w, plate_h);
+    let radius = corner_radius(fs, plate_w, plate_h, &st);
     let content_left = plate_x + PAD_X_EM * fs;
     let content_top = plate_y + PAD_Y_EM * fs;
 
@@ -266,7 +273,9 @@ pub fn render<'a>(
     // The plate: outer shadow (clipped away from the plate itself, as CSS
     // casts it from an opaque border-box), the tint body, then the six
     // hairlines clipped to the rounded silhouette.
-    let hairlines = hairlines_svg(fs, plate_x, plate_y, plate_w, plate_h);
+    let hairlines = hairlines_svg(fs, plate_x, plate_y, plate_w, plate_h, &st);
+    let tint_bottom = st.f32("tint-opacity", TINT_BOTTOM_ALPHA);
+    let tint_top = tint_bottom * 1.6;
     let plate_svg = format!(
         "<rect x=\"{plate_x}\" y=\"{plate_y}\" width=\"{plate_w}\" height=\"{plate_h}\" \
          rx=\"{radius}\" ry=\"{radius}\" fill=\"#000000\" filter=\"url(#selene-plate)\"/>\
@@ -276,6 +285,7 @@ pub fn render<'a>(
     );
 
     let font_family_attr = stack::svg_font_family(&ov.font_family);
+    let highlight = st.color("highlight-color", PRIMARY);
     let mut words_svg = format!(
         "<g font-family=\"{font_family_attr}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
          letter-spacing=\"{ls_px}\" fill=\"{fill}\">",
@@ -294,13 +304,21 @@ pub fn render<'a>(
             .zip(&measured.families[start..end])
         {
             let text = layout::escape_xml(&ov.text_case.apply(&word.display));
+            // `.word-being-narrated { color: highlight-color }` — the
+            // narrated word lights the highlight, the rest the primary.
+            let fill_attr = if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being()
+            {
+                format!(" fill=\"{highlight}\"")
+            } else {
+                String::new()
+            };
             let family_attr = if *family == FONT {
                 String::new()
             } else {
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#selene-word)\"{family_attr}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#selene-word)\"{fill_attr}{family_attr}>{text}</text>"
             ));
         }
     }
@@ -321,8 +339,8 @@ pub fn render<'a>(
          flood-color=\"#000000\" flood-opacity=\"{WORD_SHADOW_ALPHA}\"/>\
          </filter>\
          <linearGradient id=\"selene-tint\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">\
-         <stop offset=\"0\" stop-color=\"#ffffff\" stop-opacity=\"{TINT_TOP_ALPHA}\"/>\
-         <stop offset=\"1\" stop-color=\"#ffffff\" stop-opacity=\"{TINT_BOTTOM_ALPHA}\"/>\
+         <stop offset=\"0\" stop-color=\"#ffffff\" stop-opacity=\"{tint_top}\"/>\
+         <stop offset=\"1\" stop-color=\"#ffffff\" stop-opacity=\"{tint_bottom}\"/>\
          </linearGradient>\
          <clipPath id=\"selene-clip\">\
          <rect x=\"{plate_x}\" y=\"{plate_y}\" width=\"{plate_w}\" height=\"{plate_h}\" \
@@ -397,6 +415,8 @@ mod tests {
 
     #[test]
     fn plate_wraps_the_line_with_padding_and_clamps_its_radius() {
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "selene");
         let fs = FONT_SIZE_CQH * 1080.0;
         let content_w = 400.0;
         let (x, y, w, h) = plate_box(fs, content_w, 1, 1920.0, 1080.0);
@@ -407,9 +427,9 @@ mod tests {
         assert!((x - (ANCHOR_X_FRAC * 1920.0 - w / 2.0)).abs() < 1e-3, "x {x}");
         // 2.0em asks for more than half the plate's height, so CSS scales
         // the radius down until the corners fit — the plate is a capsule.
-        let r = corner_radius(fs, w, h);
+        let r = corner_radius(fs, w, h, &st);
         assert!((r - h / 2.0).abs() < 1e-3, "radius {r}");
-        assert!(r < CORNER_RADIUS_EM * fs);
+        assert!(r < st.f32("corner-radius", CORNER_RADIUS_EM) * fs);
     }
 
     #[test]
@@ -420,7 +440,9 @@ mod tests {
 
     #[test]
     fn hairlines_paint_all_six_insets_in_css_order() {
-        let svg = hairlines_svg(10.0, 4.0, 8.0, 100.0, 50.0);
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "selene");
+        let svg = hairlines_svg(10.0, 4.0, 8.0, 100.0, 50.0, &st);
         assert_eq!(svg.matches("<rect").count(), 6, "{svg}");
         fn attr<'a>(svg: &'a str, key: &str) -> Vec<&'a str> {
             svg.split(key)

@@ -21,7 +21,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from mira's style.scss + template.json) ───────────────
@@ -157,6 +157,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "mira");
     // Type, metrics and shadows all scale with the segment's length.
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32)
         * font_size_scale(segment_char_count(&segment.words));
@@ -215,13 +217,14 @@ pub fn render<'a>(
     // Shadow geometry (px from em ratios).
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
-    let stroke_px = OUTLINE_THICKNESS_EM * fs;
+    let stroke_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
 
     let font_family_attr = stack::svg_font_family(&ov.font_family);
     let mut words_svg = format!(
         "<g transform=\"translate(0,{ty})\" opacity=\"{opacity}\">\
          <g font-family=\"{font_family_attr}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\" stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
+         letter-spacing=\"{ls_px}\" stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
          paint-order=\"stroke\" filter=\"url(#mira-shadow)\">",
         weight = ov.font_weight,
     );
@@ -242,9 +245,20 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
+            // Tag `.quote` tscaps: kata ber-kutip → warna quote (+ italic).
+            let is_quote = style::word_has_quote(&word.display);
+            let fill = if is_quote {
+                st.color("quote-color", "#e6d647")
+            } else {
+                ov.primary.clone()
+            };
+            let italic_attr = if is_quote && st.bool("quote-italic", true) {
+                " font-style=\"italic\""
+            } else {
+                ""
+            };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}>{text}</text>",
-                fill = ov.primary,
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{italic_attr}>{text}</text>",
             ));
         }
     }

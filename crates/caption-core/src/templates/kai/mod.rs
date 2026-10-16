@@ -25,7 +25,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from kai's style.scss + template.json) ───────────────
@@ -124,10 +124,13 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
 /// `tscaps:chromatic-split` recipe (ghost B at (−x,−y), ghost A at
 /// (+x,+y)) and the `tscaps:outline` recipe as the edge ring, merged
 /// under SourceGraphic. Ghosts are pushed at px offsets resolved from em.
-fn filter_defs(fs: f32) -> String {
-    let sx = SPLIT_X_EM * fs;
-    let sy = SPLIT_Y_EM * fs;
-    let edge = EDGE_THICKNESS_EM * fs;
+fn filter_defs(fs: f32, st: &style::Style) -> String {
+    let sx = st.f32("split-x", SPLIT_X_EM) * fs;
+    let sy = st.f32("split-y", SPLIT_Y_EM) * fs;
+    let edge = st.f32("outline-thickness", EDGE_THICKNESS_EM) * fs;
+    let split_color_a = st.color("split-color-a", SPLIT_COLOR_A);
+    let split_color_b = st.color("split-color-b", SPLIT_COLOR_B);
+    let outline_color = st.color("outline-color", EDGE_COLOR);
     // Ghost B mirrors the shift: the recipe writes `-{x}em`/`-{y}em`.
     let nsx = -sx;
     let nsy = -sy;
@@ -135,14 +138,14 @@ fn filter_defs(fs: f32) -> String {
         "<filter id=\"kai-chroma-active\" x=\"-30%\" y=\"-40%\" width=\"160%\" height=\"180%\" \
          color-interpolation-filters=\"sRGB\">\
          <feOffset in=\"SourceAlpha\" dx=\"{nsx}\" dy=\"{nsy}\" result=\"split-b-shape\"/>\
-         <feFlood flood-color=\"{SPLIT_COLOR_B}\" result=\"split-b-ink\"/>\
+         <feFlood flood-color=\"{split_color_b}\" result=\"split-b-ink\"/>\
          <feComposite in=\"split-b-ink\" in2=\"split-b-shape\" operator=\"in\" result=\"split-b\"/>\
          <feOffset in=\"SourceAlpha\" dx=\"{sx}\" dy=\"{sy}\" result=\"split-a-shape\"/>\
-         <feFlood flood-color=\"{SPLIT_COLOR_A}\" result=\"split-a-ink\"/>\
+         <feFlood flood-color=\"{split_color_a}\" result=\"split-a-ink\"/>\
          <feComposite in=\"split-a-ink\" in2=\"split-a-shape\" operator=\"in\" result=\"split-a\"/>\
          <feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"{edge}\" \
          result=\"edge-shape\"/>\
-         <feFlood flood-color=\"{EDGE_COLOR}\" result=\"edge-ink\"/>\
+         <feFlood flood-color=\"{outline_color}\" result=\"edge-ink\"/>\
          <feComposite in=\"edge-ink\" in2=\"edge-shape\" operator=\"in\" result=\"edge\"/>\
          <feMerge>\
          <feMergeNode in=\"split-b\"/>\
@@ -173,6 +176,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "kai");
+    let highlight = st.color("highlight-color", HIGHLIGHT);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -252,7 +258,7 @@ pub fn render<'a>(
                     let jx = jx_em * fs;
                     let jy = jy_em * fs;
                     words_svg.push_str(&format!(
-                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{HIGHLIGHT}\" \
+                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{highlight}\" \
                          filter=\"url(#kai-chroma-active)\" transform=\"translate({jx},{jy})\"{family_attr}>\
                          {text}</text>"
                     ));
@@ -261,7 +267,7 @@ pub fn render<'a>(
                     // Same lit rule as Being — the jitter has finished and
                     // rests at (0, 0); the filter and the white stay.
                     words_svg.push_str(&format!(
-                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{HIGHLIGHT}\" \
+                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{highlight}\" \
                          filter=\"url(#kai-chroma-active)\"{family_attr}>{text}</text>"
                     ));
                 }
@@ -283,7 +289,7 @@ pub fn render<'a>(
         );
     }
 
-    let defs = filter_defs(fs);
+    let defs = filter_defs(fs, &st);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -339,7 +345,9 @@ mod tests {
     #[test]
     fn chroma_active_splits_both_ways_and_rings_the_glyph_last() {
         let fs = 50.0;
-        let defs = filter_defs(fs);
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "kai");
+        let defs = filter_defs(fs, &st);
         assert!(defs.contains("id=\"kai-chroma-active\""), "{defs}");
         assert!(
             defs.contains("x=\"-30%\" y=\"-40%\" width=\"160%\" height=\"180%\""),

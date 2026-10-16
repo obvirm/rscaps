@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from sara's style.scss + template.json) ───────────────
@@ -119,6 +119,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "sara");
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -163,7 +166,7 @@ pub fn render<'a>(
     let shade_dx = SHADE_DX_EM * fs;
     let shade_dy = SHADE_DY_EM * fs;
     let shade_std = SHADE_BLUR_EM * fs / 2.0;
-    let stroke_px = OUTLINE_THICKNESS_EM * fs;
+    let stroke_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
 
     // Each word fades in on its own narration clock.
     let fade = recipes::FadeIn::with(0.0, ov.duration_or(FADE_DURATION_S));
@@ -198,7 +201,7 @@ pub fn render<'a>(
             let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
-                 stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{stroke_px}\" \
+                 stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\" opacity=\"{opacity}\">{text}</text>",
                 fill = ov.primary,
             ));
@@ -226,7 +229,7 @@ pub fn render<'a>(
         >
             <defs>
                 <filter id="sara-shadow" x="-30%" y="-60%" width="180%" height="260%">
-                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={bloom_std} flood-color={PRIMARY} flood-opacity={1.0} result="s1"/>
+                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={bloom_std} flood-color={ov.primary.as_str()} flood-opacity={1.0} result="s1"/>
                     <feDropShadow in="s1" dx={0.0} dy={0.0} stdDeviation={haze_std} flood-color={HAZE_COLOR} flood-opacity={1.0} result="s2"/>
                     <feDropShadow in="s2" dx={shade_dx} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={SHADE_ALPHA}/>
                 </filter>

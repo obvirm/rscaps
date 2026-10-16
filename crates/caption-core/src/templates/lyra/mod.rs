@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{layout, overrides, pipeline, recipes, stack};
+use super::{layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from lyra's style.scss + template.json) ───────────────
@@ -170,6 +170,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "lyra");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -213,18 +215,27 @@ pub fn render<'a>(
     // Shimmer: the sweep runs on the segment's own clock.
     let phase = shimmer_phase((now_ms - segment.start_ms) / 1000.0);
     let box_left = gradient_box_left(video_w as f32, phase);
+    let gradient_angle = st.f32("gradient-angle", GRADIENT_ANGLE_DEG);
     let ((gx1, gy1), (gx2, gy2)) = gradient_line(
         box_left,
         block_top,
         BACKGROUND_SIZE_W * video_w as f32,
         block_h,
-        GRADIENT_ANGLE_DEG,
+        gradient_angle,
     );
-    let stops: String = GRADIENT_COLORS
+    // The foil's four hues (control 1 wraps back around as the 5th stop).
+    let grad_colors = [
+        st.color("gradient-color-1", GRADIENT_COLORS[0]),
+        st.color("gradient-color-2", GRADIENT_COLORS[1]),
+        st.color("gradient-color-3", GRADIENT_COLORS[2]),
+        st.color("gradient-color-4", GRADIENT_COLORS[3]),
+    ];
+    let stops: String = grad_colors
         .iter()
+        .chain(grad_colors.iter().take(1))
         .enumerate()
         .map(|(i, color)| {
-            let offset = i as f32 / (GRADIENT_COLORS.len() - 1) as f32;
+            let offset = i as f32 / (grad_colors.len()) as f32;
             format!("<stop offset=\"{offset}\" stop-color=\"{color}\"/>")
         })
         .collect();
@@ -236,6 +247,9 @@ pub fn render<'a>(
     let shade1_dy = SHADE1_DY_EM * fs;
     let shade1_std = SHADE1_BLUR_EM * fs / 2.0;
     let shade2_std = SHADE2_BLUR_EM * fs / 2.0;
+    // `filter: … saturate(saturation)` — CSS applies it after the drop
+    // shadows, so the feColorMatrix sits last in the chain.
+    let saturation = st.f32("saturation", 1.0);
 
     let font_family_attr = stack::svg_font_family(&ov.font_family);
     let mut words_svg = format!(
@@ -289,7 +303,8 @@ pub fn render<'a>(
                 {gradient_svg}
                 <filter id="lyra-shade" x="-30%" y="-30%" width="160%" height="170%">
                     <feDropShadow dx={0.0} dy={shade1_dy} stdDeviation={shade1_std} flood-color="#000000" flood-opacity={SHADE1_OPACITY} result="s1"/>
-                    <feDropShadow in="s1" dx={0.0} dy={0.0} stdDeviation={shade2_std} flood-color="#000000" flood-opacity={SHADE2_OPACITY}/>
+                    <feDropShadow in="s1" dx={0.0} dy={0.0} stdDeviation={shade2_std} flood-color="#000000" flood-opacity={SHADE2_OPACITY} result="s2"/>
+                    <feColorMatrix in="s2" type="saturate" values={saturation}/>
                 </filter>
             </defs>
             {words_svg}

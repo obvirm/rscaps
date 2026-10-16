@@ -11,7 +11,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from lena's style.scss + template.json) ───────────────
@@ -180,12 +180,14 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "lena");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
-    let pad_x = PAD_X_EM * fs;
-    let pad_y = PAD_Y_EM * fs;
+    let pad_x = st.f32("bg-padding-x", PAD_X_EM) * fs;
+    let pad_y = st.f32("bg-padding-y", PAD_Y_EM) * fs;
     let box_h = line_h + 2.0 * pad_y;
     let gap = ov.line_spacing_em * fs;
     let script_stack = stack::Stack::for_latin(FONT);
@@ -223,8 +225,10 @@ pub fn render<'a>(
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
 
-    let radius = RADIUS_EM * fs;
+    let radius = st.f32("bg-radius", RADIUS_EM) * fs;
     let radius_bl = RADIUS_BL_EM * fs;
+    let bg = st.color("bg-color", BG);
+    let show_tail = st.bool("show-tail", true);
     let shade_dy = SHADE_DY_EM * fs;
     let shade_std = SHADE_BLUR_EM * fs / 2.0;
     let rise = recipes::RiseIn::custom(
@@ -274,10 +278,10 @@ pub fn render<'a>(
             radius_bl,
         );
         lines_svg
-            .push_str(&format!("<path d=\"{d}\" fill=\"{BG}\" filter=\"url(#lena-shade)\"/>"));
-        if line_idx == last_line {
+            .push_str(&format!("<path d=\"{d}\" fill=\"{bg}\" filter=\"url(#lena-shade)\"/>"));
+        if line_idx == last_line && show_tail {
             lines_svg.push_str(&format!(
-                "<polygon points=\"{}\" fill=\"{BG}\"/>",
+                "<polygon points=\"{}\" fill=\"{bg}\"/>",
                 tail_points(block_left, box_bottom, fs)
             ));
         }

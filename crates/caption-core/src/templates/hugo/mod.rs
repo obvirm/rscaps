@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from hugo's style.scss + template.json) ───────────────
@@ -116,6 +116,10 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "hugo");
+    let outline_thickness_em = st.f32("outline-thickness", OUTLINE_THICKNESS_EM);
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -196,10 +200,10 @@ pub fn render<'a>(
                     format!(" font-family=\"{family}\"")
                 };
                 let text = layout::escape_xml(&ov.text_case.apply(&word.display));
-                let stroke = if OUTLINE_THICKNESS_EM > 0.0 {
+                let stroke = if outline_thickness_em > 0.0 {
                     format!(
-                        " stroke=\"{OUTLINE_COLOR}\" stroke-width=\"{}\" paint-order=\"stroke\"",
-                        OUTLINE_THICKNESS_EM * fs
+                        " stroke=\"{outline_color}\" stroke-width=\"{}\" paint-order=\"stroke\"",
+                        outline_thickness_em * fs
                     )
                 } else {
                     String::new()

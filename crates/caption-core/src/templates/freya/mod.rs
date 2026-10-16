@@ -23,7 +23,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from freya's style.scss + template.json) ─────────────
@@ -116,14 +116,15 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
 
 /// The `glitch-outline` filter body: the `tscaps:outline` recipe at the
 /// control-default thickness, merged under SourceGraphic.
-fn outline_filter_defs(fs: f32) -> String {
-    let radius = OUTLINE_THICKNESS_EM * fs;
+fn outline_filter_defs(fs: f32, st: &style::Style) -> String {
+    let radius = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
     format!(
         "<filter id=\"freya-glitch-outline\" x=\"-15%\" y=\"-20%\" width=\"130%\" height=\"140%\" \
          color-interpolation-filters=\"sRGB\">\
          <feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"{radius}\" \
          result=\"outline-shape\"/>\
-         <feFlood flood-color=\"{OUTLINE_COLOR}\" result=\"outline-ink\"/>\
+         <feFlood flood-color=\"{outline_color}\" result=\"outline-ink\"/>\
          <feComposite in=\"outline-ink\" in2=\"outline-shape\" operator=\"in\" \
          result=\"outline\"/>\
          <feMerge><feMergeNode in=\"outline\"/><feMergeNode in=\"SourceGraphic\"/></feMerge>\
@@ -138,13 +139,16 @@ fn outline_filter_defs(fs: f32) -> String {
 /// (fresh integer per output frame in tscaps). Region per filters.svg
 /// (no explicit colour-interpolation — the recipe's linearRGB default
 /// stays).
-fn glitch_filter_defs(fs: f32, tick: i32) -> String {
-    let sx = SPLIT_X_EM * fs;
+fn glitch_filter_defs(fs: f32, tick: i32, st: &style::Style) -> String {
+    let sx = st.f32("split-x", SPLIT_X_EM) * fs;
     let nsx = -sx;
-    let scale = DISPLACEMENT_AMOUNT;
+    let scale = st.f32("displacement-amount", DISPLACEMENT_AMOUNT);
+    let displacement_frequency = st.f32("displacement-frequency", DISPLACEMENT_FREQUENCY);
+    let split_a = st.color("split-color-a", SPLIT_COLOR_A);
+    let split_b = st.color("split-color-b", SPLIT_COLOR_B);
     format!(
         "<filter id=\"freya-glitch\" x=\"-20%\" y=\"-15%\" width=\"140%\" height=\"130%\">\
-         <feTurbulence type=\"fractalNoise\" baseFrequency=\"0.02 {DISPLACEMENT_FREQUENCY}\" \
+         <feTurbulence type=\"fractalNoise\" baseFrequency=\"0.02 {displacement_frequency}\" \
          numOctaves=\"2\" seed=\"{tick}\" result=\"rawNoise\"/>\
          <feComponentTransfer in=\"rawNoise\" result=\"noise\">\
          <feFuncR type=\"discrete\" tableValues=\"0 0.35 0.65 1\"/>\
@@ -155,10 +159,10 @@ fn glitch_filter_defs(fs: f32, tick: i32) -> String {
          <feDisplacementMap in=\"SourceAlpha\" in2=\"noise\" scale=\"{scale}\" \
          xChannelSelector=\"R\" yChannelSelector=\"G\" result=\"displacedAlpha\"/>\
          <feOffset in=\"displacedAlpha\" dx=\"{sx}\" dy=\"0\" result=\"split-a-shape\"/>\
-         <feFlood flood-color=\"{SPLIT_COLOR_A}\" result=\"split-a-ink\"/>\
+         <feFlood flood-color=\"{split_a}\" result=\"split-a-ink\"/>\
          <feComposite in=\"split-a-ink\" in2=\"split-a-shape\" operator=\"in\" result=\"split-a\"/>\
          <feOffset in=\"displacedAlpha\" dx=\"{nsx}\" dy=\"0\" result=\"split-b-shape\"/>\
-         <feFlood flood-color=\"{SPLIT_COLOR_B}\" result=\"split-b-ink\"/>\
+         <feFlood flood-color=\"{split_b}\" result=\"split-b-ink\"/>\
          <feComposite in=\"split-b-ink\" in2=\"split-b-shape\" operator=\"in\" result=\"split-b\"/>\
          <feMerge>\
          <feMergeNode in=\"split-a\"/><feMergeNode in=\"split-b\"/>\
@@ -216,6 +220,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "freya");
+    let highlight = st.color("highlight-color", HIGHLIGHT);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -291,7 +298,7 @@ pub fn render<'a>(
             let fill = if super::state::word_narration(now_ms, word.start_ms, word.end_ms)
                 .is_being()
             {
-                HIGHLIGHT
+                highlight.as_str()
             } else {
                 ov.primary.as_str()
             };
@@ -349,8 +356,8 @@ pub fn render<'a>(
 
     let defs = format!(
         "{}{}",
-        outline_filter_defs(fs),
-        glitch_filter_defs(fs, tick)
+        outline_filter_defs(fs, &st),
+        glitch_filter_defs(fs, tick, &st)
     );
     fframes::svgr!(
         <svg
@@ -415,7 +422,9 @@ mod tests {
     #[test]
     fn outline_ring_dilates_by_the_control_default_and_rides_every_keyframe() {
         let fs = 60.5; // 5.5cqh at 1100px
-        let defs = outline_filter_defs(fs);
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "freya");
+        let defs = outline_filter_defs(fs, &st);
         assert!(defs.contains("id=\"freya-glitch-outline\""), "{defs}");
         assert!(
             defs.contains("x=\"-15%\" y=\"-20%\" width=\"130%\" height=\"140%\""),
@@ -438,7 +447,9 @@ mod tests {
     #[test]
     fn glitch_filter_quantises_and_displaces_then_stacks_the_split_behind() {
         let fs = 60.5;
-        let defs = glitch_filter_defs(fs, 42);
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "freya");
+        let defs = glitch_filter_defs(fs, 42, &st);
         assert!(defs.contains("id=\"freya-glitch\""), "{defs}");
         assert!(
             defs.contains("baseFrequency=\"0.02 0.75\""),

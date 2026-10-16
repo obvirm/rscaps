@@ -31,7 +31,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from milo's style.scss + template.json) ───────────────
@@ -249,6 +249,18 @@ fn is_breathing(segments: &[pipeline::WindowedSegment], index: usize) -> bool {
     start - previous_end >= PAUSE_GAP_MS
 }
 
+/// Control value (tscaps fontStack id, e.g. "anton") → the display name
+/// the SVG emits. Known ids map to the embedded face names; unknown ids
+/// pass through (svg_font_family) so the browser can resolve a
+/// user-installed @font-face — native measurement stays on Anton.
+fn big_word_family(id: &str) -> String {
+    match id {
+        "anton" => ANTON_FONT.to_string(),
+        "playfair-display" => "Playfair Display".to_string(),
+        other => stack::svg_font_family(other),
+    }
+}
+
 // ── render ────────────────────────────────────────────────────────────────
 
 pub fn render<'a>(
@@ -269,6 +281,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "milo");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let gap = ov.word_spacing_em * fs;
     let margin = gap / 2.0; // the column-gap rides each word as a half-margin
@@ -461,6 +475,8 @@ pub fn render<'a>(
     // and `em` in a shadow resolves against that word's own font size.
     let shadow_dy = SHADOW_DY_EM * plain_fs;
     let shadow_std = SHADOW_BLUR_EM * plain_fs / 2.0;
+    let blend = st.color("blend-color", BLEND);
+    let big_font = big_word_family(&st.str("big-word-font-family", "anton"));
 
     let mut words_svg = format!(
         "<g font-family=\"{font}\" font-weight=\"{weight}\">",
@@ -494,7 +510,7 @@ pub fn render<'a>(
         if anchor {
             let ls_px = BIG_LETTER_SPACING_EM * wfs;
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{y}\" fill=\"{BLEND}\" font-family=\"{ANTON_FONT}\" \
+                "<text x=\"{x}\" y=\"{y}\" fill=\"{blend}\" font-family=\"{big_font}\" \
                  font-weight=\"{ANTON_FONT_WEIGHT}\" font-size=\"{wfs}\" \
                  letter-spacing=\"{ls_px}\" opacity=\"{opacity}\" \
                  transform=\"translate({tx} {ty})\">{text}</text>"

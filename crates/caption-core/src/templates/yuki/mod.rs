@@ -7,7 +7,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{layout, overrides, pipeline, recipes, stack};
+use super::{layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from yuki's style.scss + template.json) ───────────────
@@ -106,6 +106,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "yuki");
+    let outline_color = st.color("outline-color", OUTLINE_COLOR);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let margin = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
@@ -148,7 +151,7 @@ pub fn render<'a>(
         fade.eval((now_ms - segment.start_ms) / 1000.0)
     };
 
-    let outline_px = OUTLINE_THICKNESS_EM * fs;
+    let outline_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
 
@@ -176,7 +179,7 @@ pub fn render<'a>(
                 format!(" font-family=\"{family}\"")
             };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} stroke=\"{OUTLINE_COLOR}\" \
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} stroke=\"{outline_color}\" \
                  stroke-width=\"{outline_px}\" paint-order=\"stroke\" filter=\"url(#yuki-shadow)\">\
                  {text}</text>",
                 fill = ov.primary,

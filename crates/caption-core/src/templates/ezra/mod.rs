@@ -36,7 +36,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from ezra's style.scss + template.json) ───────────────
@@ -60,7 +60,6 @@ const PRIMARY: &str = "#f5f0d0"; // primary-color default
 const SHADOW_DY_EM: f32 = 0.03;
 const SHADOW_BLUR_EM: f32 = 0.25;
 const CONTRAST_SHADOW: f32 = 0.25; // --tscaps-contrast-shadow default
-const CONTRAST_ALPHA: f32 = CONTRAST_SHADOW * 0.85; // 0.2125
 const CONTRAST_BLUR_EM: f32 = 0.5;
 // .word scale-in($from: 1.05, $from-opacity: 0, $duration: 0.12s,
 // $easing: cubic-bezier(0.25, 0.46, 0.45, 0.94)) — straight settle.
@@ -269,6 +268,19 @@ fn big_font_size(fs: f32, video_w: f32, line_width_em: f32) -> f32 {
     (BIG_FILL_FRAC * video_w / line_width_em).clamp(BIG_SIZE_MIN_EM * fs, BIG_SIZE_MAX_EM * fs)
 }
 
+/// Control value (tscaps fontStack id, e.g. "playfair-display") → the
+/// display name the SVG emits. Known ids map to the embedded face
+/// names; unknown ids pass through (svg_font_family) so the browser can
+/// resolve a user-installed @font-face — native measurement stays on
+/// the embedded Playfair face.
+fn big_word_family(id: &str) -> String {
+    match id {
+        "playfair-display" => BIG_FONT.to_string(),
+        "anton" => "Anton".to_string(),
+        other => stack::svg_font_family(other),
+    }
+}
+
 // ── render ────────────────────────────────────────────────────────────────
 
 pub fn render<'a>(
@@ -292,6 +304,8 @@ pub fn render<'a>(
     let w = video_w as f32;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "ezra");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -435,7 +449,6 @@ pub fn render<'a>(
                 false,
             );
             let big_adv = big_measured.widths[0];
-            let big_family = big_measured.families[0];
             // The line's width includes the word's own margins, as the
             // DOM measurer's `getBoundingClientRect` would.
             let big_em = (big_adv + 2.0 * margin) / fs;
@@ -464,10 +477,16 @@ pub fn render<'a>(
             } else {
                 String::new()
             };
+            let big_font = big_word_family(&st.str("big-word-font-family", "playfair-display"));
+            let italic_attr = if st.bool("big-word-italic", false) {
+                " font-style=\"italic\""
+            } else {
+                ""
+            };
             body.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline_big}\" fill=\"{primary}\" \
-                 font-family=\"{big_family}\" font-weight=\"{BIG_FONT_WEIGHT}\" \
-                 font-size=\"{f_big}\" filter=\"url(#ezra-shadow)\"{transform}{opacity}>\
+                 font-family=\"{big_font}\" font-weight=\"{BIG_FONT_WEIGHT}\" \
+                 font-size=\"{f_big}\" filter=\"url(#ezra-shadow)\"{italic_attr}{transform}{opacity}>\
                  {text}</text>",
                 primary = ov.primary.as_str(),
             ));
@@ -518,13 +537,15 @@ pub fn render<'a>(
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
     let contrast_std = CONTRAST_BLUR_EM * fs / 2.0;
+    // `contrast-shadow` scales the second layer's alpha: 0.25 → 0.2125.
+    let contrast_alpha = st.f32("contrast-shadow", CONTRAST_SHADOW) * 0.85;
     let filter = format!(
         "<filter id=\"ezra-shadow\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" \
          width=\"{}\" height=\"{}\">\
          <feDropShadow dx=\"0\" dy=\"{shadow_dy}\" stdDeviation=\"{shadow_std}\" \
          flood-color=\"#000000\" flood-opacity=\"1.0\" result=\"s1\"/>\
          <feDropShadow in=\"s1\" dx=\"0\" dy=\"0\" stdDeviation=\"{contrast_std}\" \
-         flood-color=\"#000000\" flood-opacity=\"{CONTRAST_ALPHA}\"/></filter>",
+         flood-color=\"#000000\" flood-opacity=\"{contrast_alpha}\"/></filter>",
         block_left - 2.0 * fs,
         block_top - 1.0 * fs,
         (right_extent - block_left) + 4.0 * fs,

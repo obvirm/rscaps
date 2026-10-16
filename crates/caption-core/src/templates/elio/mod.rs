@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state};
+use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (cqh/em values from elio's style.scss) ────────────────
@@ -111,6 +111,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "elio");
+    let highlight = st.color("highlight-color", HIGHLIGHT);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs; // one side of `.word` margin
@@ -186,7 +189,7 @@ pub fn render<'a>(
             };
             let y = baseline + dy_em * fs;
             let fill = if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
-                HIGHLIGHT
+                highlight.as_str()
             } else {
                 ov.primary.as_str()
             };

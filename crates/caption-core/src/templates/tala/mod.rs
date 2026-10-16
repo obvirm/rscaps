@@ -15,7 +15,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from tala's style.scss + template.json) ───────────────
@@ -126,12 +126,14 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "tala");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs / 2.0; // margin: 0 (spacing / 2)
     let line_h = LINE_HEIGHT * fs;
-    let pad_x = TAPE_PAD_X_EM * fs;
-    let pad_y = TAPE_PAD_Y_EM * fs;
+    let pad_x = st.f32("bg-padding-x", TAPE_PAD_X_EM) * fs;
+    let pad_y = st.f32("bg-padding-y", TAPE_PAD_Y_EM) * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
@@ -169,7 +171,8 @@ pub fn render<'a>(
     let block_top = ov.anchor_y * video_h as f32;
     let center_x = ov.anchor_x * video_w as f32;
     let box_h = line_h + 2.0 * pad_y;
-    let tape_r = TAPE_RADIUS_EM * fs;
+    let tape_r = st.f32("bg-radius", TAPE_RADIUS_EM) * fs;
+    let tape_bg = st.color("bg-color", TAPE_BG);
 
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
@@ -192,7 +195,7 @@ pub fn render<'a>(
         // The tape is the line: painted first, glyphs on top of it.
         body.push_str(&format!(
             "<rect x=\"{box_left}\" y=\"{box_top}\" width=\"{box_w}\" height=\"{box_h}\" \
-             rx=\"{tape_r}\" ry=\"{tape_r}\" fill=\"{TAPE_BG}\"/>"
+             rx=\"{tape_r}\" ry=\"{tape_r}\" fill=\"{tape_bg}\"/>"
         ));
 
         // First word starts flush with the padding (its left margin is

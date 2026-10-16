@@ -8,7 +8,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{layout, overrides, pipeline, recipes, stack, state};
+use super::{layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from tito's style.scss + template.json) ───────────────
@@ -113,6 +113,9 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "tito");
+    let highlight = st.color("highlight-color", HIGHLIGHT);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
@@ -191,7 +194,7 @@ pub fn render<'a>(
             let y = baseline + bob.eval(now_ms / 1000.0) * fs;
             let narrated = state::word_narration(now_ms, word.start_ms, word.end_ms).is_being();
             let (fill, filter) = if narrated {
-                (HIGHLIGHT, "tito-cast-glow")
+                (highlight.as_str(), "tito-cast-glow")
             } else {
                 (ov.primary.as_str(), "tito-cast")
             };
@@ -232,7 +235,7 @@ pub fn render<'a>(
                     <feDropShadow in="s1" dx={0.0} dy={cast2_dy} stdDeviation={cast2_std} flood-color={SHADOW_COLOR} flood-opacity={0.45}/>
                 </filter>
                 <filter id="tito-cast-glow" x="-30%" y="-60%" width="160%" height="260%">
-                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={glow_std} flood-color={HIGHLIGHT} flood-opacity={1.0} result="g"/>
+                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={glow_std} flood-color={highlight} flood-opacity={1.0} result="g"/>
                     <feDropShadow in="g" dx={cast1_d} dy={cast1_d} stdDeviation={0.0} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="s1"/>
                     <feDropShadow in="s1" dx={0.0} dy={cast2_dy} stdDeviation={cast2_std} flood-color={SHADOW_COLOR} flood-opacity={0.45}/>
                 </filter>

@@ -14,7 +14,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack, state};
+use super::{effects, layout, overrides, pipeline, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from theo's style.scss + template.json) ──────────────
@@ -106,11 +106,14 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
 
 /// `(fill, opacity)` of a word from its narration state — gold while
 /// spoken, white once spoken, translucent `#d8d8d8` before.
-fn word_paint(now_ms: f32, word: &pipeline::TimedWord) -> (&'static str, f32) {
+fn word_paint(now_ms: f32, word: &pipeline::TimedWord, st: &style::Style) -> (String, f32) {
     match state::word_narration(now_ms, word.start_ms, word.end_ms) {
-        state::Narration::NotYet => (UPCOMING, UPCOMING_OPACITY),
-        state::Narration::Being => (HIGHLIGHT, 1.0),
-        state::Narration::Already => (PRIMARY, 1.0),
+        state::Narration::NotYet => (
+            st.color("upcoming-color", UPCOMING),
+            st.f32("upcoming-opacity", UPCOMING_OPACITY),
+        ),
+        state::Narration::Being => (st.color("highlight-color", HIGHLIGHT), 1.0),
+        state::Narration::Already => (PRIMARY.to_string(), 1.0),
     }
 }
 
@@ -133,12 +136,14 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "theo");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs; // word-layout: full spacing per side
     let line_h = LINE_HEIGHT * fs;
-    let pad_x = PLATE_PAD_X_EM * fs;
-    let pad_y = PLATE_PAD_Y_EM * fs;
+    let pad_x = st.f32("bg-padding-x", PLATE_PAD_X_EM) * fs;
+    let pad_y = st.f32("bg-padding-y", PLATE_PAD_Y_EM) * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
@@ -173,7 +178,9 @@ pub fn render<'a>(
     let ascent = asc_ratio * fs;
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
-    let plate_r = PLATE_RADIUS_EM * fs;
+    let plate_r = st.f32("bg-radius", PLATE_RADIUS_EM) * fs;
+    let plate_bg = st.color("bg-color", PLATE_BG);
+    let plate_opacity = st.f32("bg-opacity", PLATE_OPACITY);
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_sigma = SHADOW_SIGMA_EM * fs;
 
@@ -200,7 +207,7 @@ pub fn render<'a>(
         let plate_top = line_top - pad_y;
         body.push_str(&format!(
             "<rect x=\"{plate_left}\" y=\"{plate_top}\" width=\"{plate_w}\" height=\"{plate_h}\" \
-             rx=\"{plate_r}\" ry=\"{plate_r}\" fill=\"{PLATE_BG}\" fill-opacity=\"{PLATE_OPACITY}\"/>"
+             rx=\"{plate_r}\" ry=\"{plate_r}\" fill=\"{plate_bg}\" fill-opacity=\"{plate_opacity}\"/>"
         ));
 
         let baseline = line_top + half_leading + ascent;
@@ -211,8 +218,8 @@ pub fn render<'a>(
             .zip(&measured.families[start..end])
         {
             let text = layout::escape_xml(&ov.text_case.apply(&word.display));
-            let (fill, opacity) = word_paint(now_ms, word);
-            let fill = if fill == PRIMARY { ov.primary.as_str() } else { fill };
+            let (fill, opacity) = word_paint(now_ms, word, &st);
+            let fill = if fill == PRIMARY { ov.primary.as_str() } else { fill.as_str() };
             let family_attr = if *family == FONT {
                 String::new()
             } else {
@@ -300,10 +307,12 @@ mod tests {
 
     #[test]
     fn word_paint_follows_the_narration_state() {
+        let params = crate::CaptionParams::default();
+        let st = style::Style::of(&params, "theo");
         let word = pipeline::TimedWord::new("go", 100.0, 200.0);
-        assert_eq!(word_paint(50.0, &word), (UPCOMING, 0.6));
-        assert_eq!(word_paint(150.0, &word), (HIGHLIGHT, 1.0));
-        assert_eq!(word_paint(250.0, &word), (PRIMARY, 1.0));
+        assert_eq!(word_paint(50.0, &word, &st), (UPCOMING.to_string(), 0.6));
+        assert_eq!(word_paint(150.0, &word, &st), (HIGHLIGHT.to_string(), 1.0));
+        assert_eq!(word_paint(250.0, &word, &st), (PRIMARY.to_string(), 1.0));
     }
 
     #[test]

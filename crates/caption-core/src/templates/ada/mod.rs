@@ -13,7 +13,7 @@
 use fframes::{FFramesContext, Svgr};
 use std::sync::OnceLock;
 
-use super::{effects, layout, overrides, pipeline, stack};
+use super::{effects, layout, overrides, pipeline, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (cqh/em values from ada's style.scss) ──────────────────
@@ -122,6 +122,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "ada");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs; // one side of `.word` margin
@@ -154,11 +156,13 @@ pub fn render<'a>(
     let baseline = seg_top + half_leading + ascent;
 
     // Plate: `.line::before` inset (−padY, −padX), radius, drop shadow.
-    let plate_x = line_left - PLATE_PAD_X_EM * fs;
-    let plate_y = seg_top - PLATE_PAD_Y_EM * fs;
-    let plate_w = line_w + 2.0 * PLATE_PAD_X_EM * fs;
-    let plate_h = line_h + 2.0 * PLATE_PAD_Y_EM * fs;
-    let plate_r = PLATE_RADIUS_EM * fs;
+    let pad_x = st.f32("bg-padding-x", PLATE_PAD_X_EM);
+    let pad_y = st.f32("bg-padding-y", PLATE_PAD_Y_EM);
+    let plate_x = line_left - pad_x * fs;
+    let plate_y = seg_top - pad_y * fs;
+    let plate_w = line_w + 2.0 * pad_x * fs;
+    let plate_h = line_h + 2.0 * pad_y * fs;
+    let plate_r = st.f32("bg-radius", PLATE_RADIUS_EM) * fs;
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0; // CSS blur radius → σ
 
@@ -169,11 +173,12 @@ pub fn render<'a>(
         font = ov.font_family,
         weight = ov.font_weight,
     );
+    let upcoming = st.color("upcoming-color", UPCOMING);
     for ((word, &x), family) in segment.words.iter().zip(&xs).zip(&measured.families) {
         let fill = if now_ms >= word.start_ms {
             ov.primary.as_str()
         } else {
-            UPCOMING
+            upcoming.as_str()
         };
         let family_attr = if *family == FONT_POPPINS {
             String::new()
@@ -199,7 +204,7 @@ pub fn render<'a>(
                     <feDropShadow dx="0" dy={shadow_dy} stdDeviation={shadow_std} flood-color="#000000" flood-opacity={SHADOW_ALPHA}/>
                 </filter>
             </defs>
-            <rect x={plate_x} y={plate_y} width={plate_w} height={plate_h} rx={plate_r} ry={plate_r} fill={BG} filter="url(#ada-plate-shadow)"/>
+            <rect x={plate_x} y={plate_y} width={plate_w} height={plate_h} rx={plate_r} ry={plate_r} fill={st.color("bg-color", BG)} filter="url(#ada-plate-shadow)"/>
             {words_svg}
         </svg>
     )

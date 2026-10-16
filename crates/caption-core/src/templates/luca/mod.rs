@@ -18,7 +18,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack};
+use super::{effects, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from luca's style.scss + template.json) ───────────────
@@ -199,6 +199,18 @@ fn anchor_font_size(fs: f32, char_count: usize) -> f32 {
     (ANCHOR_MID_EM * fs / count).clamp(ANCHOR_MIN_EM * fs, ANCHOR_MAX_EM * fs)
 }
 
+/// Control value (tscaps fontStack id, e.g. "anton") → the display name
+/// the SVG emits. Known ids map to the embedded face names; unknown ids
+/// pass through (svg_font_family) so the browser can resolve a
+/// user-installed @font-face — native measurement stays on Anton.
+fn big_word_family(id: &str) -> String {
+    match id {
+        "anton" => ANTON_FONT.to_string(),
+        "playfair-display" => "Playfair Display".to_string(),
+        other => stack::svg_font_family(other),
+    }
+}
+
 // ── render ────────────────────────────────────────────────────────────────
 
 pub fn render<'a>(
@@ -219,6 +231,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
+    // Style controls data-driven (panel Style → template.json defaults).
+    let st = style::Style::of(&doc.params, "luca");
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let gap = ov.word_spacing_em * fs;
     let line_h = LINE_HEIGHT * fs;
@@ -337,6 +351,8 @@ pub fn render<'a>(
 
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
+    let blend = st.color("blend-color", BLEND);
+    let big_font = big_word_family(&st.str("big-word-font-family", "anton"));
 
     let mut words_svg = format!(
         "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\">",
@@ -402,8 +418,8 @@ pub fn render<'a>(
                 };
                 let escaped = layout::escape_xml(text);
                 words_svg.push_str(&format!(
-                    "<text x=\"{content_left}\" y=\"{big_baseline}\" fill=\"{BLEND}\" \
-                     font-family=\"{ANTON_FONT}\" font-weight=\"{ANTON_FONT_WEIGHT}\" \
+                    "<text x=\"{content_left}\" y=\"{big_baseline}\" fill=\"{blend}\" \
+                     font-family=\"{big_font}\" font-weight=\"{ANTON_FONT_WEIGHT}\" \
                      font-size=\"{fs_big}\" letter-spacing=\"{ls_px}\" \
                      opacity=\"{opacity}\">{escaped}</text>"
                 ));
