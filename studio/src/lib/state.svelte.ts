@@ -625,6 +625,25 @@ class StudioState {
     };
   }
 
+  /**
+   * Caption frame sebagai STRING SVG (untuk burn-in via svgr-wasm).
+   * Tidak me-raster ke canvas - raster & komposit terjadi di WASM.
+   */
+  renderFrameSvgLayers(frame: number): { base: string; blend?: string | null } | null {
+    if (!this.wasm) return null;
+    const raw = this.wasm.bridge.render_frame(BigInt(frame));
+    if (!raw) return null;
+    const BLEND_RE = /<text[^>]*style="mix-blend-mode: difference"[^>]*>[\s\S]*?<\/text>/g;
+    if (!raw.includes("mix-blend-mode: difference")) {
+      return { base: raw };
+    }
+    const blendParts = raw.match(BLEND_RE) ?? [];
+    const baseSvg = raw.replace(BLEND_RE, "");
+    const root = raw.match(/^<svg[^>]*>/)?.[0] ?? "<svg>";
+    const blendSvg = `${root}${blendParts.join("")}</svg>`;
+    return { base: baseSvg, blend: blendSvg };
+  }
+
   async renderRaster(): Promise<void> {
     const t0 = performance.now();
     const canvas = await this.renderToCanvas(this.frame, 1920);
@@ -1310,7 +1329,7 @@ class StudioState {
         format: opts.format,
         quality: opts.quality,
         resolution: opts.resolution,
-        renderCaption: (frame) => this.renderFrameLayers(frame, width, height),
+        renderCaption: (frame) => this.renderFrameSvgLayers(frame),
         onProgress: (frac, stage) =>
           this.setStatus(`${stage} ${(frac * 100).toFixed(0)}%`),
       });

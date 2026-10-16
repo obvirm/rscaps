@@ -16,17 +16,24 @@ import {
   type VideoCodec,
   type AudioCodec,
 } from "mediabunny";
+import { burnFrameWasm, initSvgrWasm } from "./svgrwasm";
 
 export type ExportFormat = "mp4" | "webm";
 export type ExportQuality = "low" | "medium" | "high";
 // "keep" preserves the source size; a number is the target height in pixels.
 export type ExportResolution = "keep" | 1080 | 720 | 480;
 
-/** Satu frame caption: layer dasar + (opsional) layer blend `mix-blend-mode:
- * difference` yang harus dikomposit terhadap piksel video. */
+/** Caption frame untuk burn-in: layer dasar + (opsional) layer blend
+ * `mix-blend-mode: difference`. Di WASM path berupa string SVG. */
 export interface CaptionLayers {
   base: CanvasImageSource;
   blend?: CanvasImageSource | null;
+}
+
+/** String SVG caption (WASM path) - diraster & dikomposit di svgr-wasm. */
+export interface CaptionSvgLayers {
+  base: string;
+  blend?: string | null;
 }
 
 export interface BurnInOptions {
@@ -37,8 +44,9 @@ export interface BurnInOptions {
   format: ExportFormat;
   quality: ExportQuality;
   resolution: ExportResolution;
-  /** Renders one caption frame (base + blend layers) at the OUTPUT size. */
-  renderCaption: (frame: number) => Promise<CaptionLayers | null>;
+  /** Renders one caption frame as SVG strings (base + optional blend).
+   *  Diraster & dikomposit di svgr-wasm - TIDAK di-canvas browser. */
+  renderCaption: (frame: number) => Promise<CaptionSvgLayers | null>;
   onProgress?: (fraction: number, stage: string) => void;
 }
 
@@ -114,6 +122,9 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
 
   await output.start();
 
+  // Init svgr-wasm + load font (sekali sebelum loop) - raster di WASM.
+  await initSvgrWasm();
+
   // ── Video: composite caption over each decoded frame ────────────────────
   const durationSec = (await input.computeDuration()) || 0;
   const vSink = new VideoSampleSink(vTrack);
@@ -122,18 +133,21 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
     const t = sample.timestamp;
     ctx.clearRect(0, 0, width, height);
     sample.draw(ctx, 0, 0, width, height);
+
     const cap = await opts.renderCaption(Math.max(0, Math.round(t * opts.fps)));
     if (cap) {
-      ctx.drawImage(cap.base, 0, 0, width, height);
-      if (cap.blend) {
-        // Kata blend (milo/luca `mix-blend-mode: difference`) harus
-        // membalik PIKSEL VIDEO — komposit terhadap frame, bukan kanvas
-        // caption yang transparan (di sana blend = no-op).
-        ctx.save();
-        ctx.globalCompositeOperation = "difference";
-        ctx.drawImage(cap.blend, 0, 0, width, height);
-        ctx.restore();
-      }
+      // Baca piksel video dari canvas (decode WebCodecs → RGBA).
+      const imgData = ctx.getImageData(0, 0, width, height);
+      // Raster + komposit caption DI WASM (svgr-wasm) - bukan canvas browser.
+      const out = await burnFrameWasm(
+        new Uint8Array(imgData.data.buffer, imgData.data.byteOffset, imgData.data.byteLength),
+        cap.base,
+        cap.blend ?? "",
+        width,
+        height,
+      );
+      // Tulis hasil komposit kembali (putImageData = blit murah, bukan raster).
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(out.buffer, out.byteOffset, out.byteLength), width, height), 0, 0);
     }
     await canvasSource.add(t, sample.duration ?? 1 / opts.fps);
     sample.close();
