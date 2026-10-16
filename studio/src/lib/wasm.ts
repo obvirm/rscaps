@@ -101,6 +101,8 @@ function bytesToBase64(bytes: Uint8Array): string {
 export interface LoadedBridge {
   bridge: WasmBridge;
   setDocumentJson: (json: string) => void;
+  /** Daftar kata dokumen aktif (JSON `[WordInfo, …]`) — element inspector. */
+  listWords: () => string;
   parseSubtitle: (text: string, format: string) => string;
   formatSubtitle: (cuesJson: string, format: string) => string;
   /** Template catalog straight from caption-core — never hardcode a copy. */
@@ -119,6 +121,7 @@ export async function loadBridge(): Promise<LoadedBridge> {
     default: (opts?: { module_or_path?: unknown }) => Promise<unknown>;
     create_wasm_bridge: () => WasmBridge;
     set_document_json: (json: string) => void;
+    list_words_json: () => string;
     parse_subtitle: (text: string, format: string) => string;
     format_subtitle: (cuesJson: string, format: string) => string;
     template_catalog_json: () => string;
@@ -153,6 +156,7 @@ export async function loadBridge(): Promise<LoadedBridge> {
   return {
     bridge,
     setDocumentJson: mod.set_document_json,
+    listWords: mod.list_words_json,
     parseSubtitle: mod.parse_subtitle,
     formatSubtitle: mod.format_subtitle,
     templateCatalog: JSON.parse(mod.template_catalog_json()) as TemplateEntry[],

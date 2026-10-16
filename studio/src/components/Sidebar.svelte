@@ -9,11 +9,13 @@
     Orbit,
     Sparkles,
     WrapText,
+    MousePointer2,
     Code2,
   } from "@lucide/svelte";
   import { store } from "../lib/state.svelte";
   import TemplatesPanel from "./panels/TemplatesPanel.svelte";
   import CodePanel from "./panels/CodePanel.svelte";
+  import ElementPanel from "./panels/ElementPanel.svelte";
   import TranscriptPanel from "./panels/TranscriptPanel.svelte";
   import TypographyPanel from "./panels/TypographyPanel.svelte";
   import StylePanel from "./panels/StylePanel.svelte";
@@ -41,10 +43,16 @@
     { id: "motion", label: "Motion", icon: Orbit },
     { id: "effects", label: "Effects", icon: Sparkles },
     { id: "layout", label: "Layout", icon: WrapText },
+    { id: "element", label: "Element", icon: MousePointer2 },
     { id: "code", label: "Code", icon: Code2 },
   ];
 
   const activeLabel = $derived(rail.find((r) => r.id === active)?.label ?? active);
+
+  // Klik kata di preview → buka tab Element supaya seleksi langsung terlihat.
+  $effect(() => {
+    if (store.selectedWord != null) active = "element";
+  });
 </script>
 
 <aside class="sidebar-card">
@@ -70,6 +78,8 @@
         <EffectsPanel />
       {:else if active === "layout"}
         <LayoutPanel />
+      {:else if active === "element"}
+        <ElementPanel />
       {:else if active === "code"}
         <CodePanel />
       {/if}

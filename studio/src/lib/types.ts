@@ -18,6 +18,40 @@ export interface EffectsParams {
   emoji_gap?: number;
 }
 
+/**
+ * Satu override elemen kata (element inspector) — mirror `WordOverride` di
+ * `crates/caption-core/src/lib.rs`. Field opsional: tak ada = inherit
+ * template. `css` menang atas field terstruktur.
+ */
+export interface WordOverride {
+  /** Index kata global (urutan dokumen, stream sebelum effects). */
+  word: number;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  font_family?: string;
+  font_weight?: number;
+  color?: string;
+  /** Skala ukuran relatif base template (1.0 = tak berubah). */
+  size_scale?: number;
+  rotation_deg?: number;
+  /** Anchor pusat kata: fraksi lebar/tinggi frame (absent = layout asli). */
+  h_frac?: number;
+  v_frac?: number;
+  /** `"none"|"fade"|"rise"|"slide"|"scale"|"pop"|"snap"|"wobble"|"flash"`. */
+  animation?: string;
+  animation_duration_s?: number;
+  css?: string;
+}
+
+/** Entry `list_words_json()` — daftar kata dokumen aktif. */
+export interface WordInfo {
+  index: number;
+  text: string;
+  start_ms: number;
+  end_ms: number;
+}
+
 export interface CaptionParams {
   font_family: string;
   font_size: number;
@@ -55,6 +89,8 @@ export interface CaptionParams {
   max_chars?: number;
   // Data-driven style control values, keyed by control id
   style_values?: Record<string, string | number | boolean>;
+  // Element inspector — per-word overrides (absent = no override)
+  element_overrides?: WordOverride[];
 }
 
 export interface CaptionDocument {

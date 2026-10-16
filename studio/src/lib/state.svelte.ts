@@ -14,6 +14,8 @@ import {
   type TemplateEntry,
   type WhisperBackend,
   type WhisperModel,
+  type WordInfo,
+  type WordOverride,
 } from "./types";
 import {
   deleteProject as dbDelete,
@@ -98,6 +100,14 @@ class StudioState {
   /** Preview SVG per template (dokumen mock) untuk galeri. */
   previews = $state<Record<string, string>>({});
   private previewsBuilt = false;
+
+  // ── Element inspector ───────────────────────────────────────────────────
+  /** Index kata global yang terpilih di preview (null = tak ada). */
+  selectedWord = $state<number | null>(null);
+  /** Cache daftar kata dokumen aktif (bridge `list_words_json`). */
+  words = $state<WordInfo[]>([]);
+  /** docText terakhir yang di-sinkronkan ke `words` (kunci invalidasi). */
+  private wordsKey = "";
 
   // ── Home state ──────────────────────────────────────────────────────────
   projects = $state<ProjectMetadata[]>([]);
@@ -748,6 +758,188 @@ class StudioState {
       this.scheduleSave();
     }
     return ok;
+  }
+
+  // ── Element inspector (per-word overrides) ──────────────────────────────
+  /** Pilih (atau lepas, `null`) kata di preview — membuka panel Element. */
+  selectWord(i: number | null): void {
+    this.selectedWord = i;
+    if (i !== null) void this.listWords();
+  }
+
+  /**
+   * Daftar kata dokumen aktif, di-cache per `docText` — refresh otomatis
+   * saat dokumen berubah (cue edit/load), dipanggil lazy: saat panel Element
+   * dibuka dan saat sebuah kata dipilih.
+   */
+  async listWords(): Promise<WordInfo[]> {
+    await this.bootWasm();
+    if (!this.wasm) return this.words;
+    if (this.wordsKey === this.docText) return this.words;
+    try {
+      // Bridge membaca dokumen globalnya — pastikan menunjuk dokumen proyek
+      // (bisa saja masih menunjuk dokumen mock galeri template).
+      this.wasm.setDocumentJson(this.docText);
+      this.words = JSON.parse(this.wasm.listWords()) as WordInfo[];
+      this.wordsKey = this.docText;
+    } catch (err) {
+      console.error(err);
+    }
+    return this.words;
+  }
+
+  /**
+   * Merge patch per-kata ke `params.element_overrides` (entry dengan
+   * `word == index`, dibuat bila belum ada). Field yang di-set
+   * `undefined` / `null` / `""` DIHAPUS (kembali inherit template); bila
+   * tak ada field tersisa, entry ikut dibuang.
+   */
+  setWordOverride(index: number, patch: Partial<WordOverride>): boolean {
+    const ok = this.updateDoc((doc) => {
+      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
+      const list = (doc.params.element_overrides ?? []).map((o) => ({ ...o }));
+      const at = list.findIndex((o) => o.word === index);
+      const merged: Record<string, unknown> = { ...(at >= 0 ? list[at] : { word: index }) };
+      for (const [k, v] of Object.entries(patch)) {
+        if (k === "word") continue;
+        if (v === undefined || v === null || v === "") delete merged[k];
+        else merged[k] = v;
+      }
+      const filled = Object.entries(merged).some(
+        ([k, v]) => k !== "word" && v !== undefined && v !== null && v !== "",
+      );
+      if (filled) {
+        const entry = merged as unknown as WordOverride;
+        if (at >= 0) list[at] = entry;
+        else list.push(entry);
+      } else if (at >= 0) {
+        list.splice(at, 1);
+      }
+      if (list.length > 0) doc.params.element_overrides = list;
+      else delete doc.params.element_overrides;
+    }, "params");
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  /** Buang semua override satu kata (kembali penuh ke template). */
+  clearWordOverride(index: number): boolean {
+    const ok = this.updateDoc((doc) => {
+      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
+      const list = (doc.params.element_overrides ?? []).filter((o) => o.word !== index);
+      if (list.length > 0) doc.params.element_overrides = list;
+      else delete doc.params.element_overrides;
+    }, "params");
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  /**
+   * Klik pada preview → index kata terpilih.
+   *
+   * JUJUR soal mapping: SVG dari engine TIDAK membawa index kata, dan yang
+   * dirender bisa SUBSET stream (segmen lintas-cue + limit baris — mis.
+   * frame 0 pada sample: 3 kata cue-1 + 3 kata pertama cue-2), jadi “`<text>`
+   * ke-n ↔ kata aktif ke-n” salah bila daftar kata aktif dipotong di cue.
+   *
+   * Yang dipakai: ALINEA SEKUENS — daftar label `<text>` (lowercase) dicocokkan
+   * sebagai sub-kurun terurut ke dalam stream `list_words()` (asumsi jujur:
+   * urutan DOM `<text>` = urutan stream, karena engine menggambar per baris
+   * dalam urutan kata). Start-point alignment di-anchoring ke jendela narasi
+   * dekat `t` (dikurangi slack kata) supaya token berulang tidak salah
+   * menempel ke cue lain; bila alinea itu kalah cocok, dipakai alinea dari 0.
+   * Kata yang labelnya tak terbaca (efek teks mengubah isi) → null.
+   */
+  async hitTestWord(
+    clientX: number,
+    clientY: number,
+    root?: Element | null,
+  ): Promise<number | null> {
+    const scope = root ?? document.querySelector(".video-box");
+    const svg = scope?.querySelector("svg");
+    if (!svg) return null;
+
+    // Hit-test bounding box tiap <text> dalam koordinat layar (SVG di-scale
+    // oleh CSS, jadi rect layar sudah memadai — tanpa konversi viewBox).
+    let hit = -1;
+    let bestArea = Infinity;
+    const texts = Array.from(svg.querySelectorAll("text"));
+    texts.forEach((t, i) => {
+      const r = t.getBoundingClientRect();
+      if (r.width <= 0 && r.height <= 0) return;
+      if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return;
+      const area = r.width * r.height;
+      if (area < bestArea) {
+        bestArea = area;
+        hit = i;
+      }
+    });
+    if (hit < 0) return null;
+
+    const words = await this.listWords();
+    if (words.length === 0) return null;
+    const norm = (s: string) => s.trim().toLowerCase();
+    const labels = texts.map((t) => norm(t.textContent ?? ""));
+    if (labels.every((l) => l === "")) return null;
+
+    const tMs = (this.frame / this.fps) * 1000;
+    // Anchor: kata pertama yang jendela narasinya masih dekat `t` (−2s),
+    // dilonggarkan 20 kata ke belakang untuk baris yang masih tampil.
+    const near = words.findIndex((w) => w.end_ms >= tMs - 2000);
+    const from = Math.max(0, (near < 0 ? 0 : near) - 20);
+
+    const align = (start: number): number[] => {
+      const out = new Array<number>(labels.length).fill(-1);
+      let w = Math.max(0, Math.min(start, words.length));
+      for (let i = 0; i < labels.length; i++) {
+        if (labels[i] === "") continue;
+        let j = -1;
+        for (let k = w; k < words.length; k++) {
+          if (norm(words[k].text) === labels[i]) {
+            j = k;
+            break;
+          }
+        }
+        if (j < 0) {
+          for (let k = 0; k < words.length; k++) {
+            if (norm(words[k].text) === labels[i]) {
+              j = k;
+              break;
+            }
+          }
+        }
+        if (j < 0) continue; // label tak terbaca → -1, posisi w tak maju
+        out[i] = j;
+        w = j + 1;
+      }
+      return out;
+    };
+    const matched = (a: number[]) => a.reduce((n, v) => (v >= 0 ? n + 1 : n), 0);
+
+    const anchored = align(from);
+    const fromStart = align(0);
+    const picked = matched(anchored) >= matched(fromStart) ? anchored : fromStart;
+
+    let at = picked[hit];
+    if (at < 0) {
+      // Label tak terbaca → perkirakan dari tetangga terdekat yang ter-map
+      // (urutan DOM = urutan stream, jadi jarak indeks ikut berlaku).
+      let prev = -1;
+      for (let i = hit - 1; i >= 0 && prev < 0; i--) if (picked[i] >= 0) prev = i;
+      let next = -1;
+      for (let i = hit + 1; i < picked.length && next < 0; i++) if (picked[i] >= 0) next = i;
+      if (prev >= 0) at = picked[prev] + (hit - prev);
+      else if (next >= 0) at = picked[next] - (next - hit);
+      else return null;
+    }
+    at = Math.min(Math.max(at, 0), words.length - 1);
+    return words[at].index;
   }
 
   /** Switch template: full re-prepare (new splitters/animation timing). */

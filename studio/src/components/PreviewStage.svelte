@@ -15,6 +15,15 @@
     return () => store.attachVideoElement(null);
   });
 
+  // Element inspector: klik pada preview → hit-test bounding box <text> →
+  // pilih kata (null = klik kosong → lepas seleksi). SVG engine tak punya
+  // index kata, jadi index di-alineasikan sebagai sub-kurun ke stream kata
+  // (lihat komentar jujur di store.hitTestWord).
+  function onStageClick(e: MouseEvent) {
+    const box = e.currentTarget as HTMLElement;
+    void store.hitTestWord(e.clientX, e.clientY, box).then((i) => store.selectWord(i));
+  }
+
   onMount(() => {
     const measure = () => {
       controlsH = controlsEl.offsetHeight + 36;
@@ -31,7 +40,8 @@
   bind:this={regionEl}
   style={`--controls-h: ${controlsH}px; --aspect: ${aspect}; --ratio: ${ratio}`}
 >
-  <div class="video-box">
+  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+  <div class="video-box" onclick={onStageClick}>
     {#if store.videoUrl}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video class="bg-video" bind:this={videoEl} src={store.videoUrl} preload="auto" playsinline
