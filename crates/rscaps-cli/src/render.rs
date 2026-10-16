@@ -165,6 +165,7 @@ pub fn render_video(
             crf: opts.crf,
             preset: opts.preset,
             hw_encode: opts.hw_encode,
+            hwaccel: opts.hwaccel,
         })?;
         on_progress(1, 1);
         return Ok(());

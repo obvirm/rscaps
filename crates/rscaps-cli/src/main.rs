@@ -345,7 +345,7 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
                     .with_context(|| format!("encode {name}.png"))?;
                 std::fs::write(args.out.join(format!("{name}.png")), bytes)?;
             }
-            _ => unreachable!(),
+            other => anyhow::bail!("format tidak dikenal: {other} (pakai svg atau png)"),
         }
         written += 1;
         if written % 60 == 0 {

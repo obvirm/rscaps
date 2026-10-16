@@ -1,12 +1,12 @@
 //! Engine "fframes" — burn-in via pipeline fframes penuh (opsi B).
 //!
 //! `CompositeVideo` = wrapper `CaptionVideo` + frame video sumber sebagai
-//! `<image>` di SVG. fframes mengatur: seek, decode, raster, audio timeline,
-//! encode. CLI hanya membangun MediaProvider + Video lalu memanggil
-//! `fframes::render`.
+//! `<image>` di SVG. fframes mengatur: raster, audio timeline, encode.
+//! Frame video sumber di-pre-decode via ffmpeg (batas memori, lihat
+//! `MAX_PREDECODED_FRAMES`); audio diekstrak ke wav lalu di-mux fframes.
 //!
-//! Batasan v1: frame video sumber di-pre-decode ke memori (cocok untuk clip
-//! pendek / test; long video = butuh chunked rendering, menyusul).
+//! Output selalu ukuran canvas caption (1920×1080); frame sumber di-letterbox
+//! (`preserveAspectRatio="meet"`, bukan slice) supaya asli aspect ratio terjaga.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -14,8 +14,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, ensure};
-use fframes::media::{PreloadedAudioData, VideoMedia};
+use anyhow::{Context, Result, bail, ensure};
+use fframes::media::PreloadedAudioData;
 use fframes::usvgr::PreloadedImageData;
 use fframes::{
     AudioData, AudioMap, AudioTimestamp, AudioTrack, Color, Duration, EncoderOptions,
@@ -26,24 +26,43 @@ use caption_core::{CaptionDocument, CaptionVideo};
 use crate::doc;
 use crate::render::{probe_video, tool_bin};
 
+/// Batas frame yang di-pre-decode ke memori (anti-OOM).
+/// 600 frame ≈ 20 detik @ 30fps. Video lebih panjang → tolak, arahkan ke
+/// `--engine cpu|skia` (PNG-pipe, streaming, tanpa pre-decode).
+const MAX_PREDECODED_FRAMES: usize = 600;
+
 // ── decode frame video sumber → PreloadedImageData ─────────────────────────
 
-/// Decode semua frame video ke RGBA via ffmpeg rawvideo pipe.
-/// Mengembalikan (width, height, frames) di mana tiap frame = PreloadedImageData.
+/// Decode frame video ke RGBA via ffmpeg rawvideo pipe, di-resample ke
+/// `target_fps` supaya index frame cocok dengan `Video::FPS` (CaptionVideo=30).
 fn decode_frames_rgba(
     ffmpeg: &Path,
     video: &Path,
-    width: u32,
-    height: u32,
-    fps_num: u32,
-    fps_den: u32,
+    target_fps: u32,
 ) -> Result<Vec<Arc<PreloadedImageData>>> {
+    // Probe dulu untuk tahu ukuran asli.
+    let ffprobe = tool_bin("ffprobe", None)?;
+    let probe = probe_video(&ffprobe, video)?;
+    let width = probe.width;
+    let height = probe.height;
+    let src_fps = probe.fps_f64();
+    let src_frames = (probe.duration_sec * src_fps).ceil().max(1.0) as usize;
+
+    ensure!(
+        src_frames <= MAX_PREDECODED_FRAMES,
+        "video sumber {src_frames} frame (> {MAX_PREDECODED_FRAMES} batas pre-decode) \
+         ≈ {:.0}s @ {src_fps:.1}fps. Pakai `--engine cpu` atau `--engine skia` \
+         untuk video panjang (PNG-pipe, streaming, tanpa pre-decode).",
+        probe.duration_sec
+    );
+
     let frame_bytes = (width as usize) * (height as usize) * 4;
+    let fps_filter = format!("fps={target_fps}");
     let mut child = Command::new(ffmpeg)
         .args(["-y", "-hide_banner", "-loglevel", "error"])
         .arg("-i")
         .arg(video)
-        .args(["-vf", &format!("fps={fps_num}/{fps_den}")])
+        .args(["-vf", &fps_filter])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -66,21 +85,19 @@ fn decode_frames_rgba(
             }
         }
         if read_total < frame_bytes {
-            break; // EOF - frame terakhir tidak lengkap / habis
+            break; // EOF
         }
         let id = format!("frame_{idx}");
-        frames.push(Arc::new(PreloadedImageData::new(
-            id,
-            width,
-            height,
-            &buf,
-        )));
+        frames.push(Arc::new(PreloadedImageData::new(id, width, height, &buf)));
         idx += 1;
     }
 
     let status = child.wait().context("tunggu ffmpeg")?;
     ensure!(status.success(), "ffmpeg decode exit non-zero");
-    ensure!(!frames.is_empty(), "tidak ada frame ter-decode dari video sumber");
+    ensure!(
+        !frames.is_empty(),
+        "tidak ada frame ter-decode dari video sumber"
+    );
     Ok(frames)
 }
 
@@ -90,7 +107,7 @@ fn decode_frames_rgba(
 /// sumber sebagai `<image>` di belakangnya. Dipakai `fframes::render`.
 pub struct CompositeVideo {
     caption: CaptionVideo,
-    /// Frame video sumber per index (sudah di-scale ke canvas).
+    /// Frame video sumber per index (ukuran asli; di-letterbox via SVG).
     frames: Vec<Arc<PreloadedImageData>>,
     /// Nama file audio di media provider ("" = tanpa audio).
     audio_name: String,
@@ -99,10 +116,11 @@ pub struct CompositeVideo {
 }
 
 impl Video for CompositeVideo {
+    // CaptionVideo = 30fps / 1920×1080. Frame sumber di-resample ke 30fps
+    // saat decode supaya index cocok; aspect ratio dijaga via "meet".
     const FPS: usize = CaptionVideo::FPS;
     const WIDTH: usize = CaptionVideo::WIDTH;
     const HEIGHT: usize = CaptionVideo::HEIGHT;
-    // Background transparan - video frame digambar via <image>, caption di atas.
     const BACKGROUND_COLOR: Color = Color::TRANSPARENT;
 
     fn duration(&self) -> Duration<'_> {
@@ -122,26 +140,26 @@ impl Video for CompositeVideo {
 
     fn render_frame<'a>(&'a self, frame: Frame, ctx: &FFramesContext<'a, '_>) -> Svgr<'a> {
         let idx = frame.index;
-        // Caption SVG dari CaptionVideo (sama persis dengan preview/CLI lama).
         let caption = self.caption.render_frame(frame, ctx);
         let caption_str = caption.to_string();
 
-        // Frame video sumber (kalau ada).
         let Some(img) = self.frames.get(idx) else {
-            // Lewat durasi video sumber: hanya caption.
-            return caption;
+            return caption; // Lewat durasi video sumber: hanya caption.
         };
 
-        // Suntik <image> tepat setelah tag pembuka <svg ...> caption.
-        // href = id PreloadedImageData yang terdaftar di image_data HashMap.
+        // Suntik <image> setelah tag pembuka <svg ...> caption.
+        // Lewati <?xml?>, komentar, dan whitespace dulu supaya posisi sisip
+        // benar meski SVG diawali deklarasi/komentar.
         let w = Self::WIDTH;
         let h = Self::HEIGHT;
+        // "meet" = letterbox (aspect ratio terjaga, ada bar), bukan "slice"
+        // yang memotong. Frame sumber ukuran asli; canvas 1920×1080.
         let image_elem = format!(
-            r#"<image href="{}" x="0" y="0" width="{w}" height="{h}" preserveAspectRatio="xMidYMid slice"/>"#,
+            r#"<image href="{}" x="0" y="0" width="{w}" height="{h}" preserveAspectRatio="xMidYMid meet"/>"#,
             img.id
         );
 
-        if let Some(pos) = caption_str.find('>') {
+        if let Some(pos) = find_svg_open_end(&caption_str) {
             let mut out = String::with_capacity(caption_str.len() + image_elem.len() + 1);
             out.push_str(&caption_str[..=pos]);
             out.push('\n');
@@ -149,21 +167,52 @@ impl Video for CompositeVideo {
             out.push_str(&caption_str[pos + 1..]);
             Svgr::from(out)
         } else {
-            // SVG aneh - fallback caption saja.
             caption
         }
     }
 }
 
-// ── MediaProvider dengan frame video + fonts + audio ───────────────────────
+/// Cari posisi `>` penutup tag pembuka `<svg ...>`, lewati `<?xml?>`, komentar,
+/// dan whitespace di awal. Return index karakter `>` (inklusif).
+fn find_svg_open_end(svg: &str) -> Option<usize> {
+    let bytes = svg.as_bytes();
+    let mut i = 0usize;
+    // Lewati whitespace + proses instruksi XML + komentar di awal.
+    loop {
+        // Skip whitespace.
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None;
+        }
+        if bytes[i..].starts_with(b"<?") {
+            // Instruksi XML: cari "?>"
+            let rest = &svg[i..];
+            let end = rest.find("?>")?;
+            i += end + 2;
+        } else if bytes[i..].starts_with(b"<!--") {
+            // Komentar: cari "-->"
+            let rest = &svg[i..];
+            let end = rest.find("-->")?;
+            i += end + 3;
+        } else {
+            break;
+        }
+    }
+    // Sekarang harus di "<svg". Cari ">" penutup tag pembuka.
+    if !svg[i..].starts_with("<svg") {
+        return None;
+    }
+    svg[i..].find('>').map(|p| i + p)
+}
 
-/// Media provider statis: frame video (sebagai image), font, audio.
-/// `populate_image_source` mengisi HashMap yang dipakai usvg resolve `<image href>`.
+// ── MediaProvider: frame video + fonts + audio ─────────────────────────────
+
 struct FframesMedia {
     images: HashMap<String, Arc<PreloadedImageData>>,
     fonts: Vec<RawFontData>,
     audio: HashMap<String, AudioData<'static>>,
-    videos: HashMap<String, VideoMedia>,
 }
 
 impl std::fmt::Debug for FframesMedia {
@@ -189,8 +238,8 @@ impl MediaProvider<'_> for FframesMedia {
         None
     }
 
-    fn resolve_video(&self, name: &str) -> Option<&VideoMedia> {
-        self.videos.get(name)
+    fn resolve_video(&self, _name: &str) -> Option<&fframes::media::VideoMedia> {
+        None
     }
 
     fn populate_font_source(&self, font_source: &mut dyn fframes::FontSource) {
@@ -223,18 +272,33 @@ pub struct FframesRenderOpts<'a> {
     pub crf: u32,
     pub preset: &'a str,
     pub hw_encode: bool,
+    /// hwaccel untuk decode ffmpeg (sama seperti jalur overlay).
+    pub hwaccel: Option<&'a str>,
 }
 
-/// Burn-in caption ke video via pipeline fframes penuh:
-/// CaptionVideo + frame video sumber → fframes::render (raster + encode + audio).
+/// Guard: hapus tmp dir saat keluar (sukses maupun error).
+struct TmpDirGuard(std::path::PathBuf);
+impl Drop for TmpDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Burn-in caption ke video via pipeline fframes penuh.
 pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     let ffprobe = tool_bin("ffprobe", opts.ffmpeg_dir)?;
     let ffmpeg = tool_bin("ffmpeg", opts.ffmpeg_dir)?;
     let probe = probe_video(&ffprobe, opts.video)?;
-    let fps_num = probe.fps_num.max(1);
-    let fps_den = probe.fps_den.max(1);
     let fps_f64 = probe.fps_f64();
     let video_frames = (probe.duration_sec * fps_f64).ceil().max(1.0) as usize;
+
+    // Tolak video panjang sebelum decode (anti-OOM).
+    ensure!(
+        video_frames <= MAX_PREDECODED_FRAMES,
+        "video sumber {video_frames} frame (> {MAX_PREDECODED_FRAMES} batas pre-decode) \
+         ≈ {:.0}s. Pakai `--engine cpu` atau `--engine skia` untuk video panjang.",
+        probe.duration_sec
+    );
 
     // Dokumen caption menutupi seluruh durasi video.
     let doc: CaptionDocument = doc::build_document(
@@ -246,48 +310,37 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     let caption_frames = doc.duration_frames as usize;
     let duration_frames = caption_frames.max(video_frames);
 
-    // ── decode frame video sumber ke RGBA ──────────────────────────────────
+    // ── decode frame video sumber ke RGBA (resample ke 30fps) ─────────────
+    let target_fps = CompositeVideo::FPS as u32;
     eprintln!(
-        "[fframes] decode {} frame video sumber ({}x{})...",
-        video_frames, probe.width, probe.height
+        "[fframes] decode video sumber ({}x{}, resample ke {target_fps}fps, ≤{MAX_PREDECODED_FRAMES} frame)...",
+        probe.width, probe.height
     );
-    let frames = decode_frames_rgba(
-        &ffmpeg,
-        opts.video,
-        probe.width,
-        probe.height,
-        fps_num,
-        fps_den,
-    )?;
+    let frames = decode_frames_rgba(&ffmpeg, opts.video, target_fps)?;
 
-    // ── kumpulkan font → RawFontData ───────────────────────────────────────
+    // ── font ───────────────────────────────────────────────────────────────
     let mut fonts: Vec<RawFontData> = Vec::new();
     for dir in doc::candidate_font_dirs(opts.fonts) {
-        if !dir.is_dir() {
-            continue;
+        if dir.is_dir() {
+            collect_font_files(&dir, &mut fonts)?;
         }
-        collect_font_files(&dir, &mut fonts)?;
     }
     eprintln!("[fframes] {} file font dimuat", fonts.len());
 
-    // ── audio: ekstrak ke wav sementara bila video punya audio ────────────
+    // ── audio + tmp dir (auto-cleanup via Drop) ────────────────────────────
+    let tmp_dir = std::env::temp_dir().join(format!("rscaps-fframes-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).context("buat tmp dir")?;
+    let _tmp_guard = TmpDirGuard(tmp_dir.clone());
+
     let mut audio_map: HashMap<String, AudioData<'static>> = HashMap::new();
     let mut audio_name = String::new();
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "rscaps-fframes-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&tmp_dir).context("buat tmp dir")?;
     if probe.has_audio {
         let wav_path = tmp_dir.join("audio.wav");
-        extract_audio_wav(&ffmpeg, opts.video, &wav_path)?;
+        extract_audio_wav(&ffmpeg, opts.video, &wav_path, opts.hwaccel)?;
         match PreloadedAudioData::decode_raw_file_stereo(None, &wav_path) {
             Ok(audio_data) => {
                 audio_name = "audio.wav".to_string();
-                audio_map.insert(
-                    audio_name.clone(),
-                    AudioData::Preloaded(audio_data),
-                );
+                audio_map.insert(audio_name.clone(), AudioData::Preloaded(audio_data));
                 eprintln!("[fframes] audio diekstrak → {}", wav_path.display());
             }
             Err(err) => {
@@ -301,26 +354,10 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     for frame in frames.iter() {
         images.insert(frame.id.clone(), frame.clone());
     }
-
-    let mut videos: HashMap<String, VideoMedia> = HashMap::new();
-    let video_key = opts
-        .video
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| "source".to_string());
-    videos.insert(
-        video_key.clone(),
-        VideoMedia {
-            path: opts.video.to_path_buf(),
-            metadata: None,
-        },
-    );
-
     let media = FframesMedia {
         images,
         fonts,
         audio: audio_map,
-        videos,
     };
 
     // ── CompositeVideo ─────────────────────────────────────────────────────
@@ -331,21 +368,23 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
         duration_frames,
     };
 
-    // ── RenderOptions + encoder ────────────────────────────────────────────
+    // ── encoder ────────────────────────────────────────────────────────────
     let crf_str = opts.crf.to_string();
-    let codec_params: &[(&str, &str)] = if opts.hw_encode {
+    let (encoder_name, codec_params): (&str, &[(&str, &str)]) = if opts.hw_encode {
         // NVENC: cq menggantikan crf.
-        &[("cq", &crf_str), ("preset", opts.preset)]
+        (
+            "h264_nvenc",
+            &[("cq", &crf_str), ("preset", opts.preset)],
+        )
     } else {
-        &[("crf", &crf_str), ("preset", opts.preset)]
+        (
+            "libx264",
+            &[("crf", &crf_str), ("preset", opts.preset)],
+        )
     };
 
     let video_encoder = EncoderOptions {
-        preferred_encoder: Some(if opts.hw_encode {
-            "h264_nvenc"
-        } else {
-            "libx264"
-        }),
+        preferred_encoder: Some(encoder_name),
         codec_params: Some(codec_params),
         ..Default::default()
     };
@@ -367,29 +406,40 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     };
 
     eprintln!(
-        "[fframes] render {} frame → {}",
-        duration_frames,
+        "[fframes] render {duration_frames} frame → {}",
         opts.out.display()
     );
 
-    // Backend: Skia GPU bila gpu-skia, selain itu CPU bawaan fframes.
+    // Backend: Skia (Vulkan bila tersedia, fallback CPU) bila gpu-skia;
+    // selain itu CPU bawaan fframes.
     #[cfg(feature = "gpu-skia")]
     {
-        use fframes_skia_renderer::{SkiaCpuCtx, SkiaFFramesRenderer, SkiaPipelineConfig};
-        let ctx = SkiaCpuCtx::new(CompositeVideo::WIDTH, CompositeVideo::HEIGHT);
-        let backend = SkiaFFramesRenderer::new(SkiaPipelineConfig::default(), &ctx);
-        render(opts.out, &video, backend, &render_opts)
-            .map_err(|err| anyhow::anyhow!("fframes render (skia): {err}"))?;
+        use fframes_skia_renderer::{
+            SkiaCpuCtx, SkiaFFramesRenderer, SkiaPipelineConfig, vulkan::SkiaVulkanCtx,
+        };
+        let pipeline = SkiaPipelineConfig::default();
+        let result = match SkiaVulkanCtx::new(CompositeVideo::WIDTH, CompositeVideo::HEIGHT) {
+            Ok(gpu_ctx) => {
+                eprintln!("[fframes] backend: Skia Vulkan (GPU)");
+                let backend = SkiaFFramesRenderer::new(pipeline, &gpu_ctx);
+                render(opts.out, &video, backend, &render_opts)
+            }
+            Err(err) => {
+                eprintln!("[fframes] Vulkan tidak tersedia ({err}) → fallback Skia-CPU");
+                let cpu_ctx = SkiaCpuCtx::new(CompositeVideo::WIDTH, CompositeVideo::HEIGHT);
+                let backend = SkiaFFramesRenderer::new(pipeline, &cpu_ctx);
+                render(opts.out, &video, backend, &render_opts)
+            }
+        };
+        result.map_err(|err| anyhow::anyhow!("fframes render (skia): {err}"))?;
     }
     #[cfg(not(feature = "gpu-skia"))]
     {
+        eprintln!("[fframes] backend: CPU (tiny-skia)");
         let backend = fframes::cpu::CpuRenderingBackend::default();
         render(opts.out, &video, backend, &render_opts)
             .map_err(|err| anyhow::anyhow!("fframes render (cpu): {err}"))?;
     }
-
-    // Bersihkan tmp.
-    let _ = std::fs::remove_dir_all(&tmp_dir);
 
     eprintln!("[fframes] selesai → {}", opts.out.display());
     Ok(())
@@ -409,8 +459,8 @@ fn collect_font_files(dir: &Path, out: &mut Vec<RawFontData>) -> Result<()> {
         if !matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
             continue;
         }
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("baca font {}", path.display()))?;
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("baca font {}", path.display()))?;
         let name = path
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
@@ -423,10 +473,19 @@ fn collect_font_files(dir: &Path, out: &mut Vec<RawFontData>) -> Result<()> {
     Ok(())
 }
 
-/// Ekstrak audio video sumber ke WAV stereo 48kHz.
-fn extract_audio_wav(ffmpeg: &Path, video: &Path, out: &Path) -> Result<()> {
-    let status = Command::new(ffmpeg)
-        .args(["-y", "-hide_banner", "-loglevel", "error"])
+/// Ekstrak audio video sumber ke WAV stereo 48kHz (opsional hwaccel decode).
+fn extract_audio_wav(
+    ffmpeg: &Path,
+    video: &Path,
+    out: &Path,
+    hwaccel: Option<&str>,
+) -> Result<()> {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+    if let Some(ha) = hwaccel {
+        cmd.args(["-hwaccel", ha]);
+    }
+    let status = cmd
         .arg("-i")
         .arg(video)
         .args(["-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
