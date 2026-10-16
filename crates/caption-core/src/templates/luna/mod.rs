@@ -230,12 +230,14 @@ pub fn render<'a>(
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
 
-    // The segment's `overflow: hidden`, plus one zero-height clip per line
-    // that has not flipped open yet.
-    let mut defs = format!(
-        "<clipPath id=\"luna-segment\"><rect x=\"{box_left}\" y=\"{box_top}\" \
-         width=\"{box_w}\" height=\"{box_h}\"/></clipPath>"
-    );
+    // `overflow: hidden` tscaps TIDAK membentuk stacking context (blend
+    // tetap menembus ke video), sedangkan SVG `clip-path` — meski di
+    // elemen blend sendiri — mengISOLASI di Chrome (kata jadi putih
+    // datar). Karena itu clip segment DIHAPUS: di rest posisi kata selalu
+    // di dalam box (tak ada bedanya), hanya semasa rise ~0.18s kata boleh
+    // sedikit menyembul — harga kecil demi `difference` yang benar.
+    // Clip per-baris (zero-height, flip wipe) tetap ada saat animasi.
+    let mut defs = String::new();
     let font_family_attr = stack::svg_font_family(&ov.font_family);
     let mut words_svg = format!(
         "<g font-family=\"{font_family_attr}\" font-weight=\"{weight}\" font-size=\"{fs}\">",
@@ -257,10 +259,16 @@ pub fn render<'a>(
                 ov.duration_or(ANIM_DURATION_S),
             )
         };
-        words_svg.push_str(&format!(
-            "<g transform=\"translate(0 {})\">",
-            word_rise_px(progress, fs, ov.distance_or(WORD_RISE_EM))
-        ));
+        // `transform` membentuk stacking context yang mengISOLASI blend —
+        // saat diam (y=0) jangan emit atributnya, biar `difference`
+        // menembus ke video seperti tscaps (overflow-hidden mereka tak
+        // membentuk stacking context).
+        let rise_px = word_rise_px(progress, fs, ov.distance_or(WORD_RISE_EM));
+        if rise_px != 0.0 {
+            words_svg.push_str(&format!("<g transform=\"translate(0 {rise_px})\">"));
+        } else {
+            words_svg.push_str("<g>");
+        }
         let hidden = !is_revealed(progress);
         if hidden {
             let id = format!("luna-line-{i}");
@@ -282,7 +290,8 @@ pub fn render<'a>(
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr}>{text}</text>",
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
+                 style=\"mix-blend-mode: difference\">{text}</text>",
                 primary = ov.primary.as_str(),
             ));
         }
@@ -293,7 +302,7 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
-    let mut body = format!("<g clip-path=\"url(#luna-segment)\">{words_svg}</g>");
+    let mut body = format!("<g>{words_svg}</g>");
 
     // User rotation wraps the clipped box about its anchor.
     if ov.angle_deg.abs() > f32::EPSILON {

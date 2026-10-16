@@ -311,7 +311,7 @@ fn shaped_advance(family: &str, text: &str, fs: f32) -> Option<f32> {
 /// meniru fallback font sistem di browser (tscaps mengukur via DOM dgn
 /// font sistem; kita offline): ideograph/kana/hangul & bentuk fullwidth
 /// = 1em (lebar penuh, konsisten antar font CJK), Thai/Lao dasar =
-/// 0.55em dengan tanda gabung 0, sisanya 0.5em (konvensi fallback lama).
+/// 0.62em dengan tanda gabung 0, sisanya 0.5em (konvensi fallback lama).
 /// Tanpa ini glif non-latin terukur 0 → kata per-kata tumpang tindih.
 pub fn fallback_char_advance(c: char, fs: f32) -> f32 {
     let u = c as u32;
@@ -334,14 +334,14 @@ pub fn fallback_char_advance(c: char, fs: f32) -> f32 {
         return fs * 0.5;
     }
     if (0x0E00..=0x0EFF).contains(&u) {
-        // Thai/Lao: tanda di atas/di bawah nol, dasar ≈0.55em.
+        // Thai/Lao: tanda di atas/di bawah nol, dasar ≈0.62em (setara Leelawadee sistem).
         let combining = u == 0x0E31
             || (0x0E34..=0x0E3A).contains(&u)
             || (0x0E47..=0x0E4E).contains(&u)
             || u == 0x0EB1
             || (0x0EB4..=0x0EBC).contains(&u)
             || (0x0EC8..=0x0ECD).contains(&u);
-        return if combining { 0.0 } else { fs * 0.55 };
+        return if combining { 0.0 } else { fs * 0.62 };
     }
     fs * 0.5
 }
@@ -523,8 +523,8 @@ mod tests {
         assert_eq!(fallback_char_advance('한', 10.0), 10.0);
         assert_eq!(fallback_char_advance('あ', 10.0), 10.0);
         assert_eq!(fallback_char_advance('\u{FF21}', 10.0), 10.0); // fullwidth A
-        // Thai dasar ≈0.55em; tanda gabung nol.
-        assert_eq!(fallback_char_advance('ก', 10.0), 5.5);
+        // Thai dasar ≈0.62em; tanda gabung nol.
+        assert_eq!(fallback_char_advance('ก', 10.0), 6.2);
         assert_eq!(fallback_char_advance('\u{0E48}', 10.0), 0.0); // mai ek
         // Latin/generic tetap konvensi lama 0.5em.
         assert_eq!(fallback_char_advance('a', 10.0), 5.0);

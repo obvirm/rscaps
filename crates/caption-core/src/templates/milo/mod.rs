@@ -509,10 +509,13 @@ pub fn render<'a>(
         let y = content_top + baselines[i];
         if anchor {
             let ls_px = BIG_LETTER_SPACING_EM * wfs;
+            // tscaps: `.big-word { mix-blend-mode: difference }` — anchor
+            // membalik warna video di belakangnya (CSS compositing).
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{y}\" fill=\"{blend}\" font-family=\"{big_font}\" \
                  font-weight=\"{ANTON_FONT_WEIGHT}\" font-size=\"{wfs}\" \
                  letter-spacing=\"{ls_px}\" opacity=\"{opacity}\" \
+                 style=\"mix-blend-mode: difference\" \
                  transform=\"translate({tx} {ty})\">{text}</text>"
             ));
         } else {

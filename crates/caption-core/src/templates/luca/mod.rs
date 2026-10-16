@@ -421,7 +421,7 @@ pub fn render<'a>(
                     "<text x=\"{content_left}\" y=\"{big_baseline}\" fill=\"{blend}\" \
                      font-family=\"{big_font}\" font-weight=\"{ANTON_FONT_WEIGHT}\" \
                      font-size=\"{fs_big}\" letter-spacing=\"{ls_px}\" \
-                     opacity=\"{opacity}\">{escaped}</text>"
+                     opacity=\"{opacity}\" style=\"mix-blend-mode: difference\">{escaped}</text>"
                 ));
                 let col2_x = content_left + big_w + gap;
                 for ((offset, word_index), family) in (start + 1..end)
