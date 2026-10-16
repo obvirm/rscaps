@@ -307,6 +307,50 @@ fn shaped_advance(family: &str, text: &str, fs: f32) -> Option<f32> {
     Some(units as f32 * fs / upem)
 }
 
+/// Perkiraan lebar SATU karakter yang tak dimiliki face template —
+/// meniru fallback font sistem di browser (tscaps mengukur via DOM dgn
+/// font sistem; kita offline): ideograph/kana/hangul & bentuk fullwidth
+/// = 1em (lebar penuh, konsisten antar font CJK), Thai/Lao dasar =
+/// 0.55em dengan tanda gabung 0, sisanya 0.5em (konvensi fallback lama).
+/// Tanpa ini glif non-latin terukur 0 → kata per-kata tumpang tindih.
+pub fn fallback_char_advance(c: char, fs: f32) -> f32 {
+    let u = c as u32;
+    let fullwidth = (0x1100..=0x11FF).contains(&u)   // Hangul jamo
+        || (0x2E80..=0x303F).contains(&u)             // CJK radikal & tanda ideografis
+        || (0x3040..=0x30FF).contains(&u)             // Kana
+        || (0x3130..=0x318F).contains(&u)             // Hangul compat jamo
+        || (0x31F0..=0x31FF).contains(&u)             // Katakana extension
+        || (0x3400..=0x4DBF).contains(&u)
+        || (0x4E00..=0x9FFF).contains(&u)
+        || (0xAC00..=0xD7AF).contains(&u)             // Hangul syllables
+        || (0xF900..=0xFAFF).contains(&u)             // CJK compatibility
+        || (0xFF01..=0xFF60).contains(&u)             // Fullwidth forms
+        || (0x20000..=0x3FFFF).contains(&u);          // CJK ext B..
+    if fullwidth {
+        return fs;
+    }
+    if (0xFF61..=0xFFDC).contains(&u) {
+        // Halfwidth forms (kana setengah lebar).
+        return fs * 0.5;
+    }
+    if (0x0E00..=0x0EFF).contains(&u) {
+        // Thai/Lao: tanda di atas/di bawah nol, dasar ≈0.55em.
+        let combining = u == 0x0E31
+            || (0x0E34..=0x0E3A).contains(&u)
+            || (0x0E47..=0x0E4E).contains(&u)
+            || u == 0x0EB1
+            || (0x0EB4..=0x0EBC).contains(&u)
+            || (0x0EC8..=0x0ECD).contains(&u);
+        return if combining { 0.0 } else { fs * 0.55 };
+    }
+    fs * 0.5
+}
+
+/// Total `fallback_char_advance` untuk `text`.
+pub fn script_fallback_width(text: &str, fs: f32) -> f32 {
+    text.chars().map(|c| fallback_char_advance(c, fs)).sum()
+}
+
 /// Measure every word with the face its script resolves to. Script words
 /// (arabic/hebrew) are shaped with harfbuzz so cursive joining is
 /// accounted for; Latin words keep the `DomProbeCanvasTextMeasurer`
@@ -372,15 +416,29 @@ pub fn measure_words<'a>(
             word.display.clone()
         };
         let utf16 = display.encode_utf16().count() as f32;
-        let fallback = utf16 * fs * 0.5;
+        let fallback = script_fallback_width(&display, fs);
         let advance = if slot != 0 {
             shaped_advance(family, &display, fs).unwrap_or(fallback)
         } else {
             match faces[slot].as_deref() {
                 Some(face) => match face.font_variant(upem) {
                     Some(variant) => {
-                        let units = layout::measure_units(face, variant, upem, &display);
-                        units as f32 * fs / upem as f32
+                        // Per karakter: resolve face → unit asli; glif tak
+                        // dimiliki face (CJK/Thai dsb) → perkiraan sistem.
+                        let mut acc = 0.0f32;
+                        for ch in display.chars() {
+                            let units = match variant {
+                                fframes::FontVariant::Monospaced(mono) => Some(mono),
+                                fframes::FontVariant::Variable => {
+                                    face.resolve_char_width(upem, ch)
+                                }
+                            };
+                            acc += match units {
+                                Some(u) => u as f32 * fs / upem as f32,
+                                None => fallback_char_advance(ch, fs),
+                            };
+                        }
+                        acc
                     }
                     None => fallback,
                 },
@@ -456,6 +514,24 @@ mod tests {
         // Unknown / default pair.
         assert_eq!(Stack::for_latin("Something New").arabic, FONT_CAIRO);
         assert_eq!(Stack::for_latin("Something New").hebrew, FONT_ASSISTANT);
+    }
+
+    #[test]
+    fn missing_glyphs_estimate_system_fallback_widths() {
+        // CJK/kana/hangul & fullwidth → 1em penuh (lebar konsisten antar font).
+        assert_eq!(fallback_char_advance('欢', 10.0), 10.0);
+        assert_eq!(fallback_char_advance('한', 10.0), 10.0);
+        assert_eq!(fallback_char_advance('あ', 10.0), 10.0);
+        assert_eq!(fallback_char_advance('\u{FF21}', 10.0), 10.0); // fullwidth A
+        // Thai dasar ≈0.55em; tanda gabung nol.
+        assert_eq!(fallback_char_advance('ก', 10.0), 5.5);
+        assert_eq!(fallback_char_advance('\u{0E48}', 10.0), 0.0); // mai ek
+        // Latin/generic tetap konvensi lama 0.5em.
+        assert_eq!(fallback_char_advance('a', 10.0), 5.0);
+        // Total: 4 ideograph = 4.0em.
+        assert_eq!(script_fallback_width("欢迎测试", 10.0), 40.0);
+        // Mixed: latin + CJK.
+        assert_eq!(script_fallback_width("r字", 10.0), 15.0);
     }
 
     #[test]
