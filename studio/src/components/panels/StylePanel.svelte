@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { RotateCcw } from "@lucide/svelte";
   import { store } from "../../lib/state.svelte";
   import type { StyleControl } from "../../lib/types";
   import Section from "../controls/Section.svelte";
@@ -58,6 +59,14 @@
 </script>
 
 <div class="style-panel">
+  <button
+    class="restore-btn"
+    onclick={() => store.restoreTemplateSettings()}
+    title="Kembalikan Style/Typography/Position/Effects ke default template (bisa di-undo)"
+  >
+    <RotateCcw size={14} />
+    Restore template defaults
+  </button>
   {#if variants.length > 0}
     <Section title="Preset">
       <SelectField
@@ -111,6 +120,24 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+  .restore-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    margin: 8px 0 4px;
+    padding: 7px 10px;
+    border: 1px solid rgb(var(--border));
+    border-radius: 8px;
+    background: rgb(var(--bg-2));
+    color: rgb(var(--fg));
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .restore-btn:hover {
+    background: rgb(var(--bg-3, var(--bg-2)));
+    border-color: rgb(var(--accent));
   }
   .empty {
     font-size: 13px;

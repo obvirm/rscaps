@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { ArrowLeft, Undo2, Redo2, Sun, Moon, Monitor } from "@lucide/svelte";
   import { store } from "../lib/state.svelte";
   import { cycleTheme, getMode, type Theme } from "../lib/theme";
@@ -77,6 +78,31 @@
   function onBackClick() {
     onBack?.();
   }
+
+  // Shortcut undo/redo global; bidang teks memakai undo native-nya.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const type = (target as HTMLInputElement | null)?.type;
+      const textish =
+        tag === "TEXTAREA" ||
+        (tag === "INPUT" &&
+          ["text", "search", "number", "email", "password", "tel", "url"].includes(type ?? "text"));
+      if (textish) return;
+      if (e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        store.undo();
+      } else if (e.key === "y" || (e.key === "z" && e.shiftKey)) {
+        e.preventDefault();
+        store.redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 </script>
 
 <header class="toolbar">
@@ -105,10 +131,22 @@
   </div>
 
   <div class="cluster">
-    <button class="icon-btn" disabled title="Undo (Ctrl+Z)" aria-label="Undo">
+    <button
+      class="icon-btn"
+      disabled={!store.canUndo}
+      onclick={() => store.undo()}
+      title="Undo (Ctrl+Z)"
+      aria-label="Undo"
+    >
       <Undo2 size={16} />
     </button>
-    <button class="icon-btn" disabled title="Redo (Ctrl+Y)" aria-label="Redo">
+    <button
+      class="icon-btn"
+      disabled={!store.canRedo}
+      onclick={() => store.redo()}
+      title="Redo (Ctrl+Y)"
+      aria-label="Redo"
+    >
       <Redo2 size={16} />
     </button>
   </div>

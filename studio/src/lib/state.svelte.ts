@@ -160,9 +160,10 @@ class StudioState {
     return structuredClone(this.wasm.defaultDocument);
   }
 
-  private updateDoc(mutate: (doc: CaptionDocument) => void): boolean {
+  private updateDoc(mutate: (doc: CaptionDocument) => void, historyKey?: string): boolean {
     const doc = this.currentDoc();
     if (!doc) return false;
+    this.pushHistory(historyKey);
     mutate(doc);
     this.docText = JSON.stringify(doc, null, 2);
     return true;
@@ -257,6 +258,7 @@ class StudioState {
       this.videoEl.load();
     }
     this.docText = JSON.stringify(project.doc, null, 2);
+    this.clearHistory();
     await this.applyDocument();
     project.thumbnail = await this.makeThumbnail();
     await dbSave(project);
@@ -283,6 +285,7 @@ class StudioState {
     this.backend = project.settings.backend || "cpu";
     this.model = project.settings.model || "base";
     this.docText = JSON.stringify(project.doc, null, 2);
+    this.clearHistory();
     this.frame = 0;
     this.stopPlay();
     const blob = await loadVideo(id);
@@ -402,6 +405,89 @@ class StudioState {
         .then(() => this.refreshProjects())
         .catch((err) => console.error(err));
     }, 600);
+  }
+
+  // ── Undo / redo (snapshot `docText`) ────────────────────────────────────
+  // Dua tumpukan + coalescing waktu: edit serupa beruntun <500ms (tarikan
+  // slider, ketikan cue) menyatu jadi satu langkah undo; edit lain
+  // menyegel entri sebelumnya. Pola yang sama dengan tscaps UndoRedoStack.
+  private undoStack: Array<{ doc: string; key?: string; t: number }> = [];
+  private redoStack: string[] = [];
+  canUndo = $state(false);
+  canRedo = $state(false);
+  private static readonly HISTORY_LIMIT = 100;
+  private static readonly COALESCE_MS = 500;
+
+  /** Simpan snapshot SEBELUM mutasi. `historyKey` menggabungkan edit
+   * beruntun sejenis jadi satu entri. */
+  private pushHistory(historyKey?: string): void {
+    if (!this.docText) return;
+    const now = Date.now();
+    const last = this.undoStack.at(-1);
+    if (
+      historyKey !== undefined &&
+      last?.key === historyKey &&
+      now - last.t < StudioState.COALESCE_MS
+    ) {
+      last.t = now;
+    } else {
+      this.undoStack.push({ doc: this.docText, key: historyKey, t: now });
+      if (this.undoStack.length > StudioState.HISTORY_LIMIT) this.undoStack.shift();
+    }
+    this.redoStack = [];
+    this.syncHistoryFlags();
+  }
+
+  private clearHistory(): void {
+    this.undoStack = [];
+    this.redoStack = [];
+    this.syncHistoryFlags();
+  }
+
+  private syncHistoryFlags(): void {
+    this.canUndo = this.undoStack.length > 0;
+    this.canRedo = this.redoStack.length > 0;
+  }
+
+  undo(): void {
+    const entry = this.undoStack.pop();
+    if (!entry) return;
+    this.redoStack.push(this.docText);
+    // Segel entri teratas: edit berikutnya tidak boleh menyatu lintas
+    // batas navigasi undo/redo.
+    const top = this.undoStack.at(-1);
+    if (top) top.key = undefined;
+    this.syncHistoryFlags();
+    void this.applyHistoryDoc(entry.doc);
+  }
+
+  redo(): void {
+    const next = this.redoStack.pop();
+    if (next === undefined) return;
+    this.undoStack.push({ doc: this.docText, t: Date.now() });
+    this.syncHistoryFlags();
+    void this.applyHistoryDoc(next);
+  }
+
+  private async applyHistoryDoc(docText: string): Promise<void> {
+    this.docText = docText;
+    this.stopPlay();
+    await this.applyDocument();
+    this.scheduleSave();
+  }
+
+  /** Kembalikan Style/Typography/Position/Layout/Effects/Motion ke default
+   * template aktif: `params` dikosongkan sehingga render jatuh ke default
+   * template.json (tscaps SetTemplateAction semantics). Cue & template tidak
+   * disentuh; langkah ini bisa di-undo. */
+  async restoreTemplateSettings(): Promise<void> {
+    const ok = this.updateDoc((doc) => {
+      doc.params = JSON.parse(JSON.stringify(this.defaultParams ?? {})) as CaptionParams;
+    });
+    if (!ok) return;
+    this.applyParams();
+    this.scheduleSave();
+    this.setStatus("template settings restored");
   }
 
   async deleteProjectById(id: string): Promise<void> {
@@ -617,7 +703,7 @@ class StudioState {
   setParams(patch: Partial<CaptionParams>): boolean {
     const ok = this.updateDoc((doc) => {
       doc.params = { ...(doc.params ?? this.defaultDocument().params), ...patch };
-    });
+    }, "params");
     if (ok) {
       this.applyParams();
       this.scheduleSave();
@@ -630,7 +716,7 @@ class StudioState {
     const ok = this.updateDoc((doc) => {
       doc.params = { ...(doc.params ?? this.defaultDocument().params) };
       doc.params.effects = { ...(doc.params.effects ?? {}), ...patch };
-    });
+    }, "params");
     if (ok) {
       this.applyParams();
       this.scheduleSave();
@@ -643,7 +729,7 @@ class StudioState {
     const ok = this.updateDoc((doc) => {
       doc.params = { ...(doc.params ?? this.defaultDocument().params) };
       doc.params.style_values = { ...(doc.params.style_values ?? {}), [id]: value };
-    });
+    }, "params");
     if (ok) {
       this.applyParams();
       this.scheduleSave();
@@ -656,7 +742,7 @@ class StudioState {
     const ok = this.updateDoc((doc) => {
       doc.params = { ...(doc.params ?? this.defaultDocument().params) };
       doc.params.style_values = { ...(doc.params.style_values ?? {}), ...overrides };
-    });
+    }, "params");
     if (ok) {
       this.applyParams();
       this.scheduleSave();
@@ -727,7 +813,7 @@ class StudioState {
       Object.assign(cue, patch);
       if (cue.end_ms < cue.start_ms) cue.end_ms = cue.start_ms;
       doc.cues.sort((a, b) => a.start_ms - b.start_ms || a.end_ms - b.end_ms);
-    });
+    }, "cue");
     if (!ok) return;
     const timing = patch.start_ms !== undefined || patch.end_ms !== undefined;
     if (timing) {
@@ -785,6 +871,7 @@ class StudioState {
       })();
     doc.cues = parsed.cues;
     doc.duration_frames = Math.max(doc.duration_frames || 0, parsed.duration_frames);
+    this.pushHistory();
     this.docText = JSON.stringify(doc, null, 2);
     this.frame = 0;
     await this.applyDocument();
