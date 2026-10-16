@@ -116,6 +116,56 @@ pub struct CaptionParams {
     /// `overrides::resolve` (`primary-color`, `highlight-color` first).
     #[serde(default)]
     pub style_values: serde_json::Map<String, serde_json::Value>,
+
+    // ── Element inspector (per-word overrides — tscaps parity) ────────────
+    /// Override per-kata, dialamatkan dengan index kata global (urutan
+    /// dokumen, stream sebelum effects). Kosong = tanpa override.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub element_overrides: Vec<WordOverride>,
+}
+
+/// Satu override elemen kata (element inspector). Field terstruktur +
+/// `css` (subset CSS yang ditafsir engine — BUKAN browser; lihat
+/// `templates::element_css`). `css` menang atas field terstruktur.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct WordOverride {
+    /// Index kata global (urutan dokumen, stream sebelum effects).
+    pub word: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Skala ukuran relatif base template (1.0 = tak berubah).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_scale: Option<f32>,
+    /// Rotasi derajat di sekitar pusat kata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_deg: Option<f32>,
+    /// Anchor absolut kata: fraksi lebar/tinggi frame untuk PUSAT kata
+    /// (None = tetap di layout asli).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h_frac: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v_frac: Option<f32>,
+    /// Preset animasi per-kata: `"fade"|"rise"|"slide"|"scale"|"pop"|
+    /// "snap"|"wobble"|"flash"|"none"` (None/unknown = template default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<String>,
+    /// Durasi animasi preset (detik).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_duration_s: Option<f32>,
+    /// Custom CSS subset (ditafsir `templates::element_css`; menang atas
+    /// field terstruktur di atas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub css: Option<String>,
 }
 
 /// Document-transform effects as user overrides. Every flag is tri-state:
@@ -233,6 +283,7 @@ impl Default for CaptionParams {
             max_width_frac: None,
             max_chars: None,
             style_values: serde_json::Map::new(),
+            element_overrides: Vec::new(),
         }
     }
 }
@@ -314,6 +365,26 @@ pub fn replace_cues_json(json: &str) -> Result<(), String> {
         .map_err(|_| "document lock poisoned".to_string())?;
     guard.cues = cues;
     Ok(())
+}
+
+/// Daftar kata dokumen aktif (urutan stream, sebelum effects) — alamat
+/// `element_overrides` untuk element inspector per-kata:
+/// `[{"index":0,"text":"…","start_ms":0.0,"end_ms":210.0}, …]`.
+pub fn list_words_json() -> String {
+    let guard = document().read().unwrap_or_else(|err| err.into_inner());
+    let words = crate::templates::pipeline::doc_words(&guard);
+    let items: Vec<serde_json::Value> = words
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "index": w.index,
+                "text": w.text,
+                "start_ms": w.start_ms,
+                "end_ms": w.end_ms,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(items).to_string()
 }
 
 /// Merge a partial params JSON object onto the live document's params —

@@ -31,7 +31,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from milo's style.scss + template.json) ───────────────
@@ -356,6 +356,7 @@ pub fn render<'a>(
     let mut xs = vec![0.0f32; segment.words.len()];
     let mut baselines = vec![0.0f32; segment.words.len()];
     let mut word_fs = vec![fs; segment.words.len()];
+    let mut word_w = vec![0.0f32; segment.words.len()];
     let mut is_big = vec![false; segment.words.len()];
     let mut content_w = 0.0f32;
     let mut cursor_top = 0.0f32;
@@ -418,6 +419,7 @@ pub fn render<'a>(
                 xs[start + offset] = x;
                 baselines[start + offset] = small_baseline;
                 word_fs[start + offset] = plain_fs;
+                word_w[start + offset] = small_w;
                 x += small_w + spread;
             }
 
@@ -427,6 +429,7 @@ pub fn render<'a>(
                 + row1_h
                 + baseline_y(big_fs, BIG_LINE_HEIGHT, anton_asc, anton_desc);
             word_fs[end - 1] = big_fs;
+            word_w[end - 1] = big_w;
             is_big[end - 1] = true;
 
             (width, row1_h + BIG_LINE_HEIGHT * big_fs)
@@ -437,11 +440,12 @@ pub fn render<'a>(
                 + gap * (end - start).saturating_sub(1) as f32;
             let baseline = line_top + baseline_y(fs, LINE_HEIGHT, asc_ratio, desc_ratio);
             let mut x = 0.0;
-            for (offset, &word_w) in widths[start..end].iter().enumerate() {
+            for (offset, &run_w) in widths[start..end].iter().enumerate() {
                 xs[start + offset] = x;
                 baselines[start + offset] = baseline;
                 word_fs[start + offset] = fs;
-                x += word_w + gap;
+                word_w[start + offset] = run_w;
+                x += run_w + gap;
             }
             (width, line_h)
         };
@@ -486,8 +490,13 @@ pub fn render<'a>(
     for (i, word) in segment.words.iter().enumerate() {
         let anchor = is_big[i];
         let wfs = word_fs[i];
+        // Element inspector: ada override → tahan entrance per-kata (rise /
+        // slide-breathing) dan pakai transform override.
+        let hold = element_css::has_override(&doc.params, word.index);
         // `em` in a transform resolves against the element's own size too.
-        let (opacity, tx, ty) = if ov.motion_static {
+        let (opacity, tx, ty) = if hold {
+            (1.0, 0.0, 0.0)
+        } else if ov.motion_static {
             (1.0, 0.0, 0.0)
         } else if breathing {
             let mut slide = recipes::SlideIn::with(breathing_slide_em(last_in_line[i]), 0.0);
@@ -499,6 +508,14 @@ pub fn render<'a>(
             let (opacity, dy_em) = rise.eval(elapsed_s);
             (opacity, 0.0, dy_em * wfs)
         };
+        let (opacity_attr, tx_attr) = if hold {
+            (String::new(), String::new())
+        } else {
+            (
+                format!(" opacity=\"{opacity}\""),
+                format!(" transform=\"translate({tx} {ty})\""),
+            )
+        };
         let shown = if anchor {
             ov.text_case.apply(&word.display)
         } else {
@@ -507,6 +524,28 @@ pub fn render<'a>(
         let text = layout::escape_xml(&shown);
         let x = content_left + xs[i];
         let y = content_top + baselines[i];
+        // Element inspector: override per-kata (attrs + transform); ukuran
+        // dan tracking kata ini sendiri (anchor Anton punya fs/ls sendiri).
+        let wo_ctx = element_css::WordCtx {
+            base_fs: wfs,
+            ls_px: if anchor {
+                BIG_LETTER_SPACING_EM * wfs
+            } else {
+                ov.letter_spacing_em * wfs
+            },
+            video_w: video_w as f32,
+            video_h: video_h as f32,
+            center_x: x + word_w[i] / 2.0,
+            center_y: y - wfs * 0.35,
+            word_start_s: word.start_ms / 1000.0,
+            now_s: now_ms / 1000.0,
+            font_family_svg: &stack::svg_font_family,
+        };
+        let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+        let wo_t = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx);
+        let wo_transform = wo_t
+            .map(|t| format!(" transform=\"{t}\""))
+            .unwrap_or_default();
         if anchor {
             let ls_px = BIG_LETTER_SPACING_EM * wfs;
             // tscaps: `.big-word { mix-blend-mode: difference }` — anchor
@@ -514,9 +553,8 @@ pub fn render<'a>(
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{y}\" fill=\"{blend}\" font-family=\"{big_font}\" \
                  font-weight=\"{ANTON_FONT_WEIGHT}\" font-size=\"{wfs}\" \
-                 letter-spacing=\"{ls_px}\" opacity=\"{opacity}\" \
-                 style=\"mix-blend-mode: difference\" \
-                 transform=\"translate({tx} {ty})\">{text}</text>"
+                 letter-spacing=\"{ls_px}\"{opacity_attr} \
+                 style=\"mix-blend-mode: difference\"{tx_attr}{wo}{wo_transform}>{text}</text>"
             ));
         } else {
             let family_attr = if measured.families[i] == FONT {
@@ -526,8 +564,7 @@ pub fn render<'a>(
             };
             words_svg.push_str(&format!(
                 "<text x=\"{x}\" y=\"{y}\" fill=\"{primary}\"{family_attr} font-size=\"{wfs}\" \
-                 filter=\"url(#milo-shadow)\" opacity=\"{opacity}\" \
-                 transform=\"translate({tx} {ty})\">{text}</text>",
+                 filter=\"url(#milo-shadow)\"{opacity_attr}{tx_attr}{wo}{wo_transform}>{text}</text>",
                 primary = ov.primary.as_str(),
             ));
         }
@@ -546,6 +583,7 @@ pub fn render<'a>(
         );
     }
 
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

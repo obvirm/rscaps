@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{layout, overrides, pipeline, recipes, stack, style};
+use super::{element_css, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from lyra's style.scss + template.json) ───────────────
@@ -263,10 +263,11 @@ pub fn render<'a>(
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
-        for ((x, word), family) in xs
+        for (word_off, ((x, word), family)) in xs
             .iter()
             .zip(&segment.words[start..end])
             .zip(&measured.families[start..end])
+            .enumerate()
         {
             let text = layout::escape_xml(&word.display);
             let family_attr = if *family == FONT {
@@ -274,8 +275,26 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
+            // Element inspector: override per-kata (attrs + transform).
+            let wo_ctx = element_css::WordCtx {
+                base_fs: fs,
+                ls_px,
+                video_w: video_w as f32,
+                video_h: video_h as f32,
+                center_x: *x + widths[start + word_off] / 2.0,
+                center_y: baseline - fs * 0.35,
+                word_start_s: word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+            let wo_t = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx);
+            let wo_transform = wo_t
+                .map(|t| format!(" transform=\"{t}\""))
+                .unwrap_or_default();
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"url(#lyra-grad)\"{family_attr}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"url(#lyra-grad)\"{family_attr}\
+                 {wo}{wo_transform}>{text}</text>"
             ));
         }
     }
@@ -292,6 +311,7 @@ pub fn render<'a>(
         );
     }
 
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

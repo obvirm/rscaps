@@ -6,6 +6,7 @@ pub mod anya;
 pub mod cleo;
 pub mod effects;
 pub mod elio;
+pub mod element_css;
 pub mod enzo;
 pub mod ezra;
 pub mod freya;

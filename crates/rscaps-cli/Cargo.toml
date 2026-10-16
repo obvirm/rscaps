@@ -19,3 +19,16 @@ fframes = { version = "1.2.0", default-features = false }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+# HW-accel FFmpeg (fitur fframes-media) untuk jalur decode/encode headless —
+# pilih sesuai hardware saat BUILD, mis.:
+#   cargo build --release -p rscaps-cli --features gpu-nvidia
+# Raster SVG tetap usvgr/tiny-skia (CPU, deterministik; preview studio
+# memakai engine yang sama → output konsisten).
+gpu-nvidia = ["fframes/nvidia"]
+gpu-qsv = ["fframes/qsv"]
+gpu-vaapi = ["fframes/vaapi"]
+gpu-vulkan = ["fframes/vulkan"]
+gpu-videotoolbox = ["fframes/videotoolbox"]

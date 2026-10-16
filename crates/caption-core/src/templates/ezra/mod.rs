@@ -36,7 +36,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from ezra's style.scss + template.json) ───────────────
@@ -347,25 +347,51 @@ pub fn render<'a>(
     let bottom;
 
     // small_word with optional family override for non-Latin words.
-    let small_word_with_family = |body: &mut String, x: f32, baseline: f32, text: &str, start_ms: f32, family: &str| {
-        let (opacity, scale) = if ov.motion_static {
+    let small_word_with_family = |body: &mut String, x: f32, baseline: f32, text: &str, start_ms: f32, family: &str, index: u32, width: f32| {
+        // Element inspector: kata ber-override menahan scale-in
+        // per-katanya sendiri — override yang mengatur.
+        let has_ov = element_css::has_override(&doc.params, index);
+        let (opacity, scale) = if ov.motion_static || has_ov {
             (1.0, 1.0)
         } else {
             scale_in.eval((now_ms - start_ms) / 1000.0)
         };
         let text = layout::escape_xml(text);
-        let transform = if (scale - 1.0).abs() > 1e-4 {
+        let own_t = if (scale - 1.0).abs() > 1e-4 {
             let ox = x;
             let oy = baseline + descent + half_leading;
             format!(
-                " transform=\"translate({} {}) scale({scale})\"",
+                "translate({} {}) scale({scale})",
                 ox * (1.0 - scale),
                 oy * (1.0 - scale)
             )
         } else {
             String::new()
         };
-        let opacity = if opacity < 0.9999 {
+        // Element inspector: geometri kata untuk override (attrs +
+        // transform).
+        let wo_ctx = element_css::WordCtx {
+            base_fs: fs,
+            ls_px,
+            video_w: video_w as f32,
+            video_h: video_h as f32,
+            center_x: x + width / 2.0,
+            center_y: baseline - fs * 0.35,
+            word_start_s: start_ms / 1000.0,
+            now_s: now_ms / 1000.0,
+            font_family_svg: &stack::svg_font_family,
+        };
+        let wo = element_css::word_svg_attrs(&doc.params, index, &wo_ctx);
+        let t_attr = if has_ov {
+            element_css::word_svg_transform(&doc.params, index, &wo_ctx)
+                .map(|t| format!(" transform=\"{t}\""))
+                .unwrap_or_default()
+        } else if !own_t.is_empty() {
+            format!(" transform=\"{own_t}\"")
+        } else {
+            String::new()
+        };
+        let opacity_attr = if opacity < 0.9999 {
             format!(" opacity=\"{opacity}\"")
         } else {
             String::new()
@@ -377,7 +403,7 @@ pub fn render<'a>(
         };
         body.push_str(&format!(
             "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
-             filter=\"url(#ezra-shadow)\"{transform}{opacity}>{text}</text>",
+             filter=\"url(#ezra-shadow)\"{opacity_attr}{t_attr}{wo}>{text}</text>",
             primary = ov.primary.as_str(),
         ));
     };
@@ -401,7 +427,7 @@ pub fn render<'a>(
                 let baseline = y + half_leading + ascent;
                 for ((x, wi), family) in xs.iter().zip(start..end).zip(&measured.families[start..end]) {
                     let word = &segment.words[wi];
-                    small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family);
+                    small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family, word.index, widths[wi]);
                 }
                 y += line_h;
             }
@@ -425,7 +451,7 @@ pub fn render<'a>(
                 let baseline = y + half_leading + ascent;
                 for ((x, wi), family) in xs.iter().zip(start..end).zip(&measured.families[start..end]) {
                     let word = &segment.words[wi];
-                    small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family);
+                    small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family, word.index, widths[wi]);
                 }
                 y += line_h;
             }
@@ -460,20 +486,41 @@ pub fn render<'a>(
             let mut slide = slide_in(w);
             slide.duration_s = ov.duration_or(slide.duration_s);
             slide.distance_em = ov.distance_or(slide.distance_em);
-            let (opacity, dx) = if ov.motion_static {
+            // Element inspector: big word ber-override menahan slide-in
+            // entrance-nya sendiri — override tetap berlaku.
+            let has_ov = element_css::has_override(&doc.params, big_word.index);
+            let (opacity, dx) = if ov.motion_static || has_ov {
                 (1.0, 0.0)
             } else {
                 slide.eval((now_ms - big_word.start_ms) / 1000.0)
             };
             let text = layout::escape_xml(&big_word.display);
             let x = block_left + ov.word_spacing_em * f_big;
-            let transform = if dx.abs() > 0.05 {
-                format!(" transform=\"translate({dx} 0)\"")
+            let opacity_attr = if opacity < 0.9999 {
+                format!(" opacity=\"{opacity}\"")
             } else {
                 String::new()
             };
-            let opacity = if opacity < 0.9999 {
-                format!(" opacity=\"{opacity}\"")
+            // Element inspector: geometri big word (font-size f_big,
+            // letter-spacing 0 — big word tak pakai ls_px).
+            let wo_ctx = element_css::WordCtx {
+                base_fs: f_big,
+                ls_px: 0.0,
+                video_w: w,
+                video_h: video_h as f32,
+                center_x: x + big_adv * f_big / fs / 2.0,
+                center_y: baseline_big - f_big * 0.35,
+                word_start_s: big_word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, big_word.index, &wo_ctx);
+            let t_attr = if has_ov {
+                element_css::word_svg_transform(&doc.params, big_word.index, &wo_ctx)
+                    .map(|t| format!(" transform=\"{t}\""))
+                    .unwrap_or_default()
+            } else if dx.abs() > 0.05 {
+                format!(" transform=\"translate({dx} 0)\"")
             } else {
                 String::new()
             };
@@ -486,7 +533,7 @@ pub fn render<'a>(
             body.push_str(&format!(
                 "<text x=\"{x}\" y=\"{baseline_big}\" fill=\"{primary}\" \
                  font-family=\"{big_font}\" font-weight=\"{BIG_FONT_WEIGHT}\" \
-                 font-size=\"{f_big}\" filter=\"url(#ezra-shadow)\"{italic_attr}{transform}{opacity}>\
+                 font-size=\"{f_big}\" filter=\"url(#ezra-shadow)\"{italic_attr}{t_attr}{opacity_attr}{wo}>\
                  {text}</text>",
                 primary = ov.primary.as_str(),
             ));
@@ -512,7 +559,7 @@ pub fn render<'a>(
                     let baseline = y + half_leading + ascent;
                     for ((x, wi), family) in xs.iter().zip(abs_start..abs_end).zip(&measured.families[abs_start..abs_end]) {
                         let word = &segment.words[wi];
-                        small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family);
+                        small_word_with_family(&mut body, *x, baseline, &word.display, word.start_ms, family, word.index, widths[wi]);
                     }
                     y += line_h;
                 }
@@ -552,6 +599,7 @@ pub fn render<'a>(
         (bottom - block_top) + 3.0 * fs,
     );
 
+    let body = layout::dedupe_text_attrs(&body);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

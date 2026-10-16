@@ -13,6 +13,21 @@
 //! Per-template knobs (separator set, char limits, effects, max gap) travel
 //! in [`SplitConfig`].
 
+/// Semua kata dokumen dalam urutan stream (tokenize + spread per cue),
+/// dengan `index` global terpasang — sumber alamat `element_overrides`
+/// dan daftar kata untuk inspector studio (via bridge).
+pub fn doc_words(doc: &crate::CaptionDocument) -> Vec<TimedWord> {
+    let mut stream: Vec<TimedWord> = Vec::new();
+    for cue in &doc.cues {
+        let tokens = tokenize(&cue.text);
+        stream.extend(spread(&tokens, cue.start_ms as f32, cue.end_ms as f32));
+    }
+    for (i, word) in stream.iter_mut().enumerate() {
+        word.index = i as u32;
+    }
+    stream
+}
+
 /// One whitespace-delimited token with its estimated narration window.
 /// `text` is the transcription source of truth (splitters and weight see
 /// it); `display` is what renders after the effects array — line splitting
@@ -23,6 +38,9 @@ pub struct TimedWord {
     pub display: String,
     pub start_ms: f32,
     pub end_ms: f32,
+    /// Index kata global (urutan dokumen, stream sebelum effects) —
+    /// alamat `element_overrides` (inspector per-kata).
+    pub index: u32,
 }
 
 impl TimedWord {
@@ -33,6 +51,7 @@ impl TimedWord {
             text,
             start_ms,
             end_ms,
+            index: 0,
         }
     }
 }
@@ -349,11 +368,7 @@ pub fn collect_segments(doc: &crate::CaptionDocument, cfg: &SplitConfig) -> Vec<
     // sepenuhnya tugas splitter. Tanpa ini, cue tanpa terminator pemisah
     // (mis. cue berdempetan tanpa tanda baca) selalu pecah di tepi cue dan
     // scene-nya beda dengan tscaps).
-    let mut stream: Vec<TimedWord> = Vec::new();
-    for cue in &doc.cues {
-        let tokens = tokenize(&cue.text);
-        stream.extend(spread(&tokens, cue.start_ms as f32, cue.end_ms as f32));
-    }
+    let stream: Vec<TimedWord> = doc_words(doc);
     for sentence in split_boundary(&stream, cfg.boundary) {
         for chunk in split_char_limit(sentence, max_chars, cfg.min_chars) {
             if !chunk.is_empty() {

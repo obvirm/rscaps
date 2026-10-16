@@ -18,7 +18,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from luca's style.scss + template.json) ───────────────
@@ -390,9 +390,26 @@ pub fn render<'a>(
                 } else {
                     format!(" font-family=\"{family}\"")
                 };
+                // Element inspector: override per-kata (attrs + transform).
+                let wo_ctx = element_css::WordCtx {
+                    base_fs: fs,
+                    ls_px: ov.letter_spacing_em * fs,
+                    video_w: video_w as f32,
+                    video_h: video_h as f32,
+                    center_x: x + width / 2.0,
+                    center_y: baseline - fs * 0.35,
+                    word_start_s: word.start_ms / 1000.0,
+                    now_s: now_ms / 1000.0,
+                    font_family_svg: &stack::svg_font_family,
+                };
+                let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+                let wo_t = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx);
+                let wo_transform = wo_t
+                    .map(|t| format!(" transform=\"{t}\""))
+                    .unwrap_or_default();
                 words_svg.push_str(&format!(
                     "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
-                     filter=\"url(#luca-shadow)\">{text}</text>",
+                     filter=\"url(#luca-shadow)\"{wo}{wo_transform}>{text}</text>",
                     primary = ov.primary.as_str(),
                 ));
                 x += width + gap;
@@ -416,12 +433,37 @@ pub fn render<'a>(
                 } else {
                     anchor_fade.eval(elapsed_s)
                 };
+                // Element inspector: ada override → tahan fade per-kata.
+                let big_word = &segment.words[start];
+                let hold = element_css::has_override(&doc.params, big_word.index);
+                let opacity_attr = if hold {
+                    String::new()
+                } else {
+                    format!(" opacity=\"{opacity}\"")
+                };
+                let wo_ctx = element_css::WordCtx {
+                    base_fs: *fs_big,
+                    ls_px: *ls_px,
+                    video_w: video_w as f32,
+                    video_h: video_h as f32,
+                    center_x: content_left + big_w / 2.0,
+                    center_y: big_baseline - *fs_big * 0.35,
+                    word_start_s: big_word.start_ms / 1000.0,
+                    now_s: now_ms / 1000.0,
+                    font_family_svg: &stack::svg_font_family,
+                };
+                let wo = element_css::word_svg_attrs(&doc.params, big_word.index, &wo_ctx);
+                let wo_t =
+                    element_css::word_svg_transform(&doc.params, big_word.index, &wo_ctx);
+                let wo_transform = wo_t
+                    .map(|t| format!(" transform=\"{t}\""))
+                    .unwrap_or_default();
                 let escaped = layout::escape_xml(text);
                 words_svg.push_str(&format!(
                     "<text x=\"{content_left}\" y=\"{big_baseline}\" fill=\"{blend}\" \
                      font-family=\"{big_font}\" font-weight=\"{ANTON_FONT_WEIGHT}\" \
-                     font-size=\"{fs_big}\" letter-spacing=\"{ls_px}\" \
-                     opacity=\"{opacity}\" style=\"mix-blend-mode: difference\">{escaped}</text>"
+                     font-size=\"{fs_big}\" letter-spacing=\"{ls_px}\"{opacity_attr} \
+                     style=\"mix-blend-mode: difference\"{wo}{wo_transform}>{escaped}</text>"
                 ));
                 let col2_x = content_left + big_w + gap;
                 for ((offset, word_index), family) in (start + 1..end)
@@ -431,22 +473,49 @@ pub fn render<'a>(
                     let row_top = line_top + offset as f32 * row;
                     let small_top = row_top + (row - line_h) / 2.0;
                     let baseline = small_top + half_leading + ascent;
-                    let (opacity, dx_em) = if ov.motion_static {
+                    let word = &segment.words[word_index];
+                    // Element inspector: ada override → tahan slide per-kata.
+                    let hold = element_css::has_override(&doc.params, word.index);
+                    let (opacity, dx_em) = if hold {
+                        (1.0, 0.0)
+                    } else if ov.motion_static {
                         (1.0, 0.0)
                     } else {
                         word_slide.eval(elapsed_s)
                     };
-                    let text = layout::escape_xml(&segment.words[word_index].display);
+                    let motion_attr = if hold {
+                        String::new()
+                    } else {
+                        format!(
+                            " opacity=\"{opacity}\" transform=\"translate({})\"",
+                            dx_em * fs
+                        )
+                    };
+                    let text = layout::escape_xml(&word.display);
                     let family_attr = if *family == FONT {
                         String::new()
                     } else {
                         format!(" font-family=\"{family}\"")
                     };
+                    let wo_ctx = element_css::WordCtx {
+                        base_fs: fs,
+                        ls_px: ov.letter_spacing_em * fs,
+                        video_w: video_w as f32,
+                        video_h: video_h as f32,
+                        center_x: col2_x + widths[word_index] / 2.0,
+                        center_y: baseline - fs * 0.35,
+                        word_start_s: word.start_ms / 1000.0,
+                        now_s: now_ms / 1000.0,
+                        font_family_svg: &stack::svg_font_family,
+                    };
+                    let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+                    let wo_t = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx);
+                    let wo_transform = wo_t
+                        .map(|t| format!(" transform=\"{t}\""))
+                        .unwrap_or_default();
                     words_svg.push_str(&format!(
-                        "<text x=\"{col2_x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
-                         opacity=\"{opacity}\" transform=\"translate({})\" \
-                         filter=\"url(#luca-shadow)\">{text}</text>",
-                        dx_em * fs,
+                        "<text x=\"{col2_x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr}\
+                         {motion_attr} filter=\"url(#luca-shadow)\"{wo}{wo_transform}>{text}</text>",
                         primary = ov.primary.as_str(),
                     ));
                 }
@@ -459,10 +528,22 @@ pub fn render<'a>(
                     .zip(&widths[start..end])
                     .zip(&measured.families[start..end])
                 {
-                    let (opacity, dx_em) = if ov.motion_static {
+                    // Element inspector: ada override → tahan slide per-kata.
+                    let hold = element_css::has_override(&doc.params, word.index);
+                    let (opacity, dx_em) = if hold {
+                        (1.0, 0.0)
+                    } else if ov.motion_static {
                         (1.0, 0.0)
                     } else {
                         word_slide.eval(elapsed_s)
+                    };
+                    let motion_attr = if hold {
+                        String::new()
+                    } else {
+                        format!(
+                            " opacity=\"{opacity}\" transform=\"translate({})\"",
+                            dx_em * fs
+                        )
                     };
                     let text = layout::escape_xml(&word.display);
                     let family_attr = if *family == FONT {
@@ -470,11 +551,25 @@ pub fn render<'a>(
                     } else {
                         format!(" font-family=\"{family}\"")
                     };
+                    let wo_ctx = element_css::WordCtx {
+                        base_fs: fs,
+                        ls_px: ov.letter_spacing_em * fs,
+                        video_w: video_w as f32,
+                        video_h: video_h as f32,
+                        center_x: x + width / 2.0,
+                        center_y: baseline - fs * 0.35,
+                        word_start_s: word.start_ms / 1000.0,
+                        now_s: now_ms / 1000.0,
+                        font_family_svg: &stack::svg_font_family,
+                    };
+                    let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+                    let wo_t = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx);
+                    let wo_transform = wo_t
+                        .map(|t| format!(" transform=\"{t}\""))
+                        .unwrap_or_default();
                     words_svg.push_str(&format!(
-                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
-                         opacity=\"{opacity}\" transform=\"translate({})\" \
-                         filter=\"url(#luca-shadow)\">{text}</text>",
-                        dx_em * fs,
+                        "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr}\
+                         {motion_attr} filter=\"url(#luca-shadow)\"{wo}{wo_transform}>{text}</text>",
                         primary = ov.primary.as_str(),
                     ));
                     x += width + gap;
@@ -498,6 +593,7 @@ pub fn render<'a>(
         );
     }
 
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

@@ -19,7 +19,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from noor's style.scss + template.json) ───────────────
@@ -291,11 +291,12 @@ pub fn render<'a>(
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
         let grad_id = format!("noor-grad-{line_idx}");
-        for (((x, word), text), family) in xs
+        for (i, (((x, word), text), family)) in xs
             .iter()
             .zip(&segment.words[start..end])
             .zip(&display_texts[start..end])
             .zip(&measured.families[start..end])
+            .enumerate()
         {
             let text = layout::escape_xml(text);
             let family_attr = if *family == FONT {
@@ -310,8 +311,25 @@ pub fn render<'a>(
             } else {
                 format!("url(#{grad_id})")
             };
+            // Element inspector: override per-kata (attrs + transform).
+            let wo_ctx = element_css::WordCtx {
+                base_fs: fs,
+                ls_px,
+                video_w: video_w as f32,
+                video_h: video_h as f32,
+                center_x: *x + widths[start + i] / 2.0,
+                center_y: baseline - fs * 0.35,
+                word_start_s: word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+            let wo_transform = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+                .map(|t| format!(" transform=\"{t}\""))
+                .unwrap_or_default();
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{wo}{wo_transform}>\
+                 {text}</text>"
             ));
         }
     }
@@ -329,7 +347,8 @@ pub fn render<'a>(
     }
 
     // The full chain, in scss order: four outline passes, the soft cast
-    // shadow, then the halo — each function feeds the next.
+    // shadow, then the halo - each function feeds the next.
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

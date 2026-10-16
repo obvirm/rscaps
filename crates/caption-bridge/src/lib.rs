@@ -21,6 +21,12 @@ pub fn replace_cues_json(json: &str) -> Result<(), JsValue> {
     caption_core::replace_cues_json(json).map_err(|err| JsValue::from_str(&err))
 }
 
+/// Daftar kata dokumen aktif (JSON) untuk element inspector per-kata.
+#[wasm_bindgen]
+pub fn list_words_json() -> String {
+    caption_core::list_words_json()
+}
+
 /// Parse an SRT/VTT file → JSON `{"duration_frames", "cues"}`. Pure; the
 /// caller merges the result into the document.
 #[wasm_bindgen]

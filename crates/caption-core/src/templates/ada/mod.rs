@@ -13,7 +13,7 @@
 use fframes::{FFramesContext, Svgr};
 use std::sync::OnceLock;
 
-use super::{effects, layout, overrides, pipeline, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (cqh/em values from ada's style.scss) ──────────────────
@@ -174,7 +174,13 @@ pub fn render<'a>(
         weight = ov.font_weight,
     );
     let upcoming = st.color("upcoming-color", UPCOMING);
-    for ((word, &x), family) in segment.words.iter().zip(&xs).zip(&measured.families) {
+    for (i, ((word, &x), family)) in segment
+        .words
+        .iter()
+        .zip(&xs)
+        .zip(&measured.families)
+        .enumerate()
+    {
         let fill = if now_ms >= word.start_ms {
             ov.primary.as_str()
         } else {
@@ -186,12 +192,29 @@ pub fn render<'a>(
             format!(" font-family=\"{family}\"")
         };
         let text = layout::escape_xml(&word.display);
+        // Element inspector: override per-kata (attrs + transform).
+        let wo_ctx = element_css::WordCtx {
+            base_fs: fs,
+            ls_px,
+            video_w: video_w as f32,
+            video_h: video_h as f32,
+            center_x: x + widths[i] / 2.0,
+            center_y: baseline - fs * 0.35,
+            word_start_s: word.start_ms / 1000.0,
+            now_s: now_ms / 1000.0,
+            font_family_svg: &stack::svg_font_family,
+        };
+        let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+        let wo_transform = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+            .map(|t| format!(" transform=\"{t}\""))
+            .unwrap_or_default();
         words_svg.push_str(&format!(
-            "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}>{text}</text>"
+            "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{wo}{wo_transform}>{text}</text>"
         ));
     }
     words_svg.push_str("</g>");
 
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from hugo's style.scss + template.json) ───────────────
@@ -183,8 +183,10 @@ pub fn render<'a>(
         {
             // flash-in: the word is struck by a plate when its own
             // narration starts — hidden (visibility, not opacity) until
-            // the plate cuts away, then it arrives.
-            let state = if ov.motion_static {
+            // the plate cuts away, then it arrives. Kata ber-override
+            // menahan flash per-katanya sendiri (element inspector).
+            let has_ov = element_css::has_override(&doc.params, word.index);
+            let state = if ov.motion_static || has_ov {
                 recipes::FlashState {
                     element_visible: true,
                     element_opacity: 1.0,
@@ -208,9 +210,29 @@ pub fn render<'a>(
                 } else {
                     String::new()
                 };
+                // Element inspector: override per-kata (attrs + transform).
+                let wo_ctx = element_css::WordCtx {
+                    base_fs: fs,
+                    ls_px,
+                    video_w: video_w as f32,
+                    video_h: video_h as f32,
+                    center_x: x + widths[start + j] / 2.0,
+                    center_y: baseline - fs * 0.35,
+                    word_start_s: word.start_ms / 1000.0,
+                    now_s: now_ms / 1000.0,
+                    font_family_svg: &stack::svg_font_family,
+                };
+                let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+                let wo_transform = if has_ov {
+                    element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+                        .map(|t| format!(" transform=\"{t}\""))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 words_svg.push_str(&format!(
                     "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
-                     opacity=\"{}\" filter=\"url(#hugo-glow)\"{stroke}>{text}</text>",
+                     opacity=\"{}\" filter=\"url(#hugo-glow)\"{stroke}{wo}{wo_transform}>{text}</text>",
                     state.element_opacity,
                     primary = ov.primary.as_str(),
                 ));
@@ -243,6 +265,7 @@ pub fn render<'a>(
         );
     }
 
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

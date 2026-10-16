@@ -36,7 +36,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from pastor's style.scss + template.json) ─────────────
@@ -342,10 +342,11 @@ pub fn render<'a>(
         words_svg.push_str(&format!(
             "<g opacity=\"{opacity}\" transform=\"translate(0,{dy})\">"
         ));
-        for ((x, text), family) in xs
+        for (i, ((x, text), family)) in xs
             .iter()
             .zip(&display[start..end])
             .zip(&measured.families[start..end])
+            .enumerate()
         {
             let text = layout::escape_xml(text);
             let family_attr = if *family == svg_font {
@@ -353,8 +354,25 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
+            // Element inspector: override per-kata (attrs + transform).
+            let word = &segment.words[start + i];
+            let wo_ctx = element_css::WordCtx {
+                base_fs: fs,
+                ls_px,
+                video_w: video_w as f32,
+                video_h: video_h as f32,
+                center_x: *x + widths[start + i] / 2.0,
+                center_y: baseline - fs * 0.35,
+                word_start_s: word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+            let wo_transform = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+                .map(|t| format!(" transform=\"{t}\""))
+                .unwrap_or_default();
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#pastor-word)\"{family_attr}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#pastor-word)\"{family_attr}{wo}{wo_transform}>{text}</text>"
             ));
         }
         words_svg.push_str("</g>");
@@ -375,6 +393,7 @@ pub fn render<'a>(
         );
     }
 
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

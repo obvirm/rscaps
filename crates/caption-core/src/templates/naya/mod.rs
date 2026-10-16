@@ -15,7 +15,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{layout, overrides, pipeline, recipes, stack, state, style};
+use super::{element_css, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from naya's style.scss + template.json) ───────────────
@@ -276,6 +276,30 @@ pub fn render<'a>(
             // Scale about the word's own box centre (sol's convention).
             let cx = *x + widths[start + j] / 2.0;
             let cy = baseline + (descent - ascent) / 2.0;
+            // Element inspector: override per-kata (attrs + transform).
+            let wo_ctx = element_css::WordCtx {
+                base_fs: fs,
+                ls_px,
+                video_w: video_w as f32,
+                video_h: video_h as f32,
+                center_x: cx,
+                center_y: baseline - fs * 0.35,
+                word_start_s: word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+            if element_css::has_override(&doc.params, word.index) {
+                // Kata ber-override: pop sendiri ditahan, transform dari inspector.
+                let wo_transform = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+                    .map(|t| format!(" transform=\"{t}\""))
+                    .unwrap_or_default();
+                words_svg.push_str(&format!(
+                    "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{wo}{wo_transform}>\
+                     {text}</text>"
+                ));
+                continue;
+            }
             words_svg.push_str(&format!(
                 "<g transform=\"translate({cx},{cy}) scale({scale}) translate({nx},{ny})\">\
                  <text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}>{text}</text></g>",
@@ -308,6 +332,7 @@ pub fn render<'a>(
     }
 
     let defs = filter_defs(fs, &st.color("outline-color", OUTLINE_COLOR), st.f32("outline-thickness", OUTLINE_THICKNESS_EM));
+    let segment_svg = layout::dedupe_text_attrs(&segment_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

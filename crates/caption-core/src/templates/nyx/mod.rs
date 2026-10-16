@@ -19,7 +19,7 @@
 
 use fframes::{FFramesContext, FontQuery, Svgr};
 
-use super::{effects, layout, overrides, pipeline, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from nyx's style.scss + template.json) ────────────────
@@ -430,6 +430,24 @@ pub fn render<'a>(
             let upem = upems[slot];
             let mut cursor = *x;
             let count = word.display.chars().count();
+            // Element inspector: override per-kata (attrs + transform) —
+            // berlaku sama untuk tiap huruf kata ini (transformat affine
+            // tentang pusat kata identik diterapkan per huruf).
+            let wo_ctx = element_css::WordCtx {
+                base_fs: fs,
+                ls_px,
+                video_w: video_w as f32,
+                video_h: video_h as f32,
+                center_x: *x + widths[start + j] / 2.0,
+                center_y: baseline - fs * 0.35,
+                word_start_s: word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+            let wo_transform = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+                .map(|t| format!(" transform=\"{t}\""))
+                .unwrap_or_default();
             for (i, ch) in word.display.chars().enumerate() {
                 let ch_str = ch.to_string();
                 let ch_w = match face {
@@ -440,7 +458,7 @@ pub fn render<'a>(
                     let text = layout::escape_xml(&ch_str);
                     words_svg.push_str(&format!(
                         "<text x=\"{cursor}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
-                         filter=\"url(#nyx-glow)\">{text}</text>",
+                         filter=\"url(#nyx-glow)\"{wo}{wo_transform}>{text}</text>",
                         fill = ov.primary,
                     ));
                 }
@@ -490,6 +508,7 @@ pub fn render<'a>(
         ));
     }
 
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

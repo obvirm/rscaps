@@ -25,7 +25,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from kai's style.scss + template.json) ───────────────
@@ -229,10 +229,11 @@ pub fn render<'a>(
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
-        for ((x, word), family) in xs
+        for (word_off, ((x, word), family)) in xs
             .iter()
             .zip(&segment.words[start..end])
             .zip(&measured.families[start..end])
+            .enumerate()
         {
             let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             let family_attr = if *family == FONT {
@@ -241,25 +242,49 @@ pub fn render<'a>(
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             let narration = state::word_narration(now_ms, word.start_ms, word.end_ms);
+            // Element inspector: override per-kata (attrs + transform).
+            let has_ov = element_css::has_override(&doc.params, word.index);
+            let wo_ctx = element_css::WordCtx {
+                base_fs: fs,
+                ls_px,
+                video_w: video_w as f32,
+                video_h: video_h as f32,
+                center_x: *x + widths[start + word_off] / 2.0,
+                center_y: baseline - fs * 0.35,
+                word_start_s: word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+            // Kata ber-override menahan anim entrance (jitter) template
+            // sendiri — transform hasil inspector yang dipakai.
+            let own_t: Option<String> = if has_ov {
+                element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+            } else if matches!(narration, state::Narration::Being) {
+                let mut jitter = recipes::Jitter::with(JITTER_X_EM, JITTER_Y_EM);
+                jitter.duration_s = word.end_ms - word.start_ms;
+                let (jx_em, jy_em) = jitter.eval((now_ms - word.start_ms) / 1000.0);
+                Some(format!("translate({},{})", jx_em * fs, jy_em * fs))
+            } else {
+                None
+            };
+            let wo_transform = own_t
+                .map(|t| format!(" transform=\"{t}\""))
+                .unwrap_or_default();
             match narration {
                 state::Narration::NotYet => {
                     words_svg.push_str(&format!(
                         "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\" \
-                         opacity=\"{WORD_NOT_YET_OPACITY}\"{family_attr}>{text}</text>",
+                         opacity=\"{WORD_NOT_YET_OPACITY}\"{family_attr}{wo}{wo_transform}>{text}</text>",
                         primary = ov.primary.as_str(),
                     ));
                 }
                 state::Narration::Being => {
                     // The jitter rides the word's own narration window
                     // (`--word-being-narrated-duration`).
-                    let mut jitter = recipes::Jitter::with(JITTER_X_EM, JITTER_Y_EM);
-                    jitter.duration_s = word.end_ms - word.start_ms;
-                    let (jx_em, jy_em) = jitter.eval((now_ms - word.start_ms) / 1000.0);
-                    let jx = jx_em * fs;
-                    let jy = jy_em * fs;
                     words_svg.push_str(&format!(
                         "<text x=\"{x}\" y=\"{baseline}\" fill=\"{highlight}\" \
-                         filter=\"url(#kai-chroma-active)\" transform=\"translate({jx},{jy})\"{family_attr}>\
+                         filter=\"url(#kai-chroma-active)\"{family_attr}{wo}{wo_transform}>\
                          {text}</text>"
                     ));
                 }
@@ -268,7 +293,7 @@ pub fn render<'a>(
                     // rests at (0, 0); the filter and the white stay.
                     words_svg.push_str(&format!(
                         "<text x=\"{x}\" y=\"{baseline}\" fill=\"{highlight}\" \
-                         filter=\"url(#kai-chroma-active)\"{family_attr}>{text}</text>"
+                         filter=\"url(#kai-chroma-active)\"{family_attr}{wo}{wo_transform}>{text}</text>"
                     ));
                 }
             }
@@ -290,6 +315,7 @@ pub fn render<'a>(
     }
 
     let defs = filter_defs(fs, &st);
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

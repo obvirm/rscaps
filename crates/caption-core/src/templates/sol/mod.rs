@@ -12,7 +12,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from sol's style.scss + template.json) ────────────────
@@ -415,9 +415,33 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{word_family}\"")
             };
+            // Element inspector: override per-kata (attrs + transform).
+            let wo_ctx = element_css::WordCtx {
+                base_fs: line_fs,
+                ls_px,
+                video_w: video_w as f32,
+                video_h: video_h as f32,
+                center_x: *x + line_widths[i] / 2.0,
+                center_y: baseline - line_fs * 0.35,
+                word_start_s: word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+            let wo_transform = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+                .map(|t| format!(" transform=\"{t}\""))
+                .unwrap_or_default();
             if !is_tag {
                 words_svg.push_str(&format!(
-                    "<text x=\"{x}\" y=\"{baseline}\"{family_attr}>{text}</text>"
+                    "<text x=\"{x}\" y=\"{baseline}\"{family_attr}{wo}{wo_transform}>{text}</text>"
+                ));
+                continue;
+            }
+            if element_css::has_override(&doc.params, word.index) {
+                // Kata ber-override: pop sendiri ditahan, transform dari
+                // inspector (glow aksen tetap).
+                words_svg.push_str(&format!(
+                    "<text x=\"{x}\" y=\"{baseline}\"{family_attr} filter=\"url(#sol-glow)\"{wo}{wo_transform}>{text}</text>"
                 ));
                 continue;
             }
@@ -484,6 +508,7 @@ pub fn render<'a>(
     }
     defs.push_str(&pop_defs);
 
+    let segment_svg = layout::dedupe_text_attrs(&segment_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"

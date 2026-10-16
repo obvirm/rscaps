@@ -7,6 +7,8 @@
 //! targets that line count, and `min_lines` forces the longest line to split
 //! until the count is met (a single word can never split).
 
+use std::collections::HashMap;
+
 // ── text helpers ──────────────────────────────────────────────────────────
 
 /// `&`, `<` are the only chars SVG/XML needs escaped in text nodes; the
@@ -36,6 +38,92 @@ pub fn measure_units(
             })
             .sum(),
     }
+}
+
+/// Normalisasi atribut `<text …>`: buang kembar, pertahankan nilai
+/// PALING AKHIR (override element inspector menang). Tag `<text>` yang
+/// tanpa duplikat disentuh apa adanya; tag lain (`<g>`, `<rect>`, …)
+/// dilewat utuh.
+///
+/// Kenapa wajib: preview (parser HTML `{@html}`) memegang atribut PERTAMA,
+/// sedangkan export memuat SVG lewat data-URI (parser XML) — duplikat
+/// `fill=` membuat preview ≠ export dan bisa membuat gambar gagal muat.
+pub fn dedupe_text_attrs(svg: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    while let Some(start) = rest.find("<text ") {
+        out.push_str(&rest[..start]);
+        let Some(rel_end) = rest[start..].find('>') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let end = start + rel_end;
+        out.push_str(&dedupe_text_tag(&rest[start..=end]));
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn dedupe_text_tag(tag: &str) -> String {
+    let Some(inner) = tag
+        .strip_prefix("<text ")
+        .and_then(|t| t.strip_suffix('>'))
+    else {
+        return tag.to_string();
+    };
+    let chars: Vec<char> = inner.chars().collect();
+    let mut attrs: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        while i < chars.len() && chars[i] == ' ' {
+            i += 1;
+        }
+        let name_start = i;
+        while i < chars.len() && chars[i] != '=' && chars[i] != ' ' {
+            i += 1;
+        }
+        let name: String = chars[name_start..i].iter().collect();
+        if i >= chars.len() || chars[i] != '=' {
+            break;
+        }
+        i += 1;
+        if i >= chars.len() || chars[i] != '"' {
+            break;
+        }
+        i += 1;
+        let val_start = i;
+        while i < chars.len() && chars[i] != '"' {
+            i += 1;
+        }
+        let val: String = chars[val_start..i].iter().collect();
+        if i < chars.len() {
+            i += 1;
+        }
+        if !name.is_empty() {
+            attrs.push((name, val));
+        }
+    }
+    let mut last: HashMap<&str, usize> = HashMap::new();
+    for (idx, (name, _)) in attrs.iter().enumerate() {
+        last.insert(name.as_str(), idx);
+    }
+    let mut rebuilt = String::new();
+    let mut first = true;
+    for (idx, (name, val)) in attrs.iter().enumerate() {
+        if last[name.as_str()] != idx {
+            continue;
+        }
+        if !first {
+            rebuilt.push(' ');
+        }
+        first = false;
+        rebuilt.push_str(name);
+        rebuilt.push_str("=\"");
+        rebuilt.push_str(val);
+        rebuilt.push('"');
+    }
+    format!("<text {rebuilt}>")
 }
 
 // ── word placement ────────────────────────────────────────────────────────
@@ -175,6 +263,19 @@ impl BalancedPixelWidth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dedupe_text_attrs_keeps_last_value() {
+        let svg = "<svg><g><text x=\"1\" fill=\"#fff\" fill=\"#f00\" y=\"2\">hi</text></g></svg>";
+        let out = dedupe_text_attrs(svg);
+        assert_eq!(
+            out,
+            "<svg><g><text x=\"1\" fill=\"#f00\" y=\"2\">hi</text></g></svg>"
+        );
+        // Tag tanpa duplikat + tag non-text tak tersentuh.
+        let plain = "<text x=\"1\" y=\"2\">ok</text><rect fill=\"a\" fill=\"b\"/>";
+        assert_eq!(dedupe_text_attrs(plain), plain);
+    }
 
     #[test]
     fn escape_xml_only_needs_amp_and_lt() {

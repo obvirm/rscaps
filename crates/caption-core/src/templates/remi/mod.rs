@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, layout, overrides, pipeline, recipes, stack, state, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, state, style};
 use crate::CaptionDocument;
 
 // ── spec constants (from remi's style.scss + template.json) ───────────────
@@ -181,7 +181,23 @@ pub fn render<'a>(
             .enumerate()
         {
             let w = widths[start + j];
-            let (opacity, ty_em, rot, sc) = if ov.motion_static {
+            // Element inspector: override per-kata (attrs + transform).
+            let wo_ctx = element_css::WordCtx {
+                base_fs: fs,
+                ls_px: ov.letter_spacing_em * fs,
+                video_w: video_w as f32,
+                video_h: video_h as f32,
+                center_x: x + w / 2.0,
+                center_y: baseline - fs * 0.35,
+                word_start_s: word.start_ms / 1000.0,
+                now_s: now_ms / 1000.0,
+                font_family_svg: &stack::svg_font_family,
+            };
+            let wo = element_css::word_svg_attrs(&doc.params, word.index, &wo_ctx);
+            let overridden = element_css::has_override(&doc.params, word.index);
+            // Kata ber-override: snap-in sendiri ditahan (transform/opacity
+            // datang dari inspector), selain itu snap seperti biasa.
+            let (opacity, ty_em, rot, sc) = if overridden || ov.motion_static {
                 (1.0, 0.0, 0.0, 1.0)
             } else {
                 snap.eval((now_ms - word.start_ms) / 1000.0)
@@ -204,6 +220,20 @@ pub fn render<'a>(
                     -cx, -cy
                 )
             };
+            let wo_transform = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
+                .map(|t| format!(" transform=\"{t}\""))
+                .unwrap_or_default();
+            let opacity_attr = if overridden {
+                // Snap ditahan: opacity bawaan digantikan bila inspector
+                // punya sendiri (dua atribut `opacity` = XML ganda).
+                if wo.contains(" opacity=\"") {
+                    String::new()
+                } else {
+                    format!(" opacity=\"{opacity}\"")
+                }
+            } else {
+                format!(" opacity=\"{opacity}\"")
+            };
             let fill = if state::word_narration(now_ms, word.start_ms, word.end_ms).is_being() {
                 highlight.as_str()
             } else {
@@ -216,8 +246,8 @@ pub fn render<'a>(
                 format!(" font-family=\"{family}\"")
             };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
-                 opacity=\"{opacity}\"{transform}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{opacity_attr}\
+                 {transform}{wo}{wo_transform}>{text}</text>"
             ));
         }
     }
@@ -234,6 +264,7 @@ pub fn render<'a>(
         );
     }
 
+    let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
