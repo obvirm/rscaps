@@ -7,6 +7,7 @@ pub mod cleo;
 pub mod effects;
 pub mod elio;
 pub mod element_css;
+pub mod params_css;
 pub mod enzo;
 pub mod ezra;
 pub mod freya;

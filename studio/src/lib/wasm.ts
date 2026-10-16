@@ -105,6 +105,10 @@ export interface LoadedBridge {
   listWords: () => string;
   parseSubtitle: (text: string, format: string) => string;
   formatSubtitle: (cuesJson: string, format: string) => string;
+  /** Params JSON → CSS subset (panel Code settings). */
+  paramsToCss: (paramsJson: string) => string;
+  /** CSS subset → params JSON (merge ke base). */
+  paramsFromCss: (baseParamsJson: string, css: string) => string;
   /** Template catalog straight from caption-core — never hardcode a copy. */
   templateCatalog: TemplateEntry[];
   /** Canonical default document (params) straight from caption-core. */
@@ -124,6 +128,8 @@ export async function loadBridge(): Promise<LoadedBridge> {
     list_words_json: () => string;
     parse_subtitle: (text: string, format: string) => string;
     format_subtitle: (cuesJson: string, format: string) => string;
+    params_to_css: (paramsJson: string) => string;
+    params_from_css: (baseParamsJson: string, css: string) => string;
     template_catalog_json: () => string;
     default_document_json: () => string;
   };
@@ -159,6 +165,8 @@ export async function loadBridge(): Promise<LoadedBridge> {
     listWords: mod.list_words_json,
     parseSubtitle: mod.parse_subtitle,
     formatSubtitle: mod.format_subtitle,
+    paramsToCss: mod.params_to_css,
+    paramsFromCss: mod.params_from_css,
     templateCatalog: JSON.parse(mod.template_catalog_json()) as TemplateEntry[],
     defaultDocument: JSON.parse(mod.default_document_json()) as CaptionDocument,
     fontFaceCss: faceCss,

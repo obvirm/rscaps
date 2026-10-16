@@ -4,28 +4,24 @@
   import type { Direction } from "../../lib/types";
 
   let srtText = $state("");
-  let paramsText = $state("");
+  let cssText = $state("");
   let applying = $state(false);
 
   let direction = $derived.by<Direction>(() => {
-    try {
-      const params = JSON.parse(paramsText);
-      return (params?.direction as Direction) || "auto";
-    } catch {
-      return "auto";
-    }
+    const m = cssText.match(/^\s*direction\s*:\s*(auto|ltr|rtl)\s*$/m);
+    return (m?.[1] as Direction) || "auto";
   });
 
   onMount(() => {
     srtText = store.codeSrtText();
-    paramsText = store.codeParamsText();
+    cssText = store.codeParamsCss();
   });
 
   async function onApply() {
     if (applying) return;
     applying = true;
     try {
-      await store.applyCodePanel(srtText, paramsText);
+      await store.applyCodePanel(srtText, cssText);
     } catch (err) {
       store.setStatus(String(err), true);
     } finally {
@@ -35,12 +31,10 @@
 
   function onDirection(e: Event) {
     const dir = (e.currentTarget as HTMLSelectElement).value as Direction;
-    try {
-      const params = JSON.parse(paramsText || "{}");
-      params.direction = dir;
-      paramsText = JSON.stringify(params, null, 2);
-    } catch {
-      /* params sedang tidak valid — biarkan user perbaiki dulu */
+    if (/^\s*direction\s*:/m.test(cssText)) {
+      cssText = cssText.replace(/^(\s*direction\s*:\s*)\S+\s*;?$/m, `$1${dir};`);
+    } else {
+      cssText = `${cssText.trimEnd()}\ndirection: ${dir};\n`;
     }
   }
 </script>
@@ -49,8 +43,8 @@
   <label class="section-label" for="srt">captions (SRT)</label>
   <textarea id="srt" class="srt" spellcheck="false" bind:value={srtText}></textarea>
 
-  <label class="section-label" for="params">settings (JSON · params)</label>
-  <textarea id="params" class="params" spellcheck="false" bind:value={paramsText}></textarea>
+  <label class="section-label" for="css">settings (CSS)</label>
+  <textarea id="css" class="css" spellcheck="false" bind:value={cssText}></textarea>
 
   <div class="actions">
     <label class="dir-field">Direction
@@ -99,7 +93,7 @@
     flex: 1.2;
     min-height: 100px;
   }
-  .params {
+  .css {
     flex: 1;
     min-height: 80px;
   }

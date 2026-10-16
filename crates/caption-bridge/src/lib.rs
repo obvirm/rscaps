@@ -27,6 +27,18 @@ pub fn list_words_json() -> String {
     caption_core::list_words_json()
 }
 
+/// Params JSON → CSS subset (panel Code settings).
+#[wasm_bindgen]
+pub fn params_to_css(params_json: &str) -> Result<String, JsValue> {
+    caption_core::params_to_css_json(params_json).map_err(|err| JsValue::from_str(&err))
+}
+
+/// CSS subset → params JSON (merge ke base; field di luar CSS dipertahankan).
+#[wasm_bindgen]
+pub fn params_from_css(base_params_json: &str, css: &str) -> Result<String, JsValue> {
+    caption_core::params_from_css_json(base_params_json, css).map_err(|err| JsValue::from_str(&err))
+}
+
 /// Parse an SRT/VTT file → JSON `{"duration_frames", "cues"}`. Pure; the
 /// caller merges the result into the document.
 #[wasm_bindgen]

@@ -369,7 +369,7 @@ pub fn replace_cues_json(json: &str) -> Result<(), String> {
 
 /// Daftar kata dokumen aktif (urutan stream, sebelum effects) — alamat
 /// `element_overrides` untuk element inspector per-kata:
-/// `[{"index":0,"text":"…","start_ms":0.0,"end_ms":210.0}, …]`.
+/// `[{"index":0,"text":".","start_ms":0.0,"end_ms":210.0}, .]`.
 pub fn list_words_json() -> String {
     let guard = document().read().unwrap_or_else(|err| err.into_inner());
     let words = crate::templates::pipeline::doc_words(&guard);
@@ -385,6 +385,21 @@ pub fn list_words_json() -> String {
         })
         .collect();
     serde_json::Value::Array(items).to_string()
+}
+
+/// Params JSON → CSS subset (panel Code settings).
+pub fn params_to_css_json(params_json: &str) -> Result<String, String> {
+    let p: CaptionParams =
+        serde_json::from_str(params_json).map_err(|err| format!("invalid params JSON: {err}"))?;
+    Ok(crate::templates::params_css::params_to_css(&p))
+}
+
+/// CSS subset → params JSON (merge ke base; field di luar CSS dipertahankan).
+pub fn params_from_css_json(base_params_json: &str, css: &str) -> Result<String, String> {
+    let mut p: CaptionParams = serde_json::from_str(base_params_json)
+        .map_err(|err| format!("invalid params JSON: {err}"))?;
+    crate::templates::params_css::apply_css_to_params(&mut p, css)?;
+    serde_json::to_string(&p).map_err(|err| format!("serialize params: {err}"))
 }
 
 /// Merge a partial params JSON object onto the live document's params —

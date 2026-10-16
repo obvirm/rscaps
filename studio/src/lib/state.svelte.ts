@@ -1196,19 +1196,23 @@ class StudioState {
     }
   }
 
-  /** JSON params (TANPA cues) untuk panel Code. */
-  codeParamsText(): string {
+  /** CSS settings untuk panel Code (params → CSS subset). */
+  codeParamsCss(): string {
     const doc = this.currentDoc();
-    if (!doc) return "{}";
-    return JSON.stringify(doc.params ?? {}, null, 2);
+    if (!doc || !this.wasm) return "";
+    try {
+      return this.wasm.paramsToCss(JSON.stringify(doc.params ?? {}));
+    } catch {
+      return "";
+    }
   }
 
   /**
-   * Apply panel Code: SRT (cues) + JSON params digabung ke dokumen lalu
-   * prepare ulang. Cues di-edit sebagai SRT; setting sebagai JSON params —
-   * tidak perlu scroll seluruh dokumen.
+   * Apply panel Code: SRT (cues) + CSS settings digabung ke dokumen lalu
+   * prepare ulang. Captions diedit sebagai SRT; settings sebagai CSS subset
+   * yang ditafsir engine (bukan JSON mentah).
    */
-  async applyCodePanel(srtText: string, paramsText: string): Promise<void> {
+  async applyCodePanel(srtText: string, paramsCss: string): Promise<void> {
     await this.bootWasm();
     if (!this.wasm) throw new Error("wasm not ready");
     let cues: Cue[];
@@ -1221,15 +1225,15 @@ class StudioState {
     } catch (err) {
       throw new Error(`invalid SRT: ${err}`);
     }
-    let params: CaptionParams;
+    const base = this.currentDoc();
+    const baseParams = JSON.stringify(base?.params ?? this.defaultDocument().params);
+    let paramsJson: string;
     try {
-      params = JSON.parse(paramsText) as CaptionParams;
-      if (!params || typeof params !== "object" || Array.isArray(params)) {
-        throw new Error("params must be a JSON object");
-      }
+      paramsJson = this.wasm.paramsFromCss(baseParams, paramsCss);
     } catch (err) {
-      throw new Error(`invalid params JSON: ${err}`);
+      throw new Error(`invalid settings CSS: ${err}`);
     }
+    const params = JSON.parse(paramsJson) as CaptionParams;
     const ok = this.updateDoc((doc) => {
       doc.cues = cues;
       doc.params = params;
@@ -1237,7 +1241,7 @@ class StudioState {
     if (!ok) throw new Error("invalid document");
     await this.applyDocument();
     this.scheduleSave();
-    this.setStatus(`applied ${cues.length} cues + params`);
+    this.setStatus(`applied ${cues.length} cues + CSS settings`);
   }
 
   async exportPng(): Promise<void> {
