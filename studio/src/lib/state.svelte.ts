@@ -480,18 +480,11 @@ class StudioState {
     return canvas;
   }
 
-  // Render a caption frame onto a transparent canvas at an explicit output size.
-  private async renderFrameToCanvas(
-    frame: number,
-    outWidth: number,
-    outHeight: number,
-  ): Promise<HTMLCanvasElement | null> {
-    if (!this.wasm) return null;
-    const raw = this.wasm.bridge.render_frame(BigInt(frame));
-    if (!raw) return null;
+  // Render one SVG string onto a transparent canvas at an explicit output size.
+  private async svgToCanvas(svg: string, outWidth: number, outHeight: number): Promise<HTMLCanvasElement> {
     const inlined = this.fontFaceCss
-      ? raw.replace(/^<svg[^>]*>/, (m) => `${m}<style>${this.fontFaceCss}</style>`)
-      : raw;
+      ? svg.replace(/^<svg[^>]*>/, (m) => `${m}<style>${this.fontFaceCss}</style>`)
+      : svg;
     const uri = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(inlined);
     const img = new Image();
     img.src = uri;
@@ -502,6 +495,30 @@ class StudioState {
     const ctx = canvas.getContext("2d")!;
     ctx.drawImage(img, 0, 0, outWidth, outHeight);
     return canvas;
+  }
+
+  // Caption frame untuk burn-in: layer dasar + (opsional) layer blend
+  // `mix-blend-mode: difference` — dikomposit terhadap video di export.ts.
+  private async renderFrameLayers(
+    frame: number,
+    outWidth: number,
+    outHeight: number,
+  ): Promise<{ base: HTMLCanvasElement; blend?: HTMLCanvasElement | null } | null> {
+    if (!this.wasm) return null;
+    const raw = this.wasm.bridge.render_frame(BigInt(frame));
+    if (!raw) return null;
+    const BLEND_RE = /<text[^>]*style="mix-blend-mode: difference"[^>]*>[\s\S]*?<\/text>/g;
+    if (!raw.includes("mix-blend-mode: difference")) {
+      return { base: await this.svgToCanvas(raw, outWidth, outHeight) };
+    }
+    const blendParts = raw.match(BLEND_RE) ?? [];
+    const baseSvg = raw.replace(BLEND_RE, "");
+    const root = raw.match(/^<svg[^>]*>/)?.[0] ?? "<svg>";
+    const blendSvg = `${root}${blendParts.join("")}</svg>`;
+    return {
+      base: await this.svgToCanvas(baseSvg, outWidth, outHeight),
+      blend: await this.svgToCanvas(blendSvg, outWidth, outHeight),
+    };
   }
 
   async renderRaster(): Promise<void> {
@@ -853,7 +870,7 @@ class StudioState {
         format: opts.format,
         quality: opts.quality,
         resolution: opts.resolution,
-        renderCaption: (frame) => this.renderFrameToCanvas(frame, width, height),
+        renderCaption: (frame) => this.renderFrameLayers(frame, width, height),
         onProgress: (frac, stage) =>
           this.setStatus(`${stage} ${(frac * 100).toFixed(0)}%`),
       });
