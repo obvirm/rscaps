@@ -150,6 +150,26 @@ pub fn render_video(
     opts: &RenderVideoOpts<'_>,
     mut on_progress: impl FnMut(u32, u32),
 ) -> Result<()> {
+    // Engine "fframes": pipeline penuh fframes::render (CompositeVideo +
+    // frame video sumber + audio + encode). Berbeda jalur dari PNG-pipe.
+    if opts.engine == "fframes" {
+        on_progress(0, 1);
+        crate::fframes_engine::render_fframes(&crate::fframes_engine::FframesRenderOpts {
+            video: opts.video,
+            srt: opts.srt,
+            template: opts.template,
+            out: opts.out,
+            params: opts.params,
+            fonts: opts.fonts,
+            ffmpeg_dir: opts.ffmpeg_dir,
+            crf: opts.crf,
+            preset: opts.preset,
+            hw_encode: opts.hw_encode,
+        })?;
+        on_progress(1, 1);
+        return Ok(());
+    }
+
     let ffprobe = tool_bin("ffprobe", opts.ffmpeg_dir)?;
     let ffmpeg = tool_bin("ffmpeg", opts.ffmpeg_dir)?;
     let probe = probe_video(&ffprobe, opts.video)?;
@@ -334,7 +354,8 @@ fn raster_png(
 ) -> Result<Vec<u8>> {
     match engine {
         "skia" => return skia_png(svg, width, height, fontdb),
-        "fframes" => bail!("engine fframes belum tersedia, pakai --engine cpu atau skia"),
+        // fframes engine ditangani di render_video (pipeline penuh), bukan per-frame.
+        "fframes" => bail!("engine fframes = pipeline penuh, tidak lewat raster_png per-frame"),
         _ => {}
     }
     let opt = svgr::usvgr::Options::default();

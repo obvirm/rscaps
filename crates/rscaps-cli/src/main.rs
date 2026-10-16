@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 mod doc;
+mod fframes_engine;
 mod fonts;
 mod render;
 mod server;
@@ -375,7 +376,7 @@ fn render_png(
 ) -> Result<svgr::tiny_skia::Pixmap> {
     match engine {
         "skia" => return crate::render::skia_pixmap(svg, width, height, fontdb),
-        "fframes" => anyhow::bail!("engine fframes belum tersedia, pakai --engine cpu atau skia"),
+        "fframes" => anyhow::bail!("engine fframes hanya untuk `render` (burn-in), bukan `frames` - pakai --engine cpu atau skia"),
         _ => {}
     }
     let tree = svgr::usvgr::Tree::from_str(svg, opt, fontdb)
