@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 caption-core = { path = "../caption-core" }
-fframes-editor-controller = "1.2.0"
+fframes-editor-controller = "1.2.1-rc.38"
 wasm-bindgen = "0.2.100"
 console_error_panic_hook = "0.1"
 # ahash (via usvgr) pulls getrandom 0.3; wasm needs its wasm_js backend.

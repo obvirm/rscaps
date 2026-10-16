@@ -81,6 +81,9 @@ enum Cmd {
         /// Folder font tambahan selain font sistem (default: studio/tplfonts/ttf kalau ada)
         #[arg(long)]
         fonts: Option<PathBuf>,
+        /// Mesin raster: cpu (usvgr) | skia (GPU, butuh --features gpu-skia) | fframes (pipeline, menyusul)
+        #[arg(long, default_value = "cpu")]
+        engine: String,
     },
     /// Burn-in caption ke video → mp4 (frame caption-core + overlay ffmpeg)
     Render {
@@ -111,6 +114,15 @@ enum Cmd {
         /// x264 preset
         #[arg(long, default_value = "medium")]
         preset: String,
+        /// Mesin raster caption: cpu | skia | fframes
+        #[arg(long, default_value = "cpu")]
+        engine: String,
+        /// Encode video di GPU (ganti libx264 -> h264_nvenc)
+        #[arg(long)]
+        hw_encode: bool,
+        /// Decode dengan -hwaccel <auto|cuda|d3d11va|vaapi|qsv> (default: CPU)
+        #[arg(long)]
+        hwaccel: Option<String>,
     },
     /// API server localhost (job render + progress)
     Serve {
@@ -139,6 +151,7 @@ fn main() -> Result<()> {
             from,
             to,
             fonts,
+            engine,
         } => cmd_frames(CmdFramesArgs {
             srt: &srt,
             template: &template,
@@ -150,6 +163,7 @@ fn main() -> Result<()> {
             from,
             to,
             fonts: fonts.as_deref(),
+            engine: &engine,
         }),
         Cmd::Render {
             video,
@@ -161,6 +175,9 @@ fn main() -> Result<()> {
             ffmpeg_dir,
             crf,
             preset,
+            engine,
+            hw_encode,
+            hwaccel,
         } => cmd_render(CmdRenderArgs {
             video: &video,
             srt: &srt,
@@ -171,6 +188,9 @@ fn main() -> Result<()> {
             ffmpeg_dir: ffmpeg_dir.as_deref(),
             crf,
             preset: &preset,
+            engine: &engine,
+            hw_encode,
+            hwaccel: hwaccel.as_deref(),
         }),
         Cmd::Serve { bind, port } => cmd_serve(&bind, port),
     }
@@ -225,6 +245,7 @@ fn cmd_convert(input: &Path, to: &str, out: Option<&Path>) -> Result<()> {
 // ── frames ─────────────────────────────────────────────────────────────────
 
 struct CmdFramesArgs<'a> {
+    engine: &'a str,
     srt: &'a Path,
     template: &'a str,
     out: &'a Path,
@@ -316,7 +337,7 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
                     .with_context(|| format!("tulis {}", path.display()))?;
             }
             "png" => {
-                let pixmap = render_png(&s, width, height, &svg_opt, font_source.database(), &mut cache, &pool)
+                let pixmap = render_png(&s, width, height, &svg_opt, font_source.database(), &mut cache, &pool, args.engine)
                     .with_context(|| format!("raster {name}"))?;
                 let bytes = pixmap
                     .encode_png()
@@ -350,7 +371,13 @@ fn render_png(
     fontdb: &svgr::usvgr::fontdb::Database,
     cache: &mut svgr::SvgrCache,
     pool: &svgr::PixmapPool,
+    engine: &str,
 ) -> Result<svgr::tiny_skia::Pixmap> {
+    match engine {
+        "skia" => return crate::render::skia_pixmap(svg, width, height, fontdb),
+        "fframes" => anyhow::bail!("engine fframes belum tersedia, pakai --engine cpu atau skia"),
+        _ => {}
+    }
     let tree = svgr::usvgr::Tree::from_str(svg, opt, fontdb)
         .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
     let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
@@ -370,6 +397,9 @@ fn render_png(
 // ── render (burn-in) ───────────────────────────────────────────────────────
 
 struct CmdRenderArgs<'a> {
+    engine: &'a str,
+    hw_encode: bool,
+    hwaccel: Option<&'a str>,
     video: &'a Path,
     srt: &'a Path,
     template: &'a str,
@@ -404,6 +434,9 @@ fn cmd_render(args: CmdRenderArgs<'_>) -> Result<()> {
             ffmpeg_dir: args.ffmpeg_dir,
             crf: args.crf,
             preset: args.preset,
+            engine: args.engine,
+            hw_encode: args.hw_encode,
+            hwaccel: args.hwaccel,
         },
         |done, total| {
             let pct = if total > 0 { done * 100 / total } else { 0 };

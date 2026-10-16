@@ -174,6 +174,9 @@ async fn start_render(
         let fonts_path = req.fonts.as_deref().map(PathBuf::from);
         let ffmpeg_path = req.ffmpeg_dir.as_deref().map(PathBuf::from);
         let opts = RenderVideoOpts {
+            engine: "cpu",
+            hw_encode: false,
+            hwaccel: None,
             video: video_path.as_path(),
             srt: srt_path.as_path(),
             template: &req.template,

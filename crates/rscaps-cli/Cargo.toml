@@ -15,8 +15,9 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde_json = "1"
 svgr = "0.46"
-fframes = { version = "1.2.0", default-features = false }
+fframes = { version = "1.2.1-rc.38", default-features = false }
 axum = "0.8"
+fframes_skia_renderer = { version = "1.2.1-rc.38", optional = true, features = ["vulkan"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
 
@@ -27,6 +28,7 @@ default = []
 #   cargo build --release -p rscaps-cli --features gpu-nvidia
 # Raster SVG tetap usvgr/tiny-skia (CPU, deterministik; preview studio
 # memakai engine yang sama → output konsisten).
+gpu-skia = ["dep:fframes_skia_renderer"]
 gpu-nvidia = ["fframes/nvidia"]
 gpu-qsv = ["fframes/qsv"]
 gpu-vaapi = ["fframes/vaapi"]

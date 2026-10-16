@@ -12,7 +12,6 @@
 //! [`measure_words`] and passing [`WindowedSegment::direction`] into
 //! `layout::word_x_positions` - nothing else to wire.
 
-use crate::templates::layout;
 use crate::templates::pipeline::TimedWord;
 use crate::CaptionDocument;
 use std::sync::OnceLock;

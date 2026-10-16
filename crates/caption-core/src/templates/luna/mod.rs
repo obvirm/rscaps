@@ -218,7 +218,7 @@ pub fn render<'a>(
             widths[start..end].iter().sum::<f32>() + 2.0 * margin * (end - start) as f32
         })
         .fold(0.0f32, f32::max);
-    let box_w = content_w + 2.0 * pad_x;
+    let _box_w = content_w + 2.0 * pad_x;
     let box_h = lines.len() as f32 * line_h
         + lines.len().saturating_sub(1) as f32 * line_spacing
         + 2.0 * pad_y;

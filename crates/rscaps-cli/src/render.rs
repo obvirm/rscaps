@@ -131,6 +131,9 @@ pub fn probe_video(ffprobe: &Path, video: &Path) -> Result<VideoProbe> {
 }
 
 pub struct RenderVideoOpts<'a> {
+    pub engine: &'a str,
+    pub hw_encode: bool,
+    pub hwaccel: Option<&'a str>,
     pub video: &'a Path,
     pub srt: &'a Path,
     pub template: &'a str,
@@ -194,8 +197,44 @@ pub fn render_video(
     }
 
     // ── ffmpeg: video + PNG pipe → overlay → H.264 ─────────────────────────
+    let mut head: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(ha) = opts.hwaccel {
+        head.push("-hwaccel".to_string());
+        head.push(ha.to_string());
+    }
+    head.push("-i".to_string());
+    let encode_args: Vec<String> = if opts.hw_encode {
+        vec![
+            "-c:v".into(),
+            "h264_nvenc".into(),
+            "-cq".into(),
+            opts.crf.to_string(),
+            "-preset".into(),
+            opts.preset.to_string(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            "-movflags".into(),
+            "+faststart".into(),
+        ]
+    } else {
+        vec![
+            "-c:v".into(),
+            "libx264".into(),
+            "-crf".into(),
+            opts.crf.to_string(),
+            "-preset".into(),
+            opts.preset.to_string(),
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            "-movflags".into(),
+            "+faststart".into(),
+        ]
+    };
     let mut child = Command::new(&ffmpeg)
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
+        .args(&head)
         .arg(opts.video)
         .args(["-framerate", &probe.fps_str()])
         .args(["-f", "image2pipe", "-c:v", "png", "-i", "pipe:0"])
@@ -204,18 +243,7 @@ pub fn render_video(
             "[0:v][1:v]overlay=format=auto:shortest=1[v]",
         ])
         .args(["-map", "[v]", "-map", "0:a?", "-c:a", "copy"])
-        .args([
-            "-c:v",
-            "libx264",
-            "-crf",
-            &opts.crf.to_string(),
-            "-preset",
-            opts.preset,
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-        ])
+        .args(&encode_args)
         .arg(opts.out)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
@@ -253,7 +281,7 @@ pub fn render_video(
                 if s.is_empty() {
                     None
                 } else {
-                    Some(raster_png(&s, probe.width, probe.height, font_source.database())?)
+                    Some(raster_png(&s, probe.width, probe.height, font_source.database(), opts.engine)?)
                 }
             }
             None => bail!("template tak dikenal: {}", doc.template),
@@ -302,7 +330,13 @@ fn raster_png(
     width: u32,
     height: u32,
     fontdb: &svgr::usvgr::fontdb::Database,
+    engine: &str,
 ) -> Result<Vec<u8>> {
+    match engine {
+        "skia" => return skia_png(svg, width, height, fontdb),
+        "fframes" => bail!("engine fframes belum tersedia, pakai --engine cpu atau skia"),
+        _ => {}
+    }
     let opt = svgr::usvgr::Options::default();
     let tree = svgr::usvgr::Tree::from_str(svg, &opt, fontdb)
         .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
@@ -324,6 +358,121 @@ fn raster_png(
         .context("encode png")?)
 }
 
+/// Salin font dari Database milik svgr ke Database milik fframes (usvgr
+/// versi berbeda tidak menyatu di cargo — binari font-nya sama).
+#[cfg(feature = "gpu-skia")]
+fn to_fframes_fontdb(src: &svgr::usvgr::fontdb::Database) -> fframes::usvgr::fontdb::Database {
+    use std::collections::HashSet;
+    let mut db = fframes::usvgr::fontdb::Database::new();
+    let mut seen_ptr: HashSet<usize> = HashSet::new();
+    let mut seen_path: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut n_bin = 0usize;
+    let mut n_file = 0usize;
+    for face in src.faces() {
+        match &face.source {
+            svgr::usvgr::fontdb::Source::Binary(bin) => {
+                let r: &dyn AsRef<[u8]> = &**bin;
+                let bytes: &[u8] = r.as_ref();
+                if seen_ptr.insert(bytes.as_ptr() as usize) {
+                    db.load_font_data(bytes.to_vec());
+                    n_bin += 1;
+                }
+            }
+            other => {
+                // Varian File/SharedFile (atau bentuk lama lain): ekstrak path
+                // dari Debug output — jalur ada di dalam tanda kutip pertama.
+                let dbg = format!("{other:?}");
+                if let Some(start) = dbg.find('"') {
+                    if let Some(len) = dbg[start + 1..].find('"') {
+                        let path: std::path::PathBuf = dbg[start + 1..start + 1 + len].into();
+                        if path.exists() && seen_path.insert(path.clone()) {
+                            if let Ok(data) = std::fs::read(&path) {
+                                db.load_font_data(data);
+                                n_file += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[engine=skia] font dibawa: bin={n_bin} file={n_file} faces={}",
+        db.faces().count()
+    );
+    db
+}
+/// Raster SVG lewat backend Skia (fframes_skia_renderer): Vulkan GPU dengan
+/// fallback Skia-CPU. Hanya ada saat build `--features gpu-skia`; tanpa
+/// fitur, `skia_png` tetap ada tapi menuntut build ulang (lihat di bawah).
+#[cfg(feature = "gpu-skia")]
+pub fn skia_pixmap(
+    svg: &str,
+    width: u32,
+    height: u32,
+    fontdb: &svgr::usvgr::fontdb::Database,
+) -> Result<svgr::tiny_skia::Pixmap> {
+    use fframes::FrameRenderer;
+    let xdb = to_fframes_fontdb(fontdb);
+    let opt = fframes::usvgr::Options::default();
+    let tree = fframes::usvgr::Tree::from_str(svg, &opt, &xdb)
+        .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
+    let clear = fframes::Color { r: 0, g: 0, b: 0, a: 0 };
+    let frame = match fframes_skia_renderer::vulkan::SkiaVulkanCtx::new(width as usize, height as usize)
+    {
+        Ok(ctx) => {
+            let mut renderer = fframes_skia_renderer::SkiaFrameRenderer::new(&ctx);
+            renderer.render_tree(&tree, clear, width, height)
+        }
+        Err(err) => {
+            eprintln!("[engine=skia] vulkan tidak tersedia ({err}) -> fallback Skia-CPU");
+            let ctx = fframes_skia_renderer::SkiaCpuCtx::new(width as usize, height as usize);
+            let mut renderer = fframes_skia_renderer::SkiaFrameRenderer::new(&ctx);
+            renderer.render_tree(&tree, clear, width, height)
+        }
+    }
+    .map_err(|err| anyhow::anyhow!("render skia: {err}"))?;
+    // RgbaFrame = straight RGBA; tiny-skia Pixmap = premultiplied.
+    let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| anyhow::anyhow!("alokasi pixmap skia {width}x{height}"))?;
+    let out = pixmap.pixels_mut();
+    for (px, src) in out.iter_mut().zip(frame.pixels.chunks_exact(4)) {
+        *px = svgr::tiny_skia::ColorU8::from_rgba(src[0], src[1], src[2], src[3]).premultiply();
+    }
+    Ok(pixmap)
+}
+
+#[cfg(feature = "gpu-skia")]
+pub fn skia_png(
+    svg: &str,
+    width: u32,
+    height: u32,
+    fontdb: &svgr::usvgr::fontdb::Database,
+) -> Result<Vec<u8>> {
+    let pixmap = skia_pixmap(svg, width, height, fontdb)?;
+    Ok(pixmap.encode_png().context("encode png skia")?)
+}
+
+#[cfg(not(feature = "gpu-skia"))]
+pub fn skia_pixmap(
+    _svg: &str,
+    _width: u32,
+    _height: u32,
+    _fontdb: &svgr::usvgr::fontdb::Database,
+) -> Result<svgr::tiny_skia::Pixmap> {
+    bail!("engine skia butuh build ulang: cargo build -p rscaps-cli --features gpu-skia")
+}
+
+#[cfg(not(feature = "gpu-skia"))]
+pub fn skia_png(
+    svg: &str,
+    width: u32,
+    height: u32,
+    fontdb: &svgr::usvgr::fontdb::Database,
+) -> Result<Vec<u8>> {
+    let pixmap = skia_pixmap(svg, width, height, fontdb)?;
+    Ok(pixmap.encode_png().context("encode png skia")?)
+}
 fn transparent_png(width: u32, height: u32) -> Result<Vec<u8>> {
     let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| anyhow::anyhow!("gagal alokasi pixmap transparan"))?;
