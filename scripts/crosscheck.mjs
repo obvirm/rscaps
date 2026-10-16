@@ -6,9 +6,13 @@ import fs from "node:fs";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const VIDEO = "E:\\project\\rscaps\\crates\\whisper-spike\\test\\speech-test.mp4";
-const SRT = "E:\\project\\rscaps\\rscaps-sample.srt";
+const SRT =
+  process.env.RSCAPS_SRT || "E:\\project\\rscaps\\rscaps-sample.srt";
 const OUT = "E:\\temp\\opencode\\compare";
 const ONLY = process.argv[2] ? process.argv[2].split(",") : null;
+// Waktu seek berlapis: satu pasang screenshot per template per waktu (untuk
+// battery SRT multi-bahasa: setiap waktu = tengah satu cue).
+const TIMES = (process.env.RSCAPS_TIMES || "1.2").split(",").map(Number);
 
 fs.mkdirSync(OUT, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -216,7 +220,7 @@ async function selectRscaps(page, label) {
 // Seek kedua app ke waktu yang SAMA (detik) supaya cue identik.
 const SEEK_SEC = 1.2;
 
-async function seekTscaps(page) {
+async function seekTscaps(page, sec = SEEK_SEC) {
   const info = await page.evaluate((sec) => {
     const slider = document.querySelector(
       "input.timeline-slider:not(.volume-slider)",
@@ -230,7 +234,7 @@ async function seekTscaps(page) {
     slider.dispatchEvent(new Event("input", { bubbles: true }));
     slider.dispatchEvent(new Event("change", { bubbles: true }));
     return { ok: true, min: slider.min, max: slider.max, value: slider.value };
-  }, SEEK_SEC);
+  }, sec);
   await sleep(600);
   if (!info.ok) console.log("[seekA miss]", JSON.stringify(info));
   else if (!seekLogged) {
@@ -244,11 +248,11 @@ async function seekTscaps(page) {
 }
 let seekLogged = false;
 
-async function seekRscaps(page) {
+async function seekRscaps(page, sec = SEEK_SEC) {
   await page.evaluate((sec) => {
     const s = window.__rscaps.store;
     s.seekTo(Math.round(sec * s.fps));
-  }, SEEK_SEC);
+  }, sec);
   await sleep(400);
 }
 
@@ -294,14 +298,19 @@ try {
       // Halaman aktif bergantian supaya tidak kena throttle background page.
       await pageA.bringToFront();
       await selectTscaps(pageA, t.id);
-      await seekTscaps(pageA);
-      await shotTscaps(pageA, `${OUT}/${t.id}__tscaps.png`);
       await pageB.bringToFront();
       await selectRscaps(pageB, t.label);
-      await seekRscaps(pageB);
-      await shotRscaps(pageB, `${OUT}/${t.id}__rscaps.png`);
+      for (const sec of TIMES) {
+        const suffix = TIMES.length > 1 ? `@${sec}` : "";
+        await pageA.bringToFront();
+        await seekTscaps(pageA, sec);
+        await shotTscaps(pageA, `${OUT}/${t.id}${suffix}__tscaps.png`);
+        await pageB.bringToFront();
+        await seekRscaps(pageB, sec);
+        await shotRscaps(pageB, `${OUT}/${t.id}${suffix}__rscaps.png`);
+      }
       row.status = "ok";
-      log(`✓ ${t.id}`);
+      log(`✓ ${t.id} (${TIMES.length}x)`);
     } catch (e) {
       row.status = "error";
       row.err = String(e.message || e);
