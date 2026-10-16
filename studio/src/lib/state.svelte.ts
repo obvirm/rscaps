@@ -104,6 +104,12 @@ class StudioState {
   // ── Element inspector ───────────────────────────────────────────────────
   /** Index kata global yang terpilih di preview (null = tak ada). */
   selectedWord = $state<number | null>(null);
+  /**
+   * Bingkai layar (px relatif `.video-box`) kata terpilih — dipakai overlay
+   * seleksi di PreviewStage. Diukur ulang tiap render (kata bisa bergerak
+   * karena animasi).
+   */
+  wordBox = $state<{ x: number; y: number; w: number; h: number } | null>(null);
   /** Cache daftar kata dokumen aktif (bridge `list_words_json`). */
   words = $state<WordInfo[]>([]);
   /** docText terakhir yang di-sinkronkan ke `words` (kunci invalidasi). */
@@ -524,6 +530,7 @@ class StudioState {
     this.svg = this.toPreviewSvg(this.wasm.bridge.render_frame(BigInt(f)));
     this.frame = f;
     this.syncVideoToFrame(f);
+    this.scheduleWordBox();
   }
 
   // Render caption without touching the video element (used by playback loop).
@@ -531,6 +538,7 @@ class StudioState {
     if (!this.wasm) return;
     this.svg = this.toPreviewSvg(this.wasm.bridge.render_frame(BigInt(f)));
     this.frame = f;
+    this.scheduleWordBox();
   }
 
   private syncVideoToFrame(f: number): void {
@@ -764,7 +772,100 @@ class StudioState {
   /** Pilih (atau lepas, `null`) kata di preview — membuka panel Element. */
   selectWord(i: number | null): void {
     this.selectedWord = i;
-    if (i !== null) void this.listWords();
+    if (i === null) {
+      this.wordBox = null;
+      return;
+    }
+    // Alignment hitbox butuh `words` — tunggu dulu, baru ukur bingkai.
+    void this.listWords().then(() => this.scheduleWordBox());
+  }
+
+  /**
+   * Ukur ulang bingkai layar kata terpilih dari bbox `<text>` di SVG preview
+   * (sama seperti hitTestWord: koordinat layar, di-offset relatif `.video-box`).
+   * Dipanggil tiap render + saat memilih; DOM sudah sinkron dengan `this.svg`.
+   */
+  private scheduleWordBox(): void {
+    if (this.selectedWord == null) {
+      this.wordBox = null;
+      return;
+    }
+    // SVG di-inject via {@html} — tunggu microtask supaya DOM sudah ada.
+    queueMicrotask(() => this.measureWordBox());
+  }
+
+  private measureWordBox(): void {
+    if (this.selectedWord == null) {
+      this.wordBox = null;
+      return;
+    }
+    const scope = document.querySelector(".video-box");
+    const svg = scope?.querySelector("svg");
+    if (!scope || !svg) {
+      this.wordBox = null;
+      return;
+    }
+    const texts = Array.from(svg.querySelectorAll("text"));
+    if (texts.length === 0) {
+      this.wordBox = null;
+      return;
+    }
+    // Alinea yang sama dengan hitTestWord: label <text> → index stream kata.
+    const words = this.words;
+    if (words.length === 0) {
+      this.wordBox = null;
+      return;
+    }
+    const norm = (s: string) => s.trim().toLowerCase();
+    const labels = texts.map((t) => norm(t.textContent ?? ""));
+    const tMs = (this.frame / this.fps) * 1000;
+    const near = words.findIndex((w) => w.end_ms >= tMs - 2000);
+    const from = Math.max(0, (near < 0 ? 0 : near) - 20);
+    const align = (start: number): number[] => {
+      const out = new Array<number>(labels.length).fill(-1);
+      let w = Math.max(0, Math.min(start, words.length));
+      for (let i = 0; i < labels.length; i++) {
+        if (labels[i] === "") continue;
+        let j = -1;
+        for (let k = w; k < words.length; k++) {
+          if (norm(words[k].text) === labels[i]) {
+            j = k;
+            break;
+          }
+        }
+        if (j < 0) {
+          for (let k = 0; k < words.length; k++) {
+            if (norm(words[k].text) === labels[i]) {
+              j = k;
+              break;
+            }
+          }
+        }
+        if (j < 0) continue;
+        out[i] = j;
+        w = j + 1;
+      }
+      return out;
+    };
+    const matched = (a: number[]) => a.reduce((n, v) => (v >= 0 ? n + 1 : n), 0);
+    const anchored = align(from);
+    const fromStart = align(0);
+    const picked = matched(anchored) >= matched(fromStart) ? anchored : fromStart;
+
+    const scopeRect = scope.getBoundingClientRect();
+    let box: { x: number; y: number; w: number; h: number } | null = null;
+    texts.forEach((t, i) => {
+      if (picked[i] !== this.selectedWord) return;
+      const r = t.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return;
+      box = {
+        x: r.left - scopeRect.left,
+        y: r.top - scopeRect.top,
+        w: r.width,
+        h: r.height,
+      };
+    });
+    this.wordBox = box;
   }
 
   /**

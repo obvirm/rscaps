@@ -50,6 +50,18 @@
     <div class="stage">
       {@html store.svg}
     </div>
+    {#if store.wordBox && store.selectedWord != null}
+      {@const b = store.wordBox}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="word-sel"
+        style={`left:${b.x}px; top:${b.y}px; width:${b.w}px; height:${b.h}px`}
+      >
+        <span class="h tl"></span><span class="h tc"></span><span class="h tr"></span>
+        <span class="h ml"></span><span class="h mr"></span>
+        <span class="h bl"></span><span class="h bc"></span><span class="h br"></span>
+      </div>
+    {/if}
     <span class="stage-chip"
       >frame {store.frame} · {(store.frame / store.fps).toFixed(2)}s · {store.videoWidth}×{store
         .videoHeight}</span
@@ -116,6 +128,30 @@
     border-radius: 999px;
     pointer-events: none;
   }
+  /* Bingkai seleksi kata (mirip tscaps): outline kuning + 8 handle. */
+  .word-sel {
+    position: absolute;
+    border: 1.5px solid #f5c518;
+    pointer-events: none;
+    z-index: 3;
+    box-sizing: border-box;
+  }
+  .word-sel .h {
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    background: #fff;
+    border: 1.5px solid #f5c518;
+    box-sizing: border-box;
+  }
+  .word-sel .tl { left: -4px; top: -4px; }
+  .word-sel .tc { left: 50%; top: -4px; transform: translateX(-50%); }
+  .word-sel .tr { right: -4px; top: -4px; }
+  .word-sel .ml { left: -4px; top: 50%; transform: translateY(-50%); }
+  .word-sel .mr { right: -4px; top: 50%; transform: translateY(-50%); }
+  .word-sel .bl { left: -4px; bottom: -4px; }
+  .word-sel .bc { left: 50%; bottom: -4px; transform: translateX(-50%); }
+  .word-sel .br { right: -4px; bottom: -4px; }
   .controls {
     width: 100%;
     display: flex;
