@@ -3217,6 +3217,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "svgr-wasm"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "svgr 0.50.1",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "svgrtypes"
 version = "0.46.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
