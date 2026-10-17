@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>whisper-spike standalone smoke test (no Slint)</title>
+<style>
+  body { background: #0c0c0e; color: #e8e8ea; font-family: ui-monospace, monospace; padding: 24px; }
+  pre { white-space: pre-wrap; }
+  .ok { color: #7fd08a; } .err { color: #e88a7f; }
+</style>
+</head>
+<body>
+<h3>whisper-spike standalone smoke test</h3>
+<p>3s 440Hz sine → mel → encode → transcribe. Empty segments are EXPECTED
+(sine is not speech) — this proves the module runs without the studio app.</p>
+<pre id="log"></pre>
+<script src="/node_modules/onnxruntime-web/dist/ort.min.js"></script>
+<script type="module">
+import initWasm, {
+  init, load_encoder, load_decoder, load_tokenizer,
+  mel_from_audio, encode_audio, transcribe,
+} from '../pkg/whisper_spike.js';
+
+const el = document.getElementById('log');
+const log = (m, cls) => {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = m;
+  el.appendChild(line);
+  console.log(m);
+};
+const bytes = async (url) => {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('fetch ' + url + ': ' + r.status);
+  return new Uint8Array(await r.arrayBuffer());
+};
+const step = async (name, fn) => {
+  const t0 = performance.now();
+  try {
+    const v = await fn();
+    log('OK  ' + name + ' (' + Math.round(performance.now() - t0) + 'ms)', 'ok');
+    return v;
+  } catch (e) {
+    log('FAIL ' + name + ': ' + (e && e.message || e), 'err');
+    if (e && e.stack) log('stack: ' + String(e.stack).split('\n').slice(0, 6).join(' | '), 'err');
+    throw e;
+  }
+};
+
+try {
+  await step('wasm load', () => initWasm());
+  if (window.ort && ort.env && ort.env.wasm) ort.env.wasm.numThreads = 1; // mirror app
+  const dist = location.origin + '/node_modules/onnxruntime-web/dist/';
+  await step('ort init', () => init(dist));
+  const enc = await step('fetch encoder (22MB)', () => bytes('/models/whisper-base/encoder_model.onnx'));
+  const dec = await step('fetch decoder (51MB)', () => bytes('/models/whisper-base/decoder_model_merged.onnx'));
+  const tok = await step('fetch tokenizer', async () => {
+    const r = await fetch('/models/whisper-base/tokenizer.json');
+    if (!r.ok) throw new Error('tokenizer: ' + r.status);
+    return r.text();
+  });
+  await step('load_encoder', () => load_encoder(enc));
+  await step('load_decoder', () => load_decoder(dec));
+  await step('load_tokenizer', () => load_tokenizer(tok));
+  // Non-speech battery: digital silence, pink noise (krasak-krusuk), thud.
+  // Expectation: engine emits nothing alphanumeric (or high no_speech_prob
+  // so the studio gate drops it) — never a word loop.
+  const FILES = [
+    ['trailer.wav', 'Sintel trailer audio (real world)'],
+  ];
+  const actx = new (window.AudioContext || window.webkitAudioContext)();
+  for (const [file, label] of FILES) {
+    log('=== ' + label + ' (' + file + ') ===');
+    const wav = await step('fetch ' + file, () => bytes(file));
+    const buf = await step('decode ' + file, () =>
+      actx.decodeAudioData(wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength)));
+    const useSec = Math.min(10, buf.duration);
+    const off = new OfflineAudioContext(1, Math.ceil(useSec * 16000), 16000);
+    const src = off.createBufferSource();
+    src.buffer = buf; src.connect(off.destination); src.start(0);
+    const rendered = await step('resample ' + file, () => off.startRendering());
+    const samples = rendered.getChannelData(0).slice(0, Math.floor(useSec * 16000));
+    const winDur = samples.length / 16000;
+    await step('mel ' + file, () => mel_from_audio(samples));
+    const hidden = await step('encode ' + file, () => encode_audio(samples));
+    const raw = await step('transcribe ' + file, () =>
+      transcribe(hidden, BigInt(50259), BigInt(50359), true, 448, winDur));
+    try {
+      const doc = JSON.parse(raw);
+      log('text: ' + JSON.stringify(doc.text));
+      log('segments: ' + (doc.segments && doc.segments.length));
+      log('no_speech_prob: ' + doc.no_speech_prob);
+    log('avg_logprob: ' + doc.avg_logprob);
+    } catch (e) { log('raw head: ' + String(raw).slice(0, 200)); }
+  }
+  log('SMOKE DONE', 'ok');
+} catch (e) {
+  log('SMOKE ABORTED', 'err');
+}
+</script>
+</body>
+</html>

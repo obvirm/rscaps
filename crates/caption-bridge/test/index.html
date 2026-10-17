@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>caption-bridge standalone smoke test (no Slint)</title>
+<style>
+  body { background: #0c0c0e; color: #e8e8ea; font-family: ui-monospace, monospace; padding: 24px; }
+  pre { white-space: pre-wrap; }
+  .ok { color: #7fd08a; } .err { color: #e88a7f; }
+</style>
+</head>
+<body>
+<h3>caption-bridge standalone smoke test</h3>
+<p>SRT sample → parse → replace cues → format back → round-trip compare.
+No model, no canvas, deterministic.</p>
+<pre id="log"></pre>
+<script type="module">
+import init, {
+  set_document_json, replace_cues_json,
+  parse_subtitle, format_subtitle, create_wasm_bridge,
+} from '../pkg/caption_bridge.js';
+
+const el = document.getElementById('log');
+const log = (m, cls) => {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = m;
+  el.appendChild(line);
+  console.log(m);
+};
+const step = async (name, fn) => {
+  try {
+    const v = await fn();
+    log('OK   ' + name, 'ok');
+    return v;
+  } catch (e) {
+    log('FAIL ' + name + ': ' + (e && e.message || e), 'err');
+    throw e;
+  }
+};
+
+const SRT = '1\n00:00:00,000 --> 00:00:01,000\nHello\n\n2\n00:00:01,000 --> 00:00:02,000\nWorld\n';
+
+try {
+  await step('wasm load', () => init());
+  try {
+    const b = create_wasm_bridge();
+    log('bridge ctor: ' + typeof b, 'ok');
+  } catch (e) { log('bridge ctor unavailable here: ' + (e && e.message || e), 'err'); }
+  const parsed = await step('parse_subtitle', () => parse_subtitle(SRT, 'srt'));
+  const doc = JSON.parse(parsed);
+  log('cues: ' + (doc.cues && doc.cues.length) + ', duration_frames: ' + doc.duration_frames);
+  await step('replace_cues_json', () => replace_cues_json(JSON.stringify(doc.cues)));
+  const back = await step('format_subtitle', () => format_subtitle(JSON.stringify(doc.cues), 'srt'));
+  const norm = (s) => s.replace(/\r/g, '').trim();
+  if (norm(back) === norm(SRT)) log('ROUND-TRIP IDENTICAL', 'ok');
+  else { log('ROUND-TRIP DIFFERS (showing output):', 'err'); log(back); }
+  try {
+    await set_document_json('{}');
+    log('set_document_json({}) accepted', 'ok');
+  } catch (e) { log('set_document_json({}) rejected: ' + (e && e.message || e), 'err'); }
+  log('SMOKE DONE', 'ok');
+} catch (e) {
+  log('SMOKE ABORTED', 'err');
+}
+</script>
+</body>
+</html>

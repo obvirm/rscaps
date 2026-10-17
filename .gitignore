@@ -13,6 +13,11 @@ dist/
 # Models (large binary assets, fetched separately)
 /models/
 
+# Test media fixtures (binary, regenerated locally)
+crates/whisper-spike/test/*.wav
+crates/whisper-spike/test/*.mp4
+crates/whisper-spike/test/*.webm
+
 # Temp
 *.tmp
 .DS_Store
