@@ -1332,6 +1332,9 @@ class StudioState {
         renderCaption: async (frame) => this.renderFrameSvgLayers(frame),
         onProgress: (frac, stage) =>
           this.setStatus(`${stage} ${(frac * 100).toFixed(0)}%`),
+        // A/B paritas: ?exportmode=legacy → raster canvas browser (jalur lama).
+        legacyCanvas: new URLSearchParams(location.search).get("exportmode") === "legacy",
+        fontFaceCss: this.fontFaceCss,
       });
       const ext = opts.format === "webm" ? "webm" : "mp4";
       this.downloadBlob(out, `${project.name || "export"}.${ext}`);

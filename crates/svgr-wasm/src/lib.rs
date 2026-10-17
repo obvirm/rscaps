@@ -169,9 +169,12 @@ fn alpha_blend_over(base: &mut [u8], layer: &[u8], len: usize) {
         }
         let out_a255 = out_a * 255.0;
         let blend = |bc: u8, lc: u8| -> u8 {
+            // lv/bv sudah skala 0..255 (premul) → hasil = straight 0..255.
+            // JANGAN dikali 255 lagi (dulu: bayangan semi-transparan clamp
+            // ke putih — "pill putih" di belakang caption).
             let bv = bc as f32 * ba;
             let lv = lc as f32 * la_f;
-            (((lv + bv * (1.0 - la_f)) / out_a) * 255.0 + 0.5).min(255.0) as u8
+            (((lv + bv * (1.0 - la_f)) / out_a) + 0.5).min(255.0) as u8
         };
         base[i] = blend(base[i], lr);
         base[i + 1] = blend(base[i + 1], lg);

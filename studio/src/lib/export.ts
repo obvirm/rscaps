@@ -48,6 +48,11 @@ export interface BurnInOptions {
    *  Diraster & dikomposit di svgr-wasm - TIDAK di-canvas browser. */
   renderCaption: (frame: number) => Promise<CaptionSvgLayers | null>;
   onProgress?: (fraction: number, stage: string) => void;
+  /** A/B paritas: raster caption via canvas browser (jalur lama, pre-svgr-wasm).
+   *  Diaktifkan lewat URL ?exportmode=legacy. */
+  legacyCanvas?: boolean;
+  /** @font-face CSS untuk inline ke SVG (dibutuhkan jalur legacy). */
+  fontFaceCss?: string;
 }
 
 const QUALITY: Record<ExportQuality, Quality> = {
@@ -55,6 +60,29 @@ const QUALITY: Record<ExportQuality, Quality> = {
   medium: new Quality("medium"),
   high: new Quality("high"),
 };
+
+/** Replikasi svgToCanvas jalur lama (state pre-447109c): inline @font-face,
+ *  data URI  → <img> → canvas berukuran output. */
+async function svgToCanvasLegacy(
+  svg: string,
+  fontFaceCss: string | undefined,
+  outWidth: number,
+  outHeight: number,
+): Promise<HTMLCanvasElement> {
+  const inlined = fontFaceCss
+    ? svg.replace(/^<svg[^>]*>/, (m) => `${m}<style>${fontFaceCss}</style>`)
+    : svg;
+  const uri = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(inlined);
+  const img = new Image();
+  img.src = uri;
+  await img.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = outWidth;
+  canvas.height = outHeight;
+  const c2d = canvas.getContext("2d")!;
+  c2d.drawImage(img, 0, 0, outWidth, outHeight);
+  return canvas;
+}
 
 function even(n: number): number {
   return Math.max(2, Math.round(n / 2) * 2);
@@ -135,7 +163,19 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
     sample.draw(ctx, 0, 0, width, height);
 
     const cap = await opts.renderCaption(Math.max(0, Math.round(t * opts.fps)));
-    if (cap) {
+    if (cap && opts.legacyCanvas) {
+      // JALUR LAMA (pre-svgr-wasm): raster SVG via <img> canvas browser,
+      // blend layer dikomposit dengan globalCompositeOperation difference.
+      const base = await svgToCanvasLegacy(cap.base, opts.fontFaceCss, width, height);
+      ctx.drawImage(base, 0, 0, width, height);
+      if (cap.blend) {
+        const blend = await svgToCanvasLegacy(cap.blend, opts.fontFaceCss, width, height);
+        ctx.save();
+        ctx.globalCompositeOperation = "difference";
+        ctx.drawImage(blend, 0, 0, width, height);
+        ctx.restore();
+      }
+    } else if (cap) {
       // Baca piksel video dari canvas (decode WebCodecs → RGBA).
       const imgData = ctx.getImageData(0, 0, width, height);
       // Raster + komposit caption DI WASM (svgr-wasm) - bukan canvas browser.

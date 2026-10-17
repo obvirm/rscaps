@@ -22,3 +22,6 @@ crates/whisper-spike/test/*.webm
 *.tmp
 .DS_Store
 Thumbs.db
+
+# output uji (verify_chunk/parity)
+/out/
