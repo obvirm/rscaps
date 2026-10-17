@@ -14,9 +14,12 @@ const STUDIO_URL = "http://localhost:5177/";
 // A/B paritas. File hasil diberi awalan webm_legacy (tak menimpa webm_wasm).
 const LEGACY = process.argv.includes("--legacy");
 const PAGE_URL = LEGACY ? STUDIO_URL + "?exportmode=legacy" : STUDIO_URL;
-const SKIP_COMPARE = LEGACY; // run legacy cukup export saja
-const VIDEO = "E:\\project\\rscaps\\crates\\whisper-spike\\test\\speech-test.mp4";
-const SRT = "E:\\project\\rscaps\\rscaps-sample.srt";
+// --export-only: hanya ukur waktu export (benchmark), tanpa CLI/PSNR.
+const EXPORT_ONLY = process.argv.includes("--export-only");
+const SKIP_COMPARE = LEGACY || EXPORT_ONLY;
+// Override aset lewat env untuk benchmark (mis. video 4 menit).
+const VIDEO = process.env.BENCH_VIDEO ?? "E:\\project\\rscaps\\crates\\whisper-spike\\test\\speech-test.mp4";
+const SRT = process.env.BENCH_SRT ?? "E:\\project\\rscaps\\rscaps-sample.srt";
 const TEMPLATE = "cleo";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const bin = join(repoRoot, "target", "debug", process.platform === "win32" ? "rscaps.exe" : "rscaps");
