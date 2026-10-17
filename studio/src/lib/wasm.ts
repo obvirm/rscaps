@@ -1,94 +1,9 @@
 import type { WasmBridge, CaptionDocument, TemplateEntry } from "./types";
+import { FONT_SOURCES, FONT_LOADS, FONT_FAMILIES } from "./fontManifest";
 
-interface FontSource {
-  path: string;
-  family?: string;
-  weight?: number;
-}
-
-// Fonts are used twice: ingested into wasm (fframes measures/uploads them) and
-// declared as @font-face (the browser paints them) — both sides must see the
-// exact same file or preview and export diverge.
-const FONT_SOURCES: FontSource[] = [
-  { path: "/fonts/ariblk.ttf" },
-  { path: "/fonts/arial.ttf" },
-  { path: "/tplfonts/ttf/poppins-latin-400-normal.ttf", family: "Poppins", weight: 400 },
-  { path: "/tplfonts/ttf/poppins-latin-700-normal.ttf", family: "Poppins", weight: 700 },
-  { path: "/tplfonts/ttf/cairo-arabic-700-normal.ttf", family: "Cairo", weight: 700 },
-  { path: "/tplfonts/ttf/assistant-hebrew-700-normal.ttf", family: "Assistant", weight: 700 },
-  { path: "/tplfonts/ttf/vazirmatn-arabic-700-normal.ttf", family: "Vazirmatn", weight: 700 },
-  { path: "/tplfonts/ttf/heebo-hebrew-700-normal.ttf", family: "Heebo", weight: 700 },
-  { path: "/tplfonts/ttf/lalezar-arabic-400-normal.ttf", family: "Lalezar", weight: 400 },
-  { path: "/tplfonts/ttf/amiri-arabic-700-normal.ttf", family: "Amiri", weight: 700 },
-  { path: "/tplfonts/ttf/bebas-neue-latin-400-normal.ttf", family: "Bebas Neue", weight: 400 },
-  { path: "/tplfonts/ttf/inter-latin-400-normal.ttf", family: "Inter", weight: 400 },
-  { path: "/tplfonts/ttf/inter-latin-600-normal.ttf", family: "Inter", weight: 600 },
-  { path: "/tplfonts/ttf/inter-latin-700-normal.ttf", family: "Inter", weight: 700 },
-  { path: "/tplfonts/ttf/inter-latin-900-normal.ttf", family: "Inter", weight: 900 },
-  { path: "/tplfonts/ttf/anton-latin-400-normal.ttf", family: "Anton", weight: 400 },
-  { path: "/tplfonts/ttf/bungee-latin-400-normal.ttf", family: "Bungee", weight: 400 },
-  { path: "/tplfonts/ttf/poppins-latin-900-normal.ttf", family: "Poppins", weight: 900 },
-  { path: "/tplfonts/ttf/playfair-display-latin-700-normal.ttf", family: "Playfair Display", weight: 700 },
-  { path: "/tplfonts/ttf/playfair-display-latin-800-normal.ttf", family: "Playfair Display", weight: 800 },
-  { path: "/tplfonts/ttf/lora-latin-500-normal.ttf", family: "Lora", weight: 500 },
-  { path: "/tplfonts/ttf/gabarito-latin-600-normal.ttf", family: "Gabarito", weight: 600 },
-  { path: "/tplfonts/ttf/gabarito-latin-900-normal.ttf", family: "Gabarito", weight: 900 },
-  { path: "/tplfonts/ttf/bricolage-grotesque-latin-800-normal.ttf", family: "Bricolage Grotesque", weight: 800 },
-  { path: "/tplfonts/ttf/jetbrains-mono-latin-400-normal.ttf", family: "JetBrains Mono", weight: 400 },
-  { path: "/tplfonts/ttf/caveat-latin-600-normal.ttf", family: "Caveat", weight: 600 },
-  { path: "/tplfonts/ttf/caveat-latin-700-normal.ttf", family: "Caveat", weight: 700 },
-  { path: "/tplfonts/ttf/montserrat-latin-300-normal.ttf", family: "Montserrat", weight: 300 },
-  { path: "/tplfonts/ttf/montserrat-latin-600-normal.ttf", family: "Montserrat", weight: 600 },
-  { path: "/tplfonts/ttf/montserrat-latin-700-normal.ttf", family: "Montserrat", weight: 700 },
-  { path: "/tplfonts/ttf/manrope-latin-500-normal.ttf", family: "Manrope", weight: 500 },
-  { path: "/tplfonts/ttf/righteous-latin-400-normal.ttf", family: "Righteous", weight: 400 },
-  { path: "/tplfonts/ttf/vt323-latin-400-normal.ttf", family: "VT323", weight: 400 },
-  { path: "/tplfonts/ttf/komika-axis-latin-400-normal.ttf", family: "Komika Axis", weight: 400 },
-  { path: "/tplfonts/ttf/im-fell-english-latin-400-normal.ttf", family: "IM Fell English", weight: 400 },
-  { path: "/tplfonts/ttf/lobster-latin-400-normal.ttf", family: "Lobster", weight: 400 },
-];
-
-const FONT_LOADS = [
-  '400 40px "Poppins"',
-  '700 40px "Poppins"',
-  '700 40px "Cairo"',
-  '700 40px "Assistant"',
-  '700 40px "Vazirmatn"',
-  '700 40px "Heebo"',
-  '400 40px "Lalezar"',
-  '700 40px "Amiri"',
-  '400 40px "Bebas Neue"',
-  '400 40px "Inter"',
-  '600 40px "Inter"',
-  '700 40px "Inter"',
-  '900 40px "Inter"',
-  '400 40px "Anton"',
-  '400 40px "Bungee"',
-  '900 40px "Poppins"',
-  '700 40px "Playfair Display"',
-  '800 40px "Playfair Display"',
-  '500 40px "Lora"',
-  '600 40px "Gabarito"',
-  '900 40px "Gabarito"',
-  '800 40px "Bricolage Grotesque"',
-  '400 40px "JetBrains Mono"',
-  '600 40px "Caveat"',
-  '700 40px "Caveat"',
-  '300 40px "Montserrat"',
-  '600 40px "Montserrat"',
-  '700 40px "Montserrat"',
-  '500 40px "Manrope"',
-  '400 40px "Righteous"',
-  '400 40px "VT323"',
-  '400 40px "Komika Axis"',
-  '400 40px "IM Fell English"',
-  '400 40px "Lobster"',
-];
-
-/** Unique caption font families (from FONT_SOURCES) for the Typography panel. */
-export const FONT_FAMILIES: string[] = [
-  ...new Set(FONT_SOURCES.filter((f) => f.family).map((f) => f.family!)),
-].sort((a, b) => a.localeCompare(b));
+// Re-exported so existing panel imports (`./wasm`) keep working — the list
+// itself lives once, in fontManifest.ts.
+export { FONT_FAMILIES };
 
 function bytesToBase64(bytes: Uint8Array): string {
   let bin = "";

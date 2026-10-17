@@ -1,5 +1,9 @@
 // Loader svgr-wasm: raster caption di WASM (bukan canvas browser).
 //
+// Font diambil dari fontManifest.ts (satu sumber) — wajib identik dengan
+// caption-bridge supaya ukuran teks WASM-raster = caption-core (paritas).
+import { FONT_PATHS } from "./fontManifest";
+//
 // Inisialisasi sekali: init WASM + load semua font. Setelah itu export
 // memanggil burn_frame() yang mengkomposit frame video + caption SVG
 // sepenuhnya di WASM - browser hanya memindahkan bytes (putImageData).
@@ -18,46 +22,6 @@ interface SvgrWasm {
   ) => Uint8Array;
   raster_svg: (svg: string, width: number, height: number) => Uint8Array;
 }
-
-/** Font yang sama dengan wasm.ts FONT_SOURCES - wajib sinkron. */
-const FONT_PATHS = [
-  "/fonts/ariblk.ttf",
-  "/fonts/arial.ttf",
-  "/tplfonts/ttf/poppins-latin-400-normal.ttf",
-  "/tplfonts/ttf/poppins-latin-700-normal.ttf",
-  "/tplfonts/ttf/cairo-arabic-700-normal.ttf",
-  "/tplfonts/ttf/assistant-hebrew-700-normal.ttf",
-  "/tplfonts/ttf/vazirmatn-arabic-700-normal.ttf",
-  "/tplfonts/ttf/heebo-hebrew-700-normal.ttf",
-  "/tplfonts/ttf/lalezar-arabic-400-normal.ttf",
-  "/tplfonts/ttf/amiri-arabic-700-normal.ttf",
-  "/tplfonts/ttf/bebas-neue-latin-400-normal.ttf",
-  "/tplfonts/ttf/inter-latin-400-normal.ttf",
-  "/tplfonts/ttf/inter-latin-600-normal.ttf",
-  "/tplfonts/ttf/inter-latin-700-normal.ttf",
-  "/tplfonts/ttf/inter-latin-900-normal.ttf",
-  "/tplfonts/ttf/anton-latin-400-normal.ttf",
-  "/tplfonts/ttf/bungee-latin-400-normal.ttf",
-  "/tplfonts/ttf/poppins-latin-900-normal.ttf",
-  "/tplfonts/ttf/playfair-display-latin-700-normal.ttf",
-  "/tplfonts/ttf/playfair-display-latin-800-normal.ttf",
-  "/tplfonts/ttf/lora-latin-500-normal.ttf",
-  "/tplfonts/ttf/gabarito-latin-600-normal.ttf",
-  "/tplfonts/ttf/gabarito-latin-900-normal.ttf",
-  "/tplfonts/ttf/bricolage-grotesque-latin-800-normal.ttf",
-  "/tplfonts/ttf/jetbrains-mono-latin-400-normal.ttf",
-  "/tplfonts/ttf/caveat-latin-600-normal.ttf",
-  "/tplfonts/ttf/caveat-latin-700-normal.ttf",
-  "/tplfonts/ttf/montserrat-latin-300-normal.ttf",
-  "/tplfonts/ttf/montserrat-latin-600-normal.ttf",
-  "/tplfonts/ttf/montserrat-latin-700-normal.ttf",
-  "/tplfonts/ttf/manrope-latin-500-normal.ttf",
-  "/tplfonts/ttf/righteous-latin-400-normal.ttf",
-  "/tplfonts/ttf/vt323-latin-400-normal.ttf",
-  "/tplfonts/ttf/komika-axis-latin-400-normal.ttf",
-  "/tplfonts/ttf/im-fell-english-latin-400-normal.ttf",
-  "/tplfonts/ttf/lobster-latin-400-normal.ttf",
-];
 
 /** Init WASM + load semua font. Idempoten (cached promise). */
 export function initSvgrWasm(): Promise<SvgrWasm> {

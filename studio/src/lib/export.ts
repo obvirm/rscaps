@@ -146,8 +146,10 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
         width,
         height,
       );
-      // Tulis hasil komposit kembali (putImageData = blit murah, bukan raster).
-      ctx.putImageData(new ImageData(new Uint8ClampedArray(out.buffer, out.byteOffset, out.byteLength), width, height), 0, 0);
+      // Tulis hasil komposit kembali ke ImageData readback (reuse buffer) lalu
+      // blit -- bukan raster SVG lagi.
+      imgData.data.set(out);
+      ctx.putImageData(imgData, 0, 0);
     }
     await canvasSource.add(t, sample.duration ?? 1 / opts.fps);
     sample.close();

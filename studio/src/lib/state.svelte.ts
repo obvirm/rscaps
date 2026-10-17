@@ -1329,7 +1329,7 @@ class StudioState {
         format: opts.format,
         quality: opts.quality,
         resolution: opts.resolution,
-        renderCaption: (frame) => this.renderFrameSvgLayers(frame),
+        renderCaption: async (frame) => this.renderFrameSvgLayers(frame),
         onProgress: (frac, stage) =>
           this.setStatus(`${stage} ${(frac * 100).toFixed(0)}%`),
       });
