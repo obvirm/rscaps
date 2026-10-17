@@ -23,6 +23,13 @@
    - Jangan tambal-tambal (strip filter kasar, hack font, dll) tanpa paham kenapa.
    - Bandingkan dengan tscaps (React) sebagai reference visual; verifikasi screenshot sendiri sebelum lapor.
 
+4. **DILARANG distorsi percakapan**
+   - Jawab maksud user APA ADANYA. Jangan ganti topik, jangan menambah asumsi, jangan menjawab pertanyaan yang tidak ditanya.
+   - Kalau user sudah menyebut hal spesifik, JANGAN bergeser ke hal lain.
+   - Kalau maksud user tidak 100% jelas: **TANYA dulu** (ya/tidak atau pilihan konkret), lalu tunggu. Jangan menebak lalu mengerjakan hal lain.
+   - Jangan mengarang jawaban/analisis. Kalau tidak tahu: bilang **"saya tidak tahu"**.
+   - Sebelum bertindak, ulangi 1 kalimat maksud user; kalau salah, user bisa koreksi lebih awal.
+
 ## Port & Server
 
 - Port 5173: tscaps main (React — referensi)
