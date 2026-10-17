@@ -292,6 +292,9 @@ pub struct FframesRenderOpts<'a> {
     pub crf: u32,
     pub preset: &'a str,
     pub hw_encode: bool,
+    /// Nama encoder hardware (dipakai bila `hw_encode`).
+    pub hw_encoder: &'a str,
+    /// hwaccel untuk decode ffmpeg (sama seperti jalur overlay).
     pub hwaccel: Option<&'a str>,
 }
 
@@ -360,16 +363,33 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
         }
     }
 
-    // Encoder: NVENC bila diminta & tersedia, selain itu libx264.
+    // Encoder: hardware bila diminta & tersedia, selain itu libx264.
     let crf_str = opts.crf.to_string();
-    let use_nvenc = opts.hw_encode && nvenc_available(&ffmpeg);
-    if opts.hw_encode && !use_nvenc {
-        eprintln!("[fframes] WARN: --hw-encode diminta tapi h264_nvenc tidak ditemukan → fallback libx264");
+    let use_hw = opts.hw_encode && crate::render::hw_encoder_available(&ffmpeg, opts.hw_encoder);
+    if opts.hw_encode && !use_hw {
+        eprintln!(
+            "[fframes] WARN: --hw-encode diminta tapi {} tidak tersedia → fallback libx264",
+            opts.hw_encoder
+        );
     }
-    let (encoder_name, codec_params): (&str, &[(&str, &str)]) = if use_nvenc {
-        ("h264_nvenc", &[("cq", &crf_str), ("preset", opts.preset)])
+    let crf = crf_str.as_str();
+    // Nama flag kualitas beda per vendor (nvenc=cq, qsv=global_quality, dst).
+    let p_nvenc = [("cq", crf), ("preset", opts.preset)];
+    let p_qsv = [("global_quality", crf), ("preset", opts.preset)];
+    let p_vaapi = [("qp", crf)];
+    let p_vt = [("q:v", crf)];
+    let p_amf = [("qp_i", crf), ("qp_p", crf)];
+    let p_x264 = [("crf", crf), ("preset", opts.preset)];
+    let (encoder_name, codec_params): (&str, &[(&str, &str)]) = if use_hw {
+        match opts.hw_encoder {
+            "h264_qsv" => ("h264_qsv", &p_qsv),
+            "h264_vaapi" => ("h264_vaapi", &p_vaapi),
+            "h264_videotoolbox" => ("h264_videotoolbox", &p_vt),
+            "h264_amf" => ("h264_amf", &p_amf),
+            _ => ("h264_nvenc", &p_nvenc),
+        }
     } else {
-        ("libx264", &[("crf", &crf_str), ("preset", opts.preset)])
+        ("libx264", &p_x264)
     };
     let video_encoder = EncoderOptions {
         preferred_encoder: Some(encoder_name),
@@ -403,6 +423,8 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             media: Some(&media),
             video_encoder_options: video_encoder,
             audio_encoder_options: EncoderOptions::default(),
+            // Progress baris-per-10% di stderr; tanpa banner ffplay/path.
+            logger: fframes::FFramesLoggerVariant::Lines,
             load_system_fonts: true,
             default_font: "Arial",
             ..Default::default()
@@ -448,6 +470,7 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             media: Some(&media),
             video_encoder_options: video_encoder.clone(),
             audio_encoder_options: EncoderOptions::default(),
+            logger: fframes::FFramesLoggerVariant::Lines,
             load_system_fonts: true,
             default_font: "Arial",
             frame_range: Some(start..end),
@@ -736,17 +759,6 @@ fn concat_segments(ffmpeg: &Path, segments: &[PathBuf], out: &Path) -> Result<()
         .with_context(|| format!("jalankan {}", ffmpeg.display()))?;
     ensure!(status.success(), "ffmpeg concat exit non-zero");
     Ok(())
-}
-
-/// Cek apakah `h264_nvenc` tersedia di ffmpeg build ini.
-fn nvenc_available(ffmpeg: &Path) -> bool {
-    Command::new(ffmpeg)
-        .args(["-hide_banner", "-encoders"])
-        .output()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout).contains("h264_nvenc")
-        })
-        .unwrap_or(false)
 }
 
 fn collect_font_files(dir: &Path, out: &mut Vec<RawFontData>) -> Result<()> {

@@ -176,6 +176,7 @@ async fn start_render(
         let opts = RenderVideoOpts {
             engine: "cpu",
             hw_encode: false,
+            hw_encoder: "h264_nvenc",
             hwaccel: None,
             video: video_path.as_path(),
             srt: srt_path.as_path(),

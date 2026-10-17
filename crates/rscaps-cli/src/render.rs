@@ -130,9 +130,38 @@ pub fn probe_video(ffprobe: &Path, video: &Path) -> Result<VideoProbe> {
     })
 }
 
+/// Triple encoder GPU yang didukung `--hw-encoder` + cek ketersediaan di build
+/// ffmpeg ini (dicari di daftar `-encoders`).
+pub fn hw_encoder_available(ffmpeg: &Path, encoder: &str) -> bool {
+    Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains(encoder))
+        .unwrap_or(false)
+}
+
+/// Argumen ffmpeg untuk encoder hardware (nama flag kualitas beda per vendor;
+/// nvenc = cq, qsv = global_quality, vaapi = qp, videotoolbox = q:v, amf = qp_*).
+pub fn hw_encode_args(encoder: &str, crf: u32, preset: &str) -> Vec<String> {
+    let crf = crf.to_string();
+    let mut a = vec!["-c:v".to_string(), encoder.to_string()];
+    match encoder {
+        "h264_qsv" => a.extend(["-global_quality".to_string(), crf, "-preset".to_string(), preset.to_string()]),
+        "h264_vaapi" => a.extend(["-qp".to_string(), crf]),
+        "h264_videotoolbox" => a.extend(["-q:v".to_string(), crf]),
+        "h264_amf" => a.extend(["-qp_i".to_string(), crf.clone(), "-qp_p".to_string(), crf]),
+        // h264_nvenc + default: cq + preset.
+        _ => a.extend(["-cq".to_string(), crf, "-preset".to_string(), preset.to_string()]),
+    }
+    a
+}
+
 pub struct RenderVideoOpts<'a> {
     pub engine: &'a str,
     pub hw_encode: bool,
+    /// Nama encoder hardware: h264_nvenc | h264_qsv | h264_vaapi |
+    /// h264_videotoolbox | h264_amf.
+    pub hw_encoder: &'a str,
     pub hwaccel: Option<&'a str>,
     pub video: &'a Path,
     pub srt: &'a Path,
@@ -165,6 +194,7 @@ pub fn render_video(
             crf: opts.crf,
             preset: opts.preset,
             hw_encode: opts.hw_encode,
+            hw_encoder: opts.hw_encoder,
             hwaccel: opts.hwaccel,
         })?;
         on_progress(1, 1);
@@ -227,19 +257,16 @@ pub fn render_video(
         head.push(ha.to_string());
     }
     head.push("-i".to_string());
-    let encode_args: Vec<String> = if opts.hw_encode {
-        vec![
-            "-c:v".into(),
-            "h264_nvenc".into(),
-            "-cq".into(),
-            opts.crf.to_string(),
-            "-preset".into(),
-            opts.preset.to_string(),
-            "-pix_fmt".into(),
-            "yuv420p".into(),
-            "-movflags".into(),
-            "+faststart".into(),
-        ]
+    // Encoder hardware bila diminta & tersedia; selain itu libx264.
+    let use_hw = opts.hw_encode && hw_encoder_available(&ffmpeg, opts.hw_encoder);
+    if opts.hw_encode && !use_hw {
+        eprintln!(
+            "[render] WARN: --hw-encode diminta tapi {} tidak tersedia → fallback libx264",
+            opts.hw_encoder
+        );
+    }
+    let mut encode_args: Vec<String> = if use_hw {
+        hw_encode_args(opts.hw_encoder, opts.crf, opts.preset)
     } else {
         vec![
             "-c:v".into(),
@@ -248,12 +275,9 @@ pub fn render_video(
             opts.crf.to_string(),
             "-preset".into(),
             opts.preset.to_string(),
-            "-pix_fmt".into(),
-            "yuv420p".into(),
-            "-movflags".into(),
-            "+faststart".into(),
         ]
     };
+    encode_args.extend(["-pix_fmt".into(), "yuv420p".into(), "-movflags".into(), "+faststart".into()]);
     let mut child = Command::new(&ffmpeg)
         .args(&head)
         .arg(opts.video)

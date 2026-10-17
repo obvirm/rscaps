@@ -118,9 +118,13 @@ enum Cmd {
         /// Mesin raster caption: cpu | skia | fframes
         #[arg(long, default_value = "cpu")]
         engine: String,
-        /// Encode video di GPU (ganti libx264 -> h264_nvenc)
+        /// Encode video di GPU (ganti libx264 -> encoder hardware)
         #[arg(long)]
         hw_encode: bool,
+        /// Encoder hardware utk --hw-encode:
+        /// h264_nvenc|h264_qsv|h264_vaapi|h264_videotoolbox|h264_amf
+        #[arg(long, default_value = "h264_nvenc")]
+        hw_encoder: String,
         /// Decode dengan -hwaccel <auto|cuda|d3d11va|vaapi|qsv> (default: CPU)
         #[arg(long)]
         hwaccel: Option<String>,
@@ -178,6 +182,7 @@ fn main() -> Result<()> {
             preset,
             engine,
             hw_encode,
+            hw_encoder,
             hwaccel,
         } => cmd_render(CmdRenderArgs {
             video: &video,
@@ -191,6 +196,7 @@ fn main() -> Result<()> {
             preset: &preset,
             engine: &engine,
             hw_encode,
+            hw_encoder: &hw_encoder,
             hwaccel: hwaccel.as_deref(),
         }),
         Cmd::Serve { bind, port } => cmd_serve(&bind, port),
@@ -400,6 +406,7 @@ fn render_png(
 struct CmdRenderArgs<'a> {
     engine: &'a str,
     hw_encode: bool,
+    hw_encoder: &'a str,
     hwaccel: Option<&'a str>,
     video: &'a Path,
     srt: &'a Path,
@@ -437,6 +444,7 @@ fn cmd_render(args: CmdRenderArgs<'_>) -> Result<()> {
             preset: args.preset,
             engine: args.engine,
             hw_encode: args.hw_encode,
+            hw_encoder: args.hw_encoder,
             hwaccel: args.hwaccel,
         },
         |done, total| {
