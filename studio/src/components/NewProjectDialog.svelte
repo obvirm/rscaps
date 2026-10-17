@@ -10,6 +10,7 @@
     type WhisperBackend,
     type WhisperModel,
   } from "../lib/types";
+  import { isModelSupported } from "../lib/transcribe";
   import type { VideoProbe } from "../lib/video";
 
   let {
@@ -163,7 +164,9 @@
           <label class="label" for="np-model">Model</label>
           <select id="np-model" class="select" bind:value={model}>
             {#each WHISPER_MODELS as m (m.id)}
-              <option value={m.id}>{m.label}</option>
+              <option value={m.id} disabled={!isModelSupported(m.id)}>
+                {m.label}{isModelSupported(m.id) ? "" : " — not in this build"}
+              </option>
             {/each}
           </select>
           <p class="hint">Larger models give better accuracy but take longer to download and run.</p>

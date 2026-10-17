@@ -8,9 +8,15 @@
   import StyleControlRow from "../controls/StyleControlRow.svelte";
 
   const tpl = $derived(store.activeTemplate);
-  const controls = $derived(
+  const allControls = $derived(
     (tpl?.styleControls ?? []).filter((c) => (c.group ?? "style") !== "motion"),
   );
+  // Kontrol `tag-*` menata kata BERTAG (butuh subsystem tagging yang belum
+  // di-port di caption-core) → disembunyikan, bukan diam-diam inert.
+  const hiddenTagCount = $derived(
+    allControls.filter((c) => c.id.startsWith("tag-")).length,
+  );
+  const controls = $derived(allControls.filter((c) => !c.id.startsWith("tag-")));
   const variants = $derived(tpl?.variants ?? []);
 
   // Group by subgroup (tscaps FieldsSection), preserving first-seen order.
@@ -67,6 +73,12 @@
     <RotateCcw size={14} />
     Restore template defaults
   </button>
+  {#if hiddenTagCount > 0}
+    <p class="note">
+      {hiddenTagCount} tag control{hiddenTagCount === 1 ? "" : "s"} hidden — they style
+      word-level tags, which this build does not produce yet.
+    </p>
+  {/if}
   {#if variants.length > 0}
     <Section title="Preset">
       <SelectField
@@ -143,6 +155,12 @@
     font-size: 13px;
     color: rgb(var(--fg-2));
     padding: 12px 0;
+  }
+  .note {
+    margin: 4px 0 8px;
+    font-size: 11.5px;
+    color: rgb(var(--fg-2));
+    line-height: 1.4;
   }
   .color-grid {
     display: grid;
