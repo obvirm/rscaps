@@ -47,9 +47,36 @@ fn chunk_frames() -> usize {
 /// `width`/`height` = ukuran sumber (dari probe pemanggil). `hwaccel`
 /// diteruskan ke ffmpeg (decode GPU lalu download ke CPU — tanpa
 /// `-hwaccel_output_format`, jadi output rawvideo tetap kompatibel).
+/// Kalau decode dengan hwaccel gagal (hwaccel tak ada di mesin / nilai
+/// salah), otomatis retry sekali tanpa hwaccel (CPU) supaya render tak mati.
 /// `start_sec` = seek (0 = awal); `max_frames` = batas jumlah frame
 /// (0 = sampai EOF). Dipakai per-potongan saat chunked render.
 fn decode_frames_rgba(
+    ffmpeg: &Path,
+    video: &Path,
+    width: u32,
+    height: u32,
+    target_fps: u32,
+    hwaccel: Option<&str>,
+    start_sec: f64,
+    max_frames: usize,
+) -> Result<Vec<Arc<PreloadedImageData>>> {
+    match decode_frames_once(ffmpeg, video, width, height, target_fps, hwaccel, start_sec, max_frames)
+    {
+        Ok(frames) => Ok(frames),
+        Err(err) if hwaccel.is_some() => {
+            eprintln!(
+                "[fframes] WARN: decode dengan --hwaccel {} gagal ({err:#}) → retry CPU",
+                hwaccel.unwrap_or_default()
+            );
+            decode_frames_once(ffmpeg, video, width, height, target_fps, None, start_sec, max_frames)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Satu kali decode (tanpa retry). Lihat `decode_frames_rgba`.
+fn decode_frames_once(
     ffmpeg: &Path,
     video: &Path,
     width: u32,
@@ -83,6 +110,7 @@ fn decode_frames_rgba(
         .with_context(|| format!("jalankan {}", ffmpeg.display()))?;
 
     let mut stdout = child.stdout.take().context("ffmpeg stdout")?;
+    let mut stderr = child.stderr.take().context("ffmpeg stderr")?;
     let mut frames = Vec::new();
     let mut buf = vec![0u8; frame_bytes];
     let mut idx = 0usize;
@@ -106,7 +134,14 @@ fn decode_frames_rgba(
     }
 
     let status = child.wait().context("tunggu ffmpeg")?;
-    ensure!(status.success(), "ffmpeg decode exit non-zero");
+    if !status.success() {
+        // Sertakan stderr ffmpeg supaya penyebab (mis. hwaccel tak
+        // didukung) terlihat — pipe-nya belum pernah dibaca.
+        let mut err_txt = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stderr, &mut err_txt);
+        let err_txt = String::from_utf8_lossy(&err_txt);
+        anyhow::bail!("ffmpeg decode exit non-zero: {}", err_txt.trim());
+    }
     ensure!(
         !frames.is_empty(),
         "tidak ada frame ter-decode dari video sumber"
@@ -126,8 +161,9 @@ pub struct CompositeVideo<const W: usize, const H: usize> {
     audio_name: String,
     duration_frames: usize,
     /// Prefix SVG caption (tag pembuka `<svg …>`) — di-cache setelah frame
-    /// pertama supaya tidak scan ulang tiap frame.
-    svg_prefix: std::sync::OnceLock<String>,
+    /// pertama yang ber-root. `None` = frame pertama kosong (gap di awal) →
+    /// tak di-cache, dicari ulang tiap frame.
+    svg_prefix: std::sync::OnceLock<Option<String>>,
 }
 
 impl<const W: usize, const H: usize> Video for CompositeVideo<W, H> {
@@ -154,20 +190,28 @@ impl<const W: usize, const H: usize> Video for CompositeVideo<W, H> {
     fn render_frame<'a>(&'a self, frame: Frame, ctx: &FFramesContext<'a, '_>) -> Svgr<'a> {
         let idx = frame.index;
         let caption = self.caption.render_frame(frame, ctx);
+        let caption_str = caption.to_string();
+        let w = W;
+        let h = H;
 
         // frame.index = index global (renderer menambah frame_offset saat
         // render range) → ubah ke index lokal chunk.
-        let Some(local) = idx.checked_sub(self.frame_offset) else {
-            return caption;
-        };
-        let Some(img) = self.frames.get(local) else {
-            return caption;
+        let img = idx
+            .checked_sub(self.frame_offset)
+            .and_then(|local| self.frames.get(local));
+
+        let Some(img) = img else {
+            // Tail caption tanpa frame sumber. Caption kosong (gap SRT →
+            // Svgr::empty = string "") akan membuat backend gagal parse
+            // (NoRootNode) — kembalikan root minimal yang valid.
+            if caption_str.contains("<svg") {
+                return caption;
+            }
+            return Svgr::from(format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"/>"#
+            ));
         };
 
-        let caption_str = caption.to_string();
-
-        let w = W;
-        let h = H;
         // "meet" = letterbox (aspect ratio terjaga). Frame sumber ukuran asli;
         // kanvas W×H sesuai video nyata (portrait/landscape benar).
         let image_elem = format!(
@@ -175,25 +219,47 @@ impl<const W: usize, const H: usize> Video for CompositeVideo<W, H> {
             img.id
         );
 
-        // Cache prefix (tag pembuka <svg …>) setelah frame pertama.
-        let prefix = self.svg_prefix.get_or_init(|| {
-            find_svg_open_prefix(&caption_str)
-                .unwrap_or_else(|| caption_str.clone())
-        });
-
-        // Kalau prefix = seluruh caption (tidak ada <svg> valid), fallback caption.
-        if prefix.len() >= caption_str.len() {
-            return caption;
+        // Caption di luar cue (gap SRT) = string kosong. Bangun root minimal
+        // berisi background video saja — jangan kirim string kosong ke parser.
+        if !caption_str.contains("<svg") {
+            return Svgr::from(format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">{image_elem}</svg>"#
+            ));
         }
 
-        let suffix = &caption_str[prefix.len()..];
-        let mut out = String::with_capacity(prefix.len() + image_elem.len() + suffix.len());
-        out.push_str(prefix);
-        out.push('\n');
-        out.push_str(&image_elem);
-        out.push_str(suffix);
+        // Cache prefix (tag pembuka <svg …>) setelah frame pertama yang valid.
+        // OnceLock<Option>: None = frame pertama kosong (gap di awal) → tak
+        // cache apa pun, cari ulang tiap frame sampai ada caption ber-root.
+        let cached = self
+            .svg_prefix
+            .get_or_init(|| find_svg_open_prefix(&caption_str));
+
+        // Guard: caption frame ini harus diawali prefix yang sama. Tag <svg>
+        // yang berubah panjang antar frame akan memotong di tengah tag kalau
+        // di-slice membabi-buta — re-find saja (langka).
+        let prefix = cached.as_deref().filter(|p| caption_str.starts_with(p));
+
+        let out = match prefix {
+            Some(p) => splice_image(p, &caption_str, &image_elem),
+            None => match find_svg_open_prefix(&caption_str) {
+                Some(p) if p.len() < caption_str.len() => splice_image(&p, &caption_str, &image_elem),
+                // Tak ada <svg> valid — fallback caption (masih ber-root).
+                _ => return caption,
+            },
+        };
         Svgr::from(out)
     }
+}
+
+/// Sisipkan `<image …>` tepat setelah tag pembuka `<svg …>`.
+fn splice_image(prefix: &str, caption_str: &str, image_elem: &str) -> String {
+    let suffix = &caption_str[prefix.len()..];
+    let mut out = String::with_capacity(prefix.len() + image_elem.len() + 1 + suffix.len());
+    out.push_str(prefix);
+    out.push('\n');
+    out.push_str(image_elem);
+    out.push_str(suffix);
+    out
 }
 
 /// Return prefix SVG = dari awal sampai dan termasuk `<svg …>` pembuka
@@ -350,7 +416,7 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     let mut audio_name = String::new();
     if probe.has_audio {
         let wav_path = tmp_dir.join("audio.wav");
-        extract_audio_wav(&ffmpeg, opts.video, &wav_path, opts.hwaccel)?;
+        extract_audio_wav(&ffmpeg, opts.video, &wav_path)?;
         match PreloadedAudioData::decode_raw_file_stereo(None, &wav_path) {
             Ok(audio_data) => {
                 audio_name = "audio.wav".to_string();
@@ -628,8 +694,18 @@ fn render_sized_generic(
     }
     try_size!(1920, 1080);
     try_size!(1280, 720);
+    try_size!(3840, 2160);
+    // 854×480 / 480×854: ratio unik (1.7792 / 0.5621) — sedikit beda dari
+    // 16:9 / 9:16, jadi bisa menang di closest_aspect_size untuk source
+    // dengan aspect di antaranya. Tanpa ini jatuh ke 1920×1080 (portrait
+    // → landscape, orientasi salah).
+    try_size!(854, 480);
+    try_size!(640, 360);
     try_size!(1080, 1920);
     try_size!(720, 1280);
+    try_size!(2160, 3840);
+    try_size!(480, 854);
+    try_size!(360, 640);
     try_size!(1080, 1080);
     try_size!(1024, 768);
     try_size!(800, 600);
@@ -655,9 +731,13 @@ fn render_sized_generic(
 }
 
 /// Cari pasangan umum yang paling se-aspek dengan `aspect`.
-/// Karena pencarian pakai `<` ketat, ia selalu mengembalikan anggota PERTAMA
-/// per keluarga aspek (mis. 16:9 → 1920×1080), yang semuanya ada di daftar
-/// dispatch `render_sized_generic` — jadi fallback 1920×1080 tak tercapai.
+///
+/// Tie-break `<` ketat = anggota PERTAMA per keluarga ratio menang, KECUALI
+/// keluarga dengan ratio unik sedikit berbeda — `854×480` (1.7792) dan
+/// `480×854` (0.5621) bisa menang untuk source dengan aspect di antara.
+/// Kedua ukuran itu (plus seluruh `COMMON`) wajib ada di
+/// `render_sized_generic`, kalau tidak fallback 1920×1080 (orientasi
+/// salah untuk portrait).
 fn closest_aspect_size(aspect: f64) -> (usize, usize) {
     const COMMON: &[(usize, usize)] = &[
         // Landscape 16:9.
@@ -786,18 +866,11 @@ fn collect_font_files(dir: &Path, out: &mut Vec<RawFontData>) -> Result<()> {
     Ok(())
 }
 
-fn extract_audio_wav(
-    ffmpeg: &Path,
-    video: &Path,
-    out: &Path,
-    hwaccel: Option<&str>,
-) -> Result<()> {
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
-    if let Some(ha) = hwaccel {
-        cmd.args(["-hwaccel", ha]);
-    }
-    let status = cmd
+fn extract_audio_wav(ffmpeg: &Path, video: &Path, out: &Path) -> Result<()> {
+    // Tanpa -hwaccel: dengan -vn video decoder tak dibuka, jadi hwaccel
+    // di sini percuma — dan nilai yang tak didukung malah mematikan extract.
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
         .arg("-i")
         .arg(video)
         .args(["-vn", "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le"])
