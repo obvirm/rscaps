@@ -10,11 +10,11 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use fframes::media::PreloadedAudioData;
 use fframes::usvgr::PreloadedImageData;
 use fframes::{
@@ -26,41 +26,55 @@ use caption_core::{CaptionDocument, CaptionVideo};
 use crate::doc;
 use crate::render::{probe_video, tool_bin};
 
-/// Batas frame yang di-pre-decode ke memori (anti-OOM).
-/// 600 frame ≈ 20 detik @ 30fps. Video lebih panjang → tolak, arahkan ke
-/// `--engine cpu|skia` (PNG-pipe, streaming, tanpa pre-decode).
-const MAX_PREDECODED_FRAMES: usize = 600;
+/// Ukuran potongan (chunk): hanya chunk ini yang di-pre-decode ke RAM.
+/// Video lebih panjang dirender per potongan (fframes `frame_range`) lalu
+/// digabung dengan ffmpeg concat — jadi tak ada cap total. Override lewat env
+/// `RSCAPS_FFRAMES_CHUNK` (untuk uji).
+const CHUNK_FRAMES: usize = 600;
+
+fn chunk_frames() -> usize {
+    std::env::var("RSCAPS_FFRAMES_CHUNK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(CHUNK_FRAMES)
+}
 
 // ── decode frame video sumber → PreloadedImageData ─────────────────────────
 
 /// Decode frame video ke RGBA via ffmpeg rawvideo pipe, di-resample ke
 /// `target_fps` supaya index frame cocok dengan `Video::FPS` (CaptionVideo=30).
+/// `width`/`height` = ukuran sumber (dari probe pemanggil). `hwaccel`
+/// diteruskan ke ffmpeg (decode GPU lalu download ke CPU — tanpa
+/// `-hwaccel_output_format`, jadi output rawvideo tetap kompatibel).
+/// `start_sec` = seek (0 = awal); `max_frames` = batas jumlah frame
+/// (0 = sampai EOF). Dipakai per-potongan saat chunked render.
 fn decode_frames_rgba(
     ffmpeg: &Path,
     video: &Path,
+    width: u32,
+    height: u32,
     target_fps: u32,
+    hwaccel: Option<&str>,
+    start_sec: f64,
+    max_frames: usize,
 ) -> Result<Vec<Arc<PreloadedImageData>>> {
-    let ffprobe = tool_bin("ffprobe", None)?;
-    let probe = probe_video(&ffprobe, video)?;
-    let width = probe.width;
-    let height = probe.height;
-    let src_fps = probe.fps_f64();
-    let src_frames = (probe.duration_sec * src_fps).ceil().max(1.0) as usize;
-
-    ensure!(
-        src_frames <= MAX_PREDECODED_FRAMES,
-        "video sumber {src_frames} frame (> {MAX_PREDECODED_FRAMES} batas pre-decode) \
-         ≈ {:.0}s @ {src_fps:.1}fps. Pakai `--engine cpu` atau `--engine skia` \
-         untuk video panjang (PNG-pipe, streaming, tanpa pre-decode).",
-        probe.duration_sec
-    );
-
     let frame_bytes = (width as usize) * (height as usize) * 4;
     let fps_filter = format!("fps={target_fps}");
-    let mut child = Command::new(ffmpeg)
-        .args(["-y", "-hide_banner", "-loglevel", "error"])
-        .arg("-i")
-        .arg(video)
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-y", "-hide_banner", "-loglevel", "error"]);
+    if let Some(ha) = hwaccel {
+        cmd.args(["-hwaccel", ha]);
+    }
+    if start_sec > 0.0 {
+        // Seek sebelum input (frame-accurate di ffmpeg modern).
+        cmd.args(["-ss", &format!("{start_sec}")]);
+    }
+    cmd.arg("-i").arg(video);
+    if max_frames > 0 {
+        cmd.args(["-frames:v", &max_frames.to_string()]);
+    }
+    let mut child = cmd
         .args(["-vf", &fps_filter])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
         .stdout(Stdio::piped())
@@ -107,6 +121,8 @@ fn decode_frames_rgba(
 pub struct CompositeVideo<const W: usize, const H: usize> {
     caption: CaptionVideo,
     frames: Vec<Arc<PreloadedImageData>>,
+    /// Index frame global dari `frames[0]` (offset chunk; 0 = seluruh video).
+    frame_offset: usize,
     audio_name: String,
     duration_frames: usize,
     /// Prefix SVG caption (tag pembuka `<svg …>`) — di-cache setelah frame
@@ -138,11 +154,17 @@ impl<const W: usize, const H: usize> Video for CompositeVideo<W, H> {
     fn render_frame<'a>(&'a self, frame: Frame, ctx: &FFramesContext<'a, '_>) -> Svgr<'a> {
         let idx = frame.index;
         let caption = self.caption.render_frame(frame, ctx);
-        let caption_str = caption.to_string();
 
-        let Some(img) = self.frames.get(idx) else {
+        // frame.index = index global (renderer menambah frame_offset saat
+        // render range) → ubah ke index lokal chunk.
+        let Some(local) = idx.checked_sub(self.frame_offset) else {
             return caption;
         };
+        let Some(img) = self.frames.get(local) else {
+            return caption;
+        };
+
+        let caption_str = caption.to_string();
 
         let w = W;
         let h = H;
@@ -294,12 +316,6 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
 
     let fps_f64 = probe.fps_f64();
     let video_frames = (probe.duration_sec * fps_f64).ceil().max(1.0) as usize;
-    ensure!(
-        video_frames <= MAX_PREDECODED_FRAMES,
-        "video sumber {video_frames} frame (> {MAX_PREDECODED_FRAMES} batas pre-decode) \
-         ≈ {:.0}s. Pakai `--engine cpu` atau `--engine skia` untuk video panjang.",
-        probe.duration_sec
-    );
 
     let doc: CaptionDocument = doc::build_document(
         opts.srt,
@@ -310,12 +326,8 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     let caption_frames = doc.duration_frames as usize;
     let duration_frames = caption_frames.max(video_frames);
 
-    // Decode frame sumber (resample ke 30fps).
+    // Semua decode di-resample ke fps CaptionVideo (30) supaya index cocok.
     let target_fps = CaptionVideo::FPS as u32;
-    eprintln!(
-        "[fframes] decode video sumber ({src_w}x{src_h}, resample ke {target_fps}fps)..."
-    );
-    let frames = decode_frames_rgba(&ffmpeg, opts.video, target_fps)?;
 
     // Font.
     let mut fonts: Vec<RawFontData> = Vec::new();
@@ -326,7 +338,7 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     }
     eprintln!("[fframes] {} file font dimuat", fonts.len());
 
-    // Audio + tmp dir (auto-cleanup).
+    // Audio + tmp dir (auto-cleanup via Drop).
     let tmp_dir = std::env::temp_dir().join(format!("rscaps-fframes-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).context("buat tmp dir")?;
     let _tmp_guard = TmpDirGuard(tmp_dir.clone());
@@ -347,17 +359,6 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             }
         }
     }
-
-    // MediaProvider.
-    let mut images: HashMap<String, Arc<PreloadedImageData>> = HashMap::new();
-    for frame in frames.iter() {
-        images.insert(frame.id.clone(), frame.clone());
-    }
-    let media = FframesMedia {
-        images,
-        fonts,
-        audio: audio_map,
-    };
 
     // Encoder: NVENC bila diminta & tersedia, selain itu libx264.
     let crf_str = opts.crf.to_string();
@@ -383,22 +384,97 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
         }
     }
 
-    let render_opts = RenderOptions {
-        media: Some(&media),
-        video_encoder_options: video_encoder,
-        audio_encoder_options: EncoderOptions::default(),
-        load_system_fonts: true,
-        default_font: "Arial",
-        ..Default::default()
-    };
+    let chunk = chunk_frames();
 
+    if duration_frames <= chunk {
+        // Satu kali render — seluruh video di-pre-decode (bounded `chunk`).
+        eprintln!(
+            "[fframes] decode video sumber ({src_w}x{src_h}, resample ke {target_fps}fps, {duration_frames} frame)..."
+        );
+        let frames = decode_frames_rgba(
+            &ffmpeg, opts.video, probe.width, probe.height, target_fps, opts.hwaccel, 0.0, 0,
+        )?;
+        let media = FframesMedia {
+            images: images_of(&frames),
+            fonts: fonts.clone(),
+            audio: audio_map.clone(),
+        };
+        let render_opts = RenderOptions {
+            media: Some(&media),
+            video_encoder_options: video_encoder,
+            audio_encoder_options: EncoderOptions::default(),
+            load_system_fonts: true,
+            default_font: "Arial",
+            ..Default::default()
+        };
+        eprintln!(
+            "[fframes] render {duration_frames} frame ({src_w}x{src_h}) → {}",
+            opts.out.display()
+        );
+        return dispatch_render(
+            src_w, src_h, frames, 0, audio_name, duration_frames, &render_opts, opts.out,
+        );
+    }
+
+    // Video panjang → potongan ≤ `chunk` frame, digabung dengan ffmpeg concat.
+    // Hanya potongan aktif yang ada di RAM, jadi tak ada cap total.
+    eprintln!("[fframes] video {duration_frames} frame > {chunk} → render per potongan");
+    let mut segments: Vec<PathBuf> = Vec::new();
+    let mut start = 0usize;
+    let mut seg_idx = 0usize;
+    while start < duration_frames {
+        let end = (start + chunk).min(duration_frames);
+        let count = end - start;
+        let start_sec = start as f64 / target_fps as f64;
+        eprintln!("[fframes] potongan {seg_idx}: frame {start}..{end} ({count})");
+
+        let frames = decode_frames_rgba(
+            &ffmpeg,
+            opts.video,
+            probe.width,
+            probe.height,
+            target_fps,
+            opts.hwaccel,
+            start_sec,
+            count,
+        )?;
+        let media = FframesMedia {
+            images: images_of(&frames),
+            fonts: fonts.clone(),
+            audio: audio_map.clone(),
+        };
+        let seg_path = tmp_dir.join(format!("seg_{seg_idx}.mp4"));
+        let render_opts = RenderOptions {
+            media: Some(&media),
+            video_encoder_options: video_encoder.clone(),
+            audio_encoder_options: EncoderOptions::default(),
+            load_system_fonts: true,
+            default_font: "Arial",
+            frame_range: Some(start..end),
+            ..Default::default()
+        };
+        dispatch_render(
+            src_w,
+            src_h,
+            frames,
+            start,
+            audio_name.clone(),
+            duration_frames,
+            &render_opts,
+            &seg_path,
+        )?;
+        segments.push(seg_path);
+        start = end;
+        seg_idx += 1;
+    }
+
+    concat_segments(&ffmpeg, &segments, opts.out)?;
     eprintln!(
-        "[fframes] render {duration_frames} frame ({src_w}x{src_h}) → {}",
-        opts.out.display()
+        "[fframes] selesai → {} ({} potongan)",
+        opts.out.display(),
+        segments.len()
     );
-
-    // Dispatch ke const generics berdasarkan ukuran video nyata.
-    dispatch_render(src_w, src_h, frames, audio_name, duration_frames, &render_opts, opts.out)
+    Ok(())
 }
 
 /// Dispatch ke `CompositeVideo<W, H>` untuk ukuran umum; selain itu pakai
@@ -407,6 +483,7 @@ fn dispatch_render(
     w: usize,
     h: usize,
     frames: Vec<Arc<PreloadedImageData>>,
+    frame_offset: usize,
     audio_name: String,
     duration_frames: usize,
     render_opts: &RenderOptions<'_, '_>,
@@ -416,7 +493,14 @@ fn dispatch_render(
     macro_rules! try_size {
         ($cw:expr, $ch:expr) => {
             if w == $cw && h == $ch {
-                return render_sized::<$cw, $ch>(frames, audio_name, duration_frames, render_opts, out);
+                return render_sized::<$cw, $ch>(
+                    frames,
+                    frame_offset,
+                    audio_name,
+                    duration_frames,
+                    render_opts,
+                    out,
+                );
             }
         };
     }
@@ -457,16 +541,26 @@ fn dispatch_render(
     // scale_resolution (scale_resolution men-scale seragam → merusak aspect).
     // "meet" di SVG menjaga aspect ratio source di dalam kanvas terdekat.
     let aspect = w as f64 / h as f64;
-    let (bw, bh) = closest_aspect_size(w, h, aspect);
+    let (bw, bh) = closest_aspect_size(aspect);
     eprintln!(
         "[fframes] ukuran {w}x{h} tidak umum → kanvas {bw}x{bh} (aspect dijaga 'meet')"
     );
-    render_sized_generic(bw, bh, frames, audio_name, duration_frames, render_opts, out)
+    render_sized_generic(
+        bw,
+        bh,
+        frames,
+        frame_offset,
+        audio_name,
+        duration_frames,
+        render_opts,
+        out,
+    )
 }
 
 /// Render dengan ukuran kanvas spesifik (const generic).
 fn render_sized<const W: usize, const H: usize>(
     frames: Vec<Arc<PreloadedImageData>>,
+    frame_offset: usize,
     audio_name: String,
     duration_frames: usize,
     render_opts: &RenderOptions<'_, '_>,
@@ -475,6 +569,7 @@ fn render_sized<const W: usize, const H: usize>(
     let video = CompositeVideo::<W, H> {
         caption: CaptionVideo,
         frames,
+        frame_offset,
         audio_name,
         duration_frames,
         svg_prefix: std::sync::OnceLock::new(),
@@ -487,6 +582,7 @@ fn render_sized_generic(
     w: usize,
     h: usize,
     frames: Vec<Arc<PreloadedImageData>>,
+    frame_offset: usize,
     audio_name: String,
     duration_frames: usize,
     render_opts: &RenderOptions<'_, '_>,
@@ -496,7 +592,14 @@ fn render_sized_generic(
     macro_rules! try_size {
         ($cw:expr, $ch:expr) => {
             if w == $cw && h == $ch {
-                return render_sized::<$cw, $ch>(frames, audio_name, duration_frames, render_opts, out);
+                return render_sized::<$cw, $ch>(
+                    frames,
+                    frame_offset,
+                    audio_name,
+                    duration_frames,
+                    render_opts,
+                    out,
+                );
             }
         };
     }
@@ -518,11 +621,21 @@ fn render_sized_generic(
     try_size!(240, 320);
     // Fallback: 1920×1080.
     eprintln!("[fframes] WARN: fallback kanvas 1920x1080");
-    render_sized::<1920, 1080>(frames, audio_name, duration_frames, render_opts, out)
+    render_sized::<1920, 1080>(
+        frames,
+        frame_offset,
+        audio_name,
+        duration_frames,
+        render_opts,
+        out,
+    )
 }
 
-/// Cari pasangan umum yang paling se-aspek dengan (w, h).
-fn closest_aspect_size(w: usize, h: usize, aspect: f64) -> (usize, usize) {
+/// Cari pasangan umum yang paling se-aspek dengan `aspect`.
+/// Karena pencarian pakai `<` ketat, ia selalu mengembalikan anggota PERTAMA
+/// per keluarga aspek (mis. 16:9 → 1920×1080), yang semuanya ada di daftar
+/// dispatch `render_sized_generic` — jadi fallback 1920×1080 tak tercapai.
+fn closest_aspect_size(aspect: f64) -> (usize, usize) {
     const COMMON: &[(usize, usize)] = &[
         // Landscape 16:9.
         (1920, 1080), (1280, 720), (3840, 2160), (854, 480), (640, 360),
@@ -588,6 +701,42 @@ fn run_backend<const W: usize, const H: usize>(
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// Kumpulkan frame ter-decode jadi map `id → image` untuk MediaProvider.
+fn images_of(frames: &[Arc<PreloadedImageData>]) -> HashMap<String, Arc<PreloadedImageData>> {
+    frames.iter().map(|f| (f.id.clone(), f.clone())).collect()
+}
+
+/// Gabungkan segmen mp4 hasil chunked render → satu file (`-c copy`; semua
+/// segmen punya codec/parameter sama karena encoder yang sama).
+fn concat_segments(ffmpeg: &Path, segments: &[PathBuf], out: &Path) -> Result<()> {
+    ensure!(!segments.is_empty(), "tidak ada segmen untuk digabung");
+    if segments.len() == 1 {
+        std::fs::copy(&segments[0], out)
+            .with_context(|| format!("copy {} → {}", segments[0].display(), out.display()))?;
+        return Ok(());
+    }
+    let list = segments[0]
+        .parent()
+        .context("segmen tanpa parent dir")?
+        .join("concat.txt");
+    let mut body = String::new();
+    for seg in segments {
+        // Path concat demuxer pakai '/' (hindari escape backslash Windows).
+        body.push_str(&format!("file '{}'\n", seg.to_string_lossy().replace('\\', "/")));
+    }
+    std::fs::write(&list, body).with_context(|| format!("tulis {}", list.display()))?;
+
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&list)
+        .args(["-c", "copy"])
+        .arg(out)
+        .status()
+        .with_context(|| format!("jalankan {}", ffmpeg.display()))?;
+    ensure!(status.success(), "ffmpeg concat exit non-zero");
+    Ok(())
+}
 
 /// Cek apakah `h264_nvenc` tersedia di ffmpeg build ini.
 fn nvenc_available(ffmpeg: &Path) -> bool {
