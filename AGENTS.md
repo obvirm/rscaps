@@ -41,10 +41,10 @@ Satu codebase UI (`studio/`, Svelte+TS), satu engine (`caption-core` → WASM).
 | Decode video | `<video>` DOM / mediabunny WebCodecs | webview (WebView2/WKWebView) | Android WebView (WebCodecs terbatas → fallback `<video>`) |
 | File picker | `<input type=file>` | Tauri dialog plugin | Storage Access Framework |
 | Transcribe | `whisper-spike` (WASM ONNX) | WASM (jalan, CPU) | WASM (CPU, lambat) |
-| Export | mediabunny (WebCodecs) → canvas | sama via webview | sama (cek WebCodecs WebView) |
+| Export | mediabunny (WebCodecs); raster caption di `svgr-wasm` (WASM, bukan canvas browser) | sama via webview | sama (cek WebCodecs WebView) |
 
 **Prinsip:**
-- **Render caption = SATU jalur**: `render_frame()` → string SVG → raster ke canvas saat export. Preview & export mesin yang sama.
+- **Render caption = SATU jalur**: `render_frame()` → string SVG. Web/export me-raster string itu di **`crates/svgr-wasm`** (usvgr+tiny-skia, WASM); CLI native me-raster dengan `svgr`/fframes. Preview studio memakai satu `<svg>` yang sama (browser). Logika caption tak bercabang.
 - **Dimensi video nyata WAJIB** didaftarkan ke bridge (`add_video_source_placeholder(file, url, w, h, dur)`) sebelum `prepare()` — kalau tidak, engine fallback 1920×1080 dan non-16:9 salah layout.
 
 **GOTCHA WAJIB (PATH):** proc-macro `fframes-media-dir-macro` (milik fframes) mengimpor
@@ -53,6 +53,15 @@ DLL FFmpeg 9.0.2 (`avcodec-63.dll` dsb) yang hanya ada di
 PATH default** — semua perintah cargo yang menyentuh fframes (dev/release, check/build,
 test) HARUS prepend PATH itu dulu. Kalau lihat `E0463` untuk `fframes_media_dir_macro`:
 bukan bug kode, PATH ffmpeg belum masuk.
+
+## CLI native (`rscaps-cli`)
+
+- `render --engine fframes` = **pipeline fframes penuh** (raster + encode + audio mux); `--engine cpu|skia` = jalur overlay lama (svgr raster → PNG pipe → ffmpeg overlay). `frames --engine fframes` tak didukung (error ramah).
+- **Chunked**: video > `CHUNK_FRAMES` (600) dirender per potongan via `RenderOptions::frame_range`, digabung `ffmpeg concat -c copy`. Hanya potongan aktif di RAM → **tak ada cap total**. Override uji: env `RSCAPS_FFRAMES_CHUNK`.
+- Kanvas **ikut ukuran video nyata** (`CompositeVideo<W,H>` const generics + dispatch; fframes menyetel `ctx.current_video_size`) → portrait 1080×1920 benar.
+- Encoder: `--hw-encode` + `--hw-encoder h264_nvenc|h264_qsv|h264_vaapi|h264_videotoolbox|h264_amf` (fallback `libx264` bila tak tersedia); `--hwaccel` diteruskan ke decode; `--format` divalidasi (svg|png).
+- Verifikasi chunk: `node scripts/verify_chunk.mjs` — bandingkan hash per-frame (framemd5) chunked vs single. **JANGAN pakai filter `psnr`**: concat menggeser PTS → skor palsu.
+- Web **tidak** memakai fframes (renderer fframes di-gate `not(wasm32)`); raster web = `crates/svgr-wasm` (usvgr+tiny-skia, versi sama dengan CLI `--engine cpu` → paritas).
 
 ## Known Issues
 
