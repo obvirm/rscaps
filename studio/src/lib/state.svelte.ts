@@ -633,14 +633,20 @@ class StudioState {
     if (!this.wasm) return null;
     const raw = this.wasm.bridge.render_frame(BigInt(frame));
     if (!raw) return null;
-    const BLEND_RE = /<text[^>]*style="mix-blend-mode: difference"[^>]*>[\s\S]*?<\/text>/g;
-    if (!raw.includes("mix-blend-mode: difference")) {
-      return { base: raw };
-    }
-    const blendParts = raw.match(BLEND_RE) ?? [];
-    const baseSvg = raw.replace(BLEND_RE, "");
-    const root = raw.match(/^<svg[^>]*>/)?.[0] ?? "<svg>";
-    const blendSvg = `${root}${blendParts.join("")}</svg>`;
+    // Split base/blend: hapus node <text> satunya — struktur grup (font attrs,
+    // rise, clip defs) TETAP dipertahankan di kedua layer. Hanya menyalin node
+    // teks tanpa konteks grup membuat usvgr kehilangan font-family/size
+    // (render kosong - bug 2026-10).
+    const BLEND = "mix-blend-mode: difference";
+    if (!raw.includes(BLEND)) return { base: raw };
+    const TEXT_RE = /<text[\s\S]*?<\/text>/g;
+    const texts = raw.match(TEXT_RE) ?? [];
+    const blendTexts = texts.filter((t) => t.includes(BLEND));
+    const baseTexts = texts.filter((t) => !t.includes(BLEND));
+    let baseSvg = raw;
+    for (const t of blendTexts) baseSvg = baseSvg.replace(t, "");
+    let blendSvg = raw;
+    for (const t of baseTexts) blendSvg = blendSvg.replace(t, "");
     return { base: baseSvg, blend: blendSvg };
   }
 
@@ -1305,11 +1311,9 @@ class StudioState {
       const srcW = (isCurrent ? this.videoWidth : project.settings.width) || 1920;
       const srcH = (isCurrent ? this.videoHeight : project.settings.height) || 1080;
 
-      // Point the caption bridge at this document so render_frame draws the
-      // right cues regardless of what is open in the editor.
-      this.wasm.setDocumentJson(docJson);
-      // Register real dimensions so non-16:9 exports lay out on their own
-      // pixel grid (same as the editor preview).
+      // prepare() membangun kembali timeline & MERESSET dokumen bridge, jadi
+      // setDocumentJson HARUS dijalankan SETELAH placeholder + prepare -
+      // kalau tidak, render_frame mengembali svg path kosong (regresi 2026-10).
       const durationSec = ((isCurrent ? this.durationFrames : project.doc.duration_frames) || 1) / fps;
       this.wasm.bridge.add_video_source_placeholder(
         project.videoName || "video",
@@ -1319,6 +1323,7 @@ class StudioState {
         durationSec,
       );
       await this.wasm.bridge.prepare(fps);
+      this.wasm.setDocumentJson(docJson);
 
       const { width, height } = computeOutputSize(srcW, srcH, opts.resolution);
       const out = await burnInExport({

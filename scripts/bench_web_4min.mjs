@@ -4,6 +4,8 @@ import puppeteer from "puppeteer-core";
 import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import { writeFileSync } from "fs";
+import fs from "fs";
+import path from "path";
 
 const execP = promisify(exec);
 
@@ -93,16 +95,58 @@ async function main() {
     defaultViewport: { width: 1920, height: 1080 },
   });
   const page = await browser.newPage();
+  // Download hasil ekspor ke folder tetap (bukan Downloads Windows) dan
+  // tunggu file selesai sebelum browser ditutup.
+  const dlDir = "E:\\temp\\opencode\\web_export_out";
+  try {
+    if (!fs.existsSync(dlDir)) fs.mkdirSync(dlDir, { recursive: true });
+  } catch { /* ignore */ }
+  try {
+    const cdp = await page.createCDPSession();
+    try {
+      await cdp.send("Browser.setDownloadBehavior", {
+        behavior: "allow",
+        downloadPath: dlDir,
+        eventsEnabled: false,
+      });
+      step(`download dir → ${dlDir} (browser)`);
+    } catch (e1) {
+      await cdp.send("Page.setDownloadBehavior", { behavior: "allow", downloadPath: dlDir });
+      step(`download dir → ${dlDir} (page, fallback)`);
+    }
+  } catch (e) {
+    err(`setDownloadBehavior gagal: ${String(e)}`);
+  }
   page.on("pageerror", (e) => err(`pageerror: ${e.message}`));
+  // Simpan hasil ekspor TANPA mesin download Chrome: stream blob dari page
+  // ke Node lewat exposeFunction (chunk 1MB base64).
+  const outFile = path.join(dlDir, "web4min.mp4");
+  try { fs.rmSync(outFile, { force: true }); } catch { /* ignore */ }
+  await page.exposeFunction("__saveChunk", (b64) => {
+    fs.appendFileSync(outFile, Buffer.from(b64, "base64"));
+  });
+  await page.exposeFunction("__beginSave", () => {
+    fs.rmSync(outFile, { force: true });
+  });
+  await page.evaluateOnNewDocument(() => {
+    // Tangkap blob hasil ekspor (anchor download tak reliable di headless).
+    const orig = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (obj) => {
+      if (obj instanceof Blob && obj.size > 1_000_000) window.__lastBlob = obj;
+      return orig(obj);
+    };
+  });
   page.on("console", (m) => {
     const t = m.text();
     if (!/favicon|Download the React DevTools/i.test(t)) {
-      console.log(`[console.${m.type()}] ${t.slice(0, 300)}`);
+      console.log(`[console.${m.type()}] ${t.slice(0, t.includes("burnWorker") || t.includes("exportdbg") ? 1000000 : 300)}`);
     }
   });
 
   try {
-    await page.goto(URL, { waitUntil: "networkidle2", timeout: 30000 });
+    const mode = process.env.BENCH_MODE || "main";
+    const pageUrl = mode === "legacy" ? "http://localhost:5177/?exportmode=legacy" : "http://localhost:5177/";
+    await page.goto(pageUrl, { waitUntil: "networkidle2", timeout: 30000 });
     await sleep(600);
     step("new project");
     await clickByText(page, "button", "New project");
@@ -129,6 +173,21 @@ async function main() {
     await sleep(2000);
     step("editor up");
 
+    // Probe state dokumen bridge (render_frame(30) + words).
+    const probeEditor = async (label) => {
+      const info = await page.evaluate(() => {
+        const s = window.__rscaps?.store;
+        if (!s) return { err: "no store" };
+        const svg = s.renderFrameSvgLayers(30);
+        return {
+          svgLen: svg ? svg.base.length : null,
+          words: s.wasm ? s.wasm.listWords().length : -1,
+        };
+      });
+      console.log(`[probe ${label}] ${JSON.stringify(info)}`);
+    };
+    await probeEditor("editor-up");
+
     // Pilih template (cleo) untuk caption konsisten.
     step("select template cleo");
     await page.evaluate(() => {
@@ -143,22 +202,25 @@ async function main() {
     });
     await sleep(1500);
 
+    await probeEditor("after-template");
     // Buka Export dialog.
     step("open Export dialog");
     await clickByText(page, "button", "Export");
     await sleep(800);
 
-    // Advanced → format WebM (lebih reliable di headless, AAC kadang fail).
+    // Advanced → format: default mp4 (hardware AVC di Windows), env
+    // BENCH_FORMAT=webm untuk memaksa jalur VP9.
     const adv = await page.$(".advanced-toggle, summary");
     if (adv) {
       await adv.click();
       await sleep(400);
     }
+    const wantFormat = process.env.BENCH_FORMAT || "mp4";
     const formatSel = await page.$("#ex-format");
     if (formatSel) {
-      await formatSel.select("webm");
+      await formatSel.select(wantFormat);
       await sleep(200);
-      step("format → webm");
+      step(`format → ${wantFormat}`);
     }
     // Quality high (default sudah high).
     const qualitySel = await page.$("#ex-quality");
@@ -247,6 +309,30 @@ async function main() {
     await monitorPromise;
     await sampleOnce(); // final sample
 
+    // Salin blob hasil ekspor ke file lewat stream chunk.
+    try {
+      const saved = await page.evaluate(async () => {
+        const blob = window.__lastBlob;
+        if (!blob) return -1;
+        await window.__beginSave();
+        const CH = 1 << 20;
+        for (let off = 0; off < blob.size; off += CH) {
+          const bytes = new Uint8Array(
+            await blob.slice(off, Math.min(off + CH, blob.size)).arrayBuffer(),
+          );
+          let s = "";
+          for (let i = 0; i < bytes.length; i += 0x8000) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+          }
+          await window.__saveChunk(btoa(s));
+        }
+        return blob.size;
+      });
+      console.log(`[info] blob tersimpan: ${saved} bytes → ${outFile}`);
+    } catch (e) {
+      err(`blob save gagal: ${String(e)}`);
+    }
+
     const elapsedSec = (Date.now() - t0) / 1000;
     const result = {
       done,
@@ -308,6 +394,16 @@ async function main() {
     await page.screenshot({ path: "E:\\temp\\opencode\\web4min_error.png" }).catch(() => {});
   } finally {
     monitorRunning = false;
+    // Tunggu download selesai (max 60s): tidak ada file .crdownload aktif.
+    const deadline = Date.now() + 60000;
+    let busy = false;
+    while (Date.now() < deadline) {
+      try {
+        busy = fs.existsSync(dlDir) && fs.readdirSync(dlDir).some((f) => f.endsWith(".crdownload"));
+      } catch { busy = false; }
+      if (!busy) break;
+      await sleep(1000);
+    }
     await browser.close();
   }
   process.exit(0);
