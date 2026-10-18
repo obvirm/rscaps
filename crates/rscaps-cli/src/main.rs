@@ -317,6 +317,18 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
     };
     let mut cache = svgr::SvgrCache::new(8);
     let pool = svgr::PixmapPool::new();
+    // Engine skia: backend + font-DB dibuat SEKALI, dipakai ulang tiap frame.
+    let skia_raster = if args.engine == "skia" {
+        Some(crate::render::SkiaRasterizer::new(
+            width as u32,
+            height as u32,
+            font_source.database(),
+        )?)
+    } else {
+        None
+    };
+    // Renderer bertahan antar frame (surface GPU tidak dibuat-buang).
+    let mut skia_ren = skia_raster.as_ref().map(|r| r.make_renderer());
 
     // ── Render ─────────────────────────────────────────────────────────────
     let mut written = 0usize;
@@ -344,12 +356,22 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
                     .with_context(|| format!("tulis {}", path.display()))?;
             }
             "png" => {
-                let pixmap = render_png(&s, width, height, &svg_opt, font_source.database(), &mut cache, &pool, args.engine)
-                    .with_context(|| format!("raster {name}"))?;
-                let bytes = pixmap
-                    .encode_png()
-                    .with_context(|| format!("encode {name}.png"))?;
-                std::fs::write(args.out.join(format!("{name}.png")), bytes)?;
+                if args.engine == "skia" {
+                    let bytes = skia_ren
+                        .as_mut()
+                        .context("renderer skia hilang — bug internal")?
+                        .render_frame_png(&s, width as u32, height as u32)
+                        .with_context(|| format!("raster {name}"))?;
+                    std::fs::write(args.out.join(format!("{name}.png")), bytes)
+                        .with_context(|| format!("tulis {}", args.out.join(format!("{name}.png")).display()))?;
+                } else {
+                    let pixmap = render_png(&s, width, height, &svg_opt, font_source.database(), &mut cache, &pool, args.engine)
+                        .with_context(|| format!("raster {name}"))?;
+                    let bytes = pixmap
+                        .encode_png()
+                        .with_context(|| format!("encode {name}.png"))?;
+                    std::fs::write(args.out.join(format!("{name}.png")), bytes)?;
+                }
             }
             other => anyhow::bail!("format tidak dikenal: {other} (pakai svg atau png)"),
         }
@@ -381,7 +403,6 @@ fn render_png(
     engine: &str,
 ) -> Result<svgr::tiny_skia::Pixmap> {
     match engine {
-        "skia" => return crate::render::skia_pixmap(svg, width, height, fontdb),
         "fframes" => anyhow::bail!("engine fframes hanya untuk `render` (burn-in), bukan `frames` - pakai --engine cpu atau skia"),
         _ => {}
     }

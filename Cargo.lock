@@ -2720,6 +2720,7 @@ dependencies = [
  "clap",
  "fframes",
  "fframes_skia_renderer",
+ "rayon",
  "serde",
  "serde_json",
  "svgr",

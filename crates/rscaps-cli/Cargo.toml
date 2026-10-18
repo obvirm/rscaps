@@ -20,6 +20,7 @@ axum = "0.8"
 fframes_skia_renderer = { version = "1.2.1-rc.38", optional = true, features = ["vulkan"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
+rayon = "1"
 
 [features]
 default = []

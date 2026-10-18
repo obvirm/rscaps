@@ -1,7 +1,9 @@
 //! Fase 2 — burn-in caption ke video: probe (ffprobe) → frame caption per
-//! frame (caption-core) → pipe PNG → ffmpeg overlay → mp4.
+//! frame (caption-core) → pipe rawvideo RGBA → ffmpeg overlay → mp4.
 //!
 //! Logika caption 100% caption-core; ffmpeg hanya compositor/muxer.
+//! Raster engine `cpu` berjalan PARALEL (rayon, semua thread logis); `skia`
+//! serial dengan renderer GPU yang bertahan antar frame.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -9,6 +11,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail, ensure};
+use rayon::prelude::*;
 
 use crate::doc;
 use crate::fonts::CliFontSource;
@@ -247,6 +250,19 @@ pub fn render_video(
         }
     }
 
+    // Engine skia: backend Vulkan/CPU + font-DB fframes dibuat SEKALI di sini
+    // (bukan per frame) — lihat SkiaRasterizer.
+    let skia_raster = if opts.engine == "skia" {
+        Some(SkiaRasterizer::new(
+            probe.width,
+            probe.height,
+            font_source.database(),
+        )?)
+    } else {
+        None
+    };
+
+
     // ── ffmpeg: video + PNG pipe → overlay → H.264 ─────────────────────────
     let mut head: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
         .iter()
@@ -281,8 +297,19 @@ pub fn render_video(
     let mut child = Command::new(&ffmpeg)
         .args(&head)
         .arg(opts.video)
+        // Backend pipe = rawvideo RGBA (bukan PNG per-frame): rasterizer
+        // mengirim byte piksel mentah — tanpa zlib deflate per frame.
         .args(["-framerate", &probe.fps_str()])
-        .args(["-f", "image2pipe", "-c:v", "png", "-i", "pipe:0"])
+        .args([
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-video_size",
+            &format!("{}x{}", probe.width, probe.height),
+            "-i",
+            "pipe:0",
+        ])
         .args([
             "-filter_complex",
             "[0:v][1:v]overlay=format=auto:shortest=1[v]",
@@ -317,39 +344,145 @@ pub fn render_video(
     };
 
     let mut stdin = child.stdin.take().context("ffmpeg stdin")?;
+    // Frame tanpa caption: satu buffer RGBA(nanti) transparan penuh dipakai
+    // ulang — rawvideo input butuh piksel berukuran canvas.
+    let zeros_rgba =
+        std::sync::Arc::new(vec![0u8; probe.width as usize * probe.height as usize * 4]);
     let mut write_err: Option<std::io::Error> = None;
-    for f in 0..frame_count {
-        let now_ms = (f as f64) * 1000.0 / fps_f64;
-        let png = match caption_core::templates::render(&doc.template, &doc, now_ms as f32, &ctx) {
-            Some(svg) => {
-                let s = svg.to_string();
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(raster_png(&s, probe.width, probe.height, font_source.database(), opts.engine)?)
+
+    if opts.engine == "skia" {
+        // ── Skia: raster PARALEL GPU — satu renderer per thread rayon ────────
+        // SkiaVulkanCtx disengaja `unsafe impl Sync` oleh fframes:
+        // create_skia_context() round-robin antrean (`next_queue.fetch_add` +
+        // queue-lock per antrean), jadi tiap thread pegang GPU context sendiri
+        // tanpa tabrakan antrean. CPU memakai thread untuk parse SVG + copy.
+        let raster = skia_raster
+            .as_ref()
+            .context("renderer skia tidak terbuat (bug internal engine skia)")?;
+        // ── Skia PARALEL: K worker thread, renderer dibuat DI thread-nya ─────
+        // (Skia surface/context tak Send → renderer tak boleh berpindah thread).
+        // Backend shared (SkiaVulkanCtx Sync: antrean round-robin + lock per
+        // antrean). Frame f kerjakan worker f % K; tulis stdin tetap berurutan.
+        const SKIA_THREADS: usize = 12;
+        const WINDOW: u32 = 256; // RAM: 256×8.3MB ≈ 2.2GB
+        let mut base = 0u32;
+        while base < frame_count {
+            let w_end = (base + WINDOW).min(frame_count);
+            let win: Vec<Option<Vec<u8>>> =
+                std::thread::scope(|scope| -> Result<Vec<Option<Vec<u8>>>> {
+                let mut lane_joins = Vec::new();
+                for lane_i in 0..SKIA_THREADS {
+                    let raster_lane = raster;
+                    let doc_lane = &doc;
+                    let ctx_lane = &ctx;
+                    let join = scope.spawn(move || {
+                        let mut renderer = raster_lane.make_renderer();
+                        let mut lane_out: Vec<Option<Vec<u8>>> = Vec::new();
+                        let mut f = base + lane_i as u32;
+                        while f < w_end {
+                            let now_ms = (f as f64) * 1000.0 / fps_f64;
+                            let svg = caption_core::templates::render(
+                                &doc_lane.template,
+                                doc_lane,
+                                now_ms as f32,
+                                ctx_lane,
+                            )
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("template tak dikenal: {}", doc_lane.template)
+                            })?;
+                            let s = svg.to_string();
+                            let bytes = if s.is_empty() {
+                                None
+                            } else {
+                                Some(renderer.render_frame_rgba(&s, probe.width, probe.height)?)
+                            };
+                            lane_out.push(bytes);
+                            f += SKIA_THREADS as u32;
+                        }
+                        Ok::<_, anyhow::Error>(lane_out)
+                    });
+                    lane_joins.push(join);
                 }
-            }
-            None => bail!("template tak dikenal: {}", doc.template),
-        };
-        match png {
-            Some(bytes) => {
-                if let Err(err) = stdin.write_all(&bytes) {
+                // Gabung lane → window berurutan (frame f = lane f%K, posisi f/K).
+                let mut window: Vec<Option<Vec<u8>>> = vec![None; (w_end - base) as usize];
+                for (lane_i, join) in lane_joins.into_iter().enumerate() {
+                    for (p, bytes) in join
+                        .join()
+                        .expect("skia lane panic")
+                        .map_err(anyhow::Error::from)?
+                        .into_iter()
+                        .enumerate()
+                    {
+                        window[p * SKIA_THREADS + lane_i] = bytes;
+                    }
+                }
+                Ok(window)
+            })?;
+            for payload in &win {
+                let bytes: &[u8] = match payload {
+                    Some(b) => b,
+                    None => zeros_rgba.as_slice(),
+                };
+                if let Err(err) = stdin.write_all(bytes) {
                     write_err = Some(err);
                     break;
                 }
             }
-            None => {
-                // Frame tanpa caption: PNG 1×1 transparan tidak cukup untuk
-                // overlay (ukuran beda) — raster transparan penuh.
-                let bytes = transparent_png(probe.width, probe.height)?;
-                if let Err(err) = stdin.write_all(&bytes) {
-                    write_err = Some(err);
-                    break;
-                }
+            if write_err.is_some() {
+                break;
             }
+            on_progress(w_end, frame_count);
+            base = w_end;
         }
-        if f % 15 == 0 || f + 1 == frame_count {
-            on_progress(f + 1, frame_count);
+    } else {
+        // ── CPU (dan engine tak dikenal): raster PARALEL rayon ────────────────
+        // Semua thread logis dipakai; cache + pool DIBUAT SEKALI per thread rayon
+        // lalu dipakai ulang antar frame (dulu: dibuat-luang tiap frame — jadi
+        // cache subtitle gol statis tidak tersimpan).
+        const BATCH_FRAMES: u32 = 32;
+        let mut batch_start = 0u32;
+        while batch_start < frame_count {
+            let batch_end = (batch_start + BATCH_FRAMES).min(frame_count);
+            let batch = (batch_start..batch_end)
+                .into_par_iter()
+                .map_init(
+                    || CpuWorkerState {
+                        doc: &doc,
+                        ctx: &ctx,
+                        fdb: font_source.database(),
+                        fps_f64,
+                        width: probe.width,
+                        height: probe.height,
+                        cache: svgr::SvgrCache::new(4),
+                        pool: svgr::PixmapPool::new(),
+                    },
+                    |w, f| w.render_frame(f),
+                )
+                .collect::<Result<Vec<Option<Vec<u8>>>, anyhow::Error>>();
+            let batch = match batch {
+                Ok(v) => v,
+                Err(err) => {
+                    // abort batch — tutup pipe vis-à-vis ffmpeg lalu lempar.
+                    drop(stdin);
+                    let _ = child.wait();
+                    return Err(err);
+                }
+            };
+            for item in batch {
+                let payload: &[u8] = match &item {
+                    Some(bytes) => bytes,
+                    None => zeros_rgba.as_slice(),
+                };
+                if let Err(err) = stdin.write_all(payload) {
+                    write_err = Some(err);
+                    break;
+                }
+            }
+            if write_err.is_some() {
+                break;
+            }
+            on_progress(batch_end, frame_count);
+            batch_start = batch_end;
         }
     }
     drop(stdin);
@@ -368,40 +501,70 @@ pub fn render_video(
     Ok(())
 }
 
-// ── raster helpers (PNG untuk image2pipe) ──────────────────────────────────
+// ── worker raster CPU (dipanggil per-thread rayon) ─────────────────────────
 
-fn raster_png(
+struct CpuWorkerState<'a> {
+    doc: &'a CaptionDocument,
+    ctx: &'a FFramesContext<'a, 'a>,
+    fdb: &'a svgr::usvgr::fontdb::Database,
+    fps_f64: f64,
+    width: u32,
+    height: u32,
+    cache: svgr::SvgrCache,
+    pool: svgr::PixmapPool,
+}
+
+impl CpuWorkerState<'_> {
+    fn render_frame(&mut self, f: u32) -> Result<Option<Vec<u8>>> {
+        let now_ms = (f as f64) * 1000.0 / self.fps_f64;
+        let svg = match caption_core::templates::render(
+            &self.doc.template,
+            self.doc,
+            now_ms as f32,
+            self.ctx,
+        ) {
+            Some(svg) => svg,
+            None => bail!("template tak dikenal: {}", self.doc.template),
+        };
+        let s = svg.to_string();
+        if s.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(cpu_frame_rgba(
+            &s,
+            self.width,
+            self.height,
+            self.fdb,
+            &mut self.cache,
+            &self.pool,
+        )?))
+    }
+}
+
+/// SVG → RGBA premultiplied mentah (untuk pipe rawvideo) — tanpa PNG encode.
+fn cpu_frame_rgba(
     svg: &str,
     width: u32,
     height: u32,
     fontdb: &svgr::usvgr::fontdb::Database,
-    engine: &str,
+    cache: &mut svgr::SvgrCache,
+    pool: &svgr::PixmapPool,
 ) -> Result<Vec<u8>> {
-    match engine {
-        "skia" => return skia_png(svg, width, height, fontdb),
-        // fframes engine ditangani di render_video (pipeline penuh), bukan per-frame.
-        "fframes" => bail!("engine fframes = pipeline penuh, tidak lewat raster_png per-frame"),
-        _ => {}
-    }
     let opt = svgr::usvgr::Options::default();
     let tree = svgr::usvgr::Tree::from_str(svg, &opt, fontdb)
         .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
     let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| anyhow::anyhow!("gagal alokasi pixmap {width}×{height}"))?;
-    let mut cache = svgr::SvgrCache::new(4);
-    let pool = svgr::PixmapPool::new();
     let ctx = svgr::Context::new_from_pixmap(&pixmap);
     svgr::render(
         &tree,
         svgr::tiny_skia::Transform::identity(),
         &mut pixmap.as_mut(),
-        &mut cache,
-        &pool,
+        cache,
+        pool,
         &ctx,
     );
-    Ok(pixmap
-        .encode_png()
-        .context("encode png")?)
+    Ok(pixmap.data().to_vec())
 }
 
 /// Salin font dari Database milik svgr ke Database milik fframes (usvgr
@@ -448,81 +611,156 @@ fn to_fframes_fontdb(src: &svgr::usvgr::fontdb::Database) -> fframes::usvgr::fon
     );
     db
 }
-/// Raster SVG lewat backend Skia (fframes_skia_renderer): Vulkan GPU dengan
-/// fallback Skia-CPU. Hanya ada saat build `--features gpu-skia`; tanpa
-/// fitur, `skia_png` tetap ada tapi menuntut build ulang (lihat di bawah).
+/// Rasterizer Skia untuk satu run render: **backend (Vulkan/CPU) + font-DB
+/// fframes dibuat SEKALI** lalu dipakai ulang tiap frame.
+///
+/// Sebelumnya `skia_pixmap` membangun `SkiaVulkanCtx` (load Vulkan entry +
+/// instance + device) dan mengonversi 188 file font **per frame** — itulah
+/// sebab engine skia 3× lebih lambat dari cpu. `SkiaFrameRenderer` baru dibuat
+/// per frame (murah: struct init); surface GPU-nya di-cache oleh library.
 #[cfg(feature = "gpu-skia")]
-pub fn skia_pixmap(
-    svg: &str,
-    width: u32,
-    height: u32,
-    fontdb: &svgr::usvgr::fontdb::Database,
-) -> Result<svgr::tiny_skia::Pixmap> {
-    use fframes::FrameRenderer;
-    let xdb = to_fframes_fontdb(fontdb);
-    let opt = fframes::usvgr::Options::default();
-    let tree = fframes::usvgr::Tree::from_str(svg, &opt, &xdb)
-        .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
-    let clear = fframes::Color { r: 0, g: 0, b: 0, a: 0 };
-    let frame = match fframes_skia_renderer::vulkan::SkiaVulkanCtx::new(width as usize, height as usize)
-    {
-        Ok(ctx) => {
-            let mut renderer = fframes_skia_renderer::SkiaFrameRenderer::new(&ctx);
-            renderer.render_tree(&tree, clear, width, height)
-        }
-        Err(err) => {
-            eprintln!("[engine=skia] vulkan tidak tersedia ({err}) -> fallback Skia-CPU");
-            let ctx = fframes_skia_renderer::SkiaCpuCtx::new(width as usize, height as usize);
-            let mut renderer = fframes_skia_renderer::SkiaFrameRenderer::new(&ctx);
-            renderer.render_tree(&tree, clear, width, height)
-        }
-    }
-    .map_err(|err| anyhow::anyhow!("render skia: {err}"))?;
-    // RgbaFrame = straight RGBA; tiny-skia Pixmap = premultiplied.
-    let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| anyhow::anyhow!("alokasi pixmap skia {width}x{height}"))?;
-    let out = pixmap.pixels_mut();
-    for (px, src) in out.iter_mut().zip(frame.pixels.chunks_exact(4)) {
-        *px = svgr::tiny_skia::ColorU8::from_rgba(src[0], src[1], src[2], src[3]).premultiply();
-    }
-    Ok(pixmap)
+pub struct SkiaRasterizer {
+    backend: SkiaBackendOwned,
+    fontdb: fframes::usvgr::fontdb::Database,
 }
 
 #[cfg(feature = "gpu-skia")]
-pub fn skia_png(
-    svg: &str,
-    width: u32,
-    height: u32,
-    fontdb: &svgr::usvgr::fontdb::Database,
-) -> Result<Vec<u8>> {
-    let pixmap = skia_pixmap(svg, width, height, fontdb)?;
-    Ok(pixmap.encode_png().context("encode png skia")?)
+enum SkiaBackendOwned {
+    Vulkan(fframes_skia_renderer::vulkan::SkiaVulkanCtx),
+    Cpu(fframes_skia_renderer::SkiaCpuCtx),
+}
+
+#[cfg(feature = "gpu-skia")]
+impl SkiaRasterizer {
+    pub fn new(
+        width: u32,
+        height: u32,
+        svgr_db: &svgr::usvgr::fontdb::Database,
+    ) -> Result<Self> {
+        let backend = match fframes_skia_renderer::vulkan::SkiaVulkanCtx::new(
+            width as usize,
+            height as usize,
+        ) {
+            Ok(ctx) => {
+                eprintln!("[engine=skia] backend: Vulkan (GPU) {width}x{height}");
+                SkiaBackendOwned::Vulkan(ctx)
+            }
+            Err(err) => {
+                eprintln!("[engine=skia] vulkan tidak tersedia ({err}) -> fallback Skia-CPU");
+                SkiaBackendOwned::Cpu(fframes_skia_renderer::SkiaCpuCtx::new(
+                    width as usize,
+                    height as usize,
+                ))
+            }
+        };
+        Ok(Self {
+            backend,
+            fontdb: to_fframes_fontdb(svgr_db),
+        })
+    }
+
+    /// Renderer Skia yang BERTAHAN antar frame: surface GPU + render-cache
+    /// dibuat lazy sekali lalu dipakai ulang (dulu: dibuat-buang tiap frame).
+    pub fn make_renderer(&self) -> SkiaRendererOwned<'_> {
+        SkiaRendererOwned {
+            fontdb: &self.fontdb,
+            inner: match &self.backend {
+                SkiaBackendOwned::Vulkan(ctx) => {
+                    SkiaRendererInner::Vulkan(fframes_skia_renderer::SkiaFrameRenderer::new(ctx))
+                }
+                SkiaBackendOwned::Cpu(ctx) => {
+                    SkiaRendererInner::Cpu(fframes_skia_renderer::SkiaFrameRenderer::new(ctx))
+                }
+            },
+        }
+    }
+}
+
+/// Renderer Skia hasil `SkiaRasterizer::make_renderer` — hidup selama borrow
+/// rasterizer (backend + font-DB disimpan di rasterizer pemiliknya).
+#[cfg(feature = "gpu-skia")]
+pub struct SkiaRendererOwned<'a> {
+    fontdb: &'a fframes::usvgr::fontdb::Database,
+    inner: SkiaRendererInner<'a>,
+}
+
+#[cfg(feature = "gpu-skia")]
+enum SkiaRendererInner<'a> {
+    Vulkan(fframes_skia_renderer::SkiaFrameRenderer<'a, fframes_skia_renderer::vulkan::SkiaVulkanCtx>),
+    Cpu(fframes_skia_renderer::SkiaFrameRenderer<'a, fframes_skia_renderer::SkiaCpuCtx>),
+}
+
+#[cfg(feature = "gpu-skia")]
+impl SkiaRendererOwned<'_> {
+    /// Render satu frame → RGBA premultiplied mentah (pipe rawvideo).
+    pub fn render_frame_rgba(&mut self, svg: &str, width: u32, height: u32) -> Result<Vec<u8>> {
+        use fframes::FrameRenderer;
+        let opt = fframes::usvgr::Options::default();
+        let tree = fframes::usvgr::Tree::from_str(svg, &opt, self.fontdb)
+            .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
+        let clear = fframes::Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        let frame = match &mut self.inner {
+            SkiaRendererInner::Vulkan(r) => r.render_tree(&tree, clear, width, height),
+            SkiaRendererInner::Cpu(r) => r.render_tree(&tree, clear, width, height),
+        }
+        .map_err(|err| anyhow::anyhow!("render skia: {err}"))?;
+        // RgbaFrame = straight RGBA; pipe rawvideo memakai premultiplied agar
+        // setara byte-dengan-jalur PNG lama (tiny-skia Pixmap premultiplied).
+        let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+        for src in frame.pixels.chunks_exact(4) {
+            let px = svgr::tiny_skia::ColorU8::from_rgba(src[0], src[1], src[2], src[3])
+                .premultiply();
+            bytes.extend_from_slice(&[px.red(), px.green(), px.blue(), px.alpha()]);
+        }
+        Ok(bytes)
+    }
+
+    /// Render satu frame → bytes PNG (dipakai perintah `frames`).
+    pub fn render_frame_png(&mut self, svg: &str, width: u32, height: u32) -> Result<Vec<u8>> {
+        let rgba = self.render_frame_rgba(svg, width, height)?;
+        let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
+            .ok_or_else(|| anyhow::anyhow!("alokasi pixmap skia {width}x{height}"))?;
+        pixmap.data_mut().copy_from_slice(&rgba);
+        Ok(pixmap.encode_png().context("encode png skia")?)
+    }
 }
 
 #[cfg(not(feature = "gpu-skia"))]
-pub fn skia_pixmap(
-    _svg: &str,
-    _width: u32,
-    _height: u32,
-    _fontdb: &svgr::usvgr::fontdb::Database,
-) -> Result<svgr::tiny_skia::Pixmap> {
-    bail!("engine skia butuh build ulang: cargo build -p rscaps-cli --features gpu-skia")
+pub struct SkiaRasterizer;
+
+#[cfg(not(feature = "gpu-skia"))]
+pub struct SkiaRendererOwned<'a> {
+    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 #[cfg(not(feature = "gpu-skia"))]
-pub fn skia_png(
-    svg: &str,
-    width: u32,
-    height: u32,
-    fontdb: &svgr::usvgr::fontdb::Database,
-) -> Result<Vec<u8>> {
-    let pixmap = skia_pixmap(svg, width, height, fontdb)?;
-    Ok(pixmap.encode_png().context("encode png skia")?)
+impl SkiaRasterizer {
+    pub fn new(
+        _width: u32,
+        _height: u32,
+        _svgr_db: &svgr::usvgr::fontdb::Database,
+    ) -> Result<Self> {
+        bail!("engine skia butuh build ulang: cargo build -p rscaps-cli --features gpu-skia")
+    }
+
+    pub fn make_renderer(&self) -> SkiaRendererOwned<'_> {
+        unreachable!("SkiaRasterizer hanya bisa dibuat saat feature gpu-skia aktif")
+    }
 }
-fn transparent_png(width: u32, height: u32) -> Result<Vec<u8>> {
-    let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| anyhow::anyhow!("gagal alokasi pixmap transparan"))?;
-    pixmap.fill(svgr::tiny_skia::Color::TRANSPARENT);
-    Ok(pixmap.encode_png().context("encode png transparan")?)
+
+#[cfg(not(feature = "gpu-skia"))]
+impl SkiaRendererOwned<'_> {
+    pub fn render_frame_rgba(&mut self, _svg: &str, _width: u32, _height: u32) -> Result<Vec<u8>> {
+        unreachable!("SkiaRendererOwned hanya bisa dibuat saat feature gpu-skia aktif")
+    }
+
+    pub fn render_frame_png(&mut self, _svg: &str, _width: u32, _height: u32) -> Result<Vec<u8>> {
+        unreachable!("SkiaRendererOwned hanya bisa dibuat saat feature gpu-skia aktif")
+    }
 }
 
