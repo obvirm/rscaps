@@ -141,7 +141,17 @@ fn pulse_progress(now_ms: f32, line_start_ms: f32, duration_s: f32) -> f32 {
 
 /// `transform: translateY(from → 0)` — continuous, unlike the clip.
 fn word_rise_px(progress: f32, fs: f32, rise_em: f32) -> f32 {
-    rise_em * fs * (1.0 - progress)
+    let px = rise_em * fs * (1.0 - progress);
+    // Kuantisasi sub-pixel: easing tak pernah tepat 0 persis, jadi ekor rise
+    // selalu menyisakan translate ~0.003-0.09px — di bawah ambang raster 1px
+    // tapi membuat svg BEDA tiap frame → raster layer cache miss terus di
+    // jalur export. Di bawah 0.25px (seperempat piksel, mustahil terlihat)
+    // anggap 0 agar frame statis identik byte-per-byte.
+    if px.abs() < 0.25 {
+        0.0
+    } else {
+        px
+    }
 }
 
 /// Whether the word has un-clipped yet (see `REVEAL_PROGRESS`).

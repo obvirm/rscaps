@@ -349,7 +349,81 @@ pub fn merged_effects(
 /// duration (`gap <= 0` adds nothing). Without `gap_free` the window is
 /// exactly the word span (a frame between two segments renders nothing —
 /// `BatchPlanner` only mounts a segment whose window contains `t`).
+/// Cache segmen per (dokumen, config).
+///
+/// `collect_segments` fungsi murni — outputnya hanya tergantung `doc` + `cfg`
+/// (TIDAK ada `now_ms`) — tapi dipanggil di render loop tiap frame; recompute
+/// penuh (pecah seluruh cue jadi stream kata + split + effects ≈ 2.6ms di
+/// WASM) mubazir. Kunci = fingerprint input yang benar-benar dibaca fungsi ini.
+/// Wajib di-update kalau `collect_segments_inner` mulai membaca field di luar
+/// `doc.params` / `doc.cues` / `doc.duration_frames` / `cfg`.
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct SegCacheKey {
+    fingerprint: u64,
+    boundary: u8,
+    max_chars: usize,
+    min_chars: usize,
+    max_gap_ms: u32,
+    effects_ptr: usize,
+    effects_len: usize,
+}
+
+const SEG_CACHE_MAX: usize = 8;
+
+thread_local! {
+    static SEG_CACHE: std::cell::RefCell<Vec<(SegCacheKey, Vec<WindowedSegment>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// FNV-1a 64 atas semua input dokumen yang dibaca pipeline (cues + params
+/// lengkap via Debug + duration). Debug derive otomatis menyertakan field baru.
+fn doc_fingerprint(doc: &crate::CaptionDocument) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut h = OFFSET;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(PRIME);
+        }
+    };
+    mix(&doc.duration_frames.to_le_bytes());
+    mix(format!("{:?}", doc.params).as_bytes());
+    for cue in &doc.cues {
+        mix(&cue.start_ms.to_le_bytes());
+        mix(&cue.end_ms.to_le_bytes());
+        mix(cue.text.as_bytes());
+        mix(&[0xff]);
+    }
+    h
+}
+
 pub fn collect_segments(doc: &crate::CaptionDocument, cfg: &SplitConfig) -> Vec<WindowedSegment> {
+    let key = SegCacheKey {
+        fingerprint: doc_fingerprint(doc),
+        boundary: cfg.boundary as u8,
+        max_chars: cfg.max_chars,
+        min_chars: cfg.min_chars,
+        max_gap_ms: cfg.max_gap_ms.to_bits(),
+        effects_ptr: cfg.effects.as_ptr() as usize,
+        effects_len: cfg.effects.len(),
+    };
+    SEG_CACHE.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some(hit) = cell.iter().find(|(k, _)| *k == key) {
+            // Clone ~0.1ms — jauh lebih murah dari recompute ~2.6ms.
+            return hit.1.clone();
+        }
+        let built = collect_segments_inner(doc, cfg);
+        if cell.len() >= SEG_CACHE_MAX {
+            cell.remove(0);
+        }
+        cell.push((key, built.clone()));
+        built
+    })
+}
+
+fn collect_segments_inner(doc: &crate::CaptionDocument, cfg: &SplitConfig) -> Vec<WindowedSegment> {
     use crate::templates::stack::{detect_document_direction, resolve_line_direction, Direction};
 
     // `params.direction` wins when the user forces LTR/RTL; `"auto"` (the

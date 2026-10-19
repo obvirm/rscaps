@@ -13,9 +13,12 @@ crate-type = ["cdylib", "rlib"]
 # system-fonts/memmap-fonts yang butuh std::fs - matikan untuk wasm.
 svgr = { version = "0.50", default-features = false, features = ["text"] }
 wasm-bindgen = "0.2.100"
+js-sys = "0.3"
 # ahash (via usvgr) pulls getrandom 0.3; wasm needs its wasm_js backend.
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [profile.release]
-opt-level = "s"
+# "3" bukan "s": loop raster/unpremultiply adalah jalur kritis per-frame —
+# opt-level "s" memperlambat cukup signifikan pada pola per-piksel.
+opt-level = 3
 lto = true

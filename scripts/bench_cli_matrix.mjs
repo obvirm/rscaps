@@ -88,7 +88,8 @@ async function runOne(cfg) {
   const env = {
     ...process.env,
     PATH: `${FFMPEG_BIN};${process.env.PATH}`,
-    RSCAPS_FFRAMES_CHUNK: "600", // chunk besar = sedikit potongan (RAM sudah dibersihkan)
+    RSCAPS_FFRAMES_CHUNK: "300", // 300 frame ≈ 2.5GB predecode — 600 frame bikin
+    // x264 malloc gagal saat RAM sistem tersisa ~10GB (run 19/10)
   };
 
   step(`RUN ${cfg.id} — ${cfg.note}`);

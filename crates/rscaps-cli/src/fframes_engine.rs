@@ -491,7 +491,7 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             audio_encoder_options: EncoderOptions::default(),
             // Progress baris-per-10% di stderr; tanpa banner ffplay/path.
             logger: fframes::FFramesLoggerVariant::Lines,
-            load_system_fonts: true,
+            load_system_fonts: std::env::var("RSCAPS_LOAD_SYSTEM_FONTS").as_deref() == Ok("1"),
             default_font: "Arial",
             ..Default::default()
         };
@@ -537,7 +537,7 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             video_encoder_options: video_encoder.clone(),
             audio_encoder_options: EncoderOptions::default(),
             logger: fframes::FFramesLoggerVariant::Lines,
-            load_system_fonts: true,
+            load_system_fonts: std::env::var("RSCAPS_LOAD_SYSTEM_FONTS").as_deref() == Ok("1"),
             default_font: "Arial",
             frame_range: Some(start..end),
             ..Default::default()
@@ -812,7 +812,7 @@ fn images_of(frames: &[Arc<PreloadedImageData>]) -> HashMap<String, Arc<Preloade
 
 /// Gabungkan segmen mp4 hasil chunked render → satu file (`-c copy`; semua
 /// segmen punya codec/parameter sama karena encoder yang sama).
-fn concat_segments(ffmpeg: &Path, segments: &[PathBuf], out: &Path) -> Result<()> {
+pub(crate) fn concat_segments(ffmpeg: &Path, segments: &[PathBuf], out: &Path) -> Result<()> {
     ensure!(!segments.is_empty(), "tidak ada segmen untuk digabung");
     if segments.len() == 1 {
         std::fs::copy(&segments[0], out)

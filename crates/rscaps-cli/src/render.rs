@@ -219,7 +219,15 @@ pub fn render_video(
     )?;
 
     let mut font_source = CliFontSource::new();
-    font_source.load_system();
+    // Paritas dengan studio web: HANYA font template (tplfonts) + Arial/Arial
+    // Black sistem. Fontdb penuh Windows (ratusan file) membuat text layout
+    // usvgr ~10x lebih lambat (178ms vs ~14ms per frame @1080p). Escape
+    // hatch utk teks eksotis: env RSCAPS_LOAD_SYSTEM_FONTS=1.
+    if std::env::var("RSCAPS_LOAD_SYSTEM_FONTS").as_deref() == Ok("1") {
+        font_source.load_system();
+    } else {
+        font_source.load_windows_core();
+    }
     for dir in doc::candidate_font_dirs(opts.fonts) {
         if dir.is_dir() {
             font_source.load_dir(&dir);
@@ -263,7 +271,7 @@ pub fn render_video(
     };
 
 
-    // ── ffmpeg: video + PNG pipe → overlay → H.264 ─────────────────────────
+    // ── ffmpeg: video + rawvideo pipe → overlay → encoder ──────────────────
     let mut head: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
         .iter()
         .map(|s| s.to_string())
@@ -272,7 +280,6 @@ pub fn render_video(
         head.push("-hwaccel".to_string());
         head.push(ha.to_string());
     }
-    head.push("-i".to_string());
     // Encoder hardware bila diminta & tersedia; selain itu libx264.
     let use_hw = opts.hw_encode && hw_encoder_available(&ffmpeg, opts.hw_encoder);
     if opts.hw_encode && !use_hw {
@@ -294,8 +301,130 @@ pub fn render_video(
         ]
     };
     encode_args.extend(["-pix_fmt".into(), "yuv420p".into(), "-movflags".into(), "+faststart".into()]);
+
+    if opts.engine == "skia" {
+        // ── Skia K-SLICE: K proses ffmpeg paralel (decode+blend+encode per
+        // potongan frame), tiap potongan digabung `concat -c copy` ──────────
+        // Dulu 1 proses ffmpeg = filter chain single-thread jadi dinding:
+        // write 40.3s menunggu ffmpeg mengonsumsi pipe. K proses = konsumsi
+        // pipe ×K + NVENC session ×K + decode ×K. Raster skia (12 lane) dan
+        // cache per-SVG dibagi rata ke tiap slice; double-buffer tetap jalan
+        // per slice (raster window N+1 selagi window N ditulis).
+        const SLICES: usize = 3;
+        const LANES_PER_SLICE: usize = 12 / SLICES;
+        const WINDOW: u32 = 128; // RAM: SLICES×WINDOW×8.3MB ≈ 3.2GB
+        let raster = skia_raster
+            .as_ref()
+            .context("renderer skia tidak terbuat (bug internal engine skia)")?;
+        let raster_cache: Arc<RasterCache> = Arc::new(RasterCache::new(128));
+        let frames_done = std::sync::atomic::AtomicU32::new(0);
+
+        // ── Band crop: sample frame → union bbox alpha → pita vertikal ─────
+        // Raster + pipe hanya pita [y0, y0+bh): blur SVG (σ≈28×3 layer)
+        // mahal per piksel — pita ~35% tinggi frame memangkas biaya raster
+        // MISS dan byte pipe ~2.7×. Margin 128px untuk bleed blur. Fallback
+        // full-frame bila caption menyebar (>85% tinggi).
+        let band = compute_caption_band(
+            raster,
+            &doc,
+            &ctx,
+            frame_count,
+            fps_f64,
+            probe.width,
+            probe.height,
+        );
+        let (band_y, band_h) = match band {
+            Some((y, h)) => (y, h),
+            None => (0, probe.height),
+        };
+        if band.is_some() {
+            eprintln!(
+                "[render] band crop aktif: y={band_y} h={band_h} ({}% tinggi frame)",
+                band_h * 100 / probe.height
+            );
+        }
+        let zeros_rgba = std::sync::Arc::new(vec![
+            0u8;
+            probe.width as usize * band_h as usize * 4
+        ]);
+
+        let frames_per_slice = frame_count.div_ceil(SLICES as u32);
+        let slice_results: Vec<Result<PathBuf, anyhow::Error>> = std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for slice_i in 0..SLICES {
+                let s0 = (slice_i as u32 * frames_per_slice).min(frame_count);
+                let s1 = ((slice_i as u32 + 1) * frames_per_slice).min(frame_count);
+                if s0 >= s1 {
+                    continue;
+                }
+                let ffmpeg = &ffmpeg;
+                let head = &head;
+                let encode_args = &encode_args;
+                let video = opts.video;
+                let probe_ref = &probe;
+                let doc_ref = &doc;
+                let ctx_ref = &ctx;
+                let raster_lane = raster;
+                let cache = Arc::clone(&raster_cache);
+                let zeros = Arc::clone(&zeros_rgba);
+                let progress_ref = &frames_done;
+                let seg_path = opts
+                    .out
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join(format!("rscaps_slice_{slice_i}.mp4"));
+                let p_out_path = seg_path.clone();
+                let join = scope.spawn(move || -> Result<PathBuf, anyhow::Error> {
+                    run_skia_slice(SkiaSliceParams {
+                        ffmpeg,
+                        head,
+                        encode_args,
+                        video,
+                        probe: probe_ref,
+                        doc: doc_ref,
+                        ctx: ctx_ref,
+                        raster: raster_lane,
+                        cache,
+                        zeros,
+                        range: s0..s1,
+                        lanes: LANES_PER_SLICE,
+                        window: WINDOW,
+                        fps_f64,
+                        out: seg_path,
+                        progress_ref,
+                        hwaccel: opts.hwaccel,
+                        band_y,
+                        band_h,
+                    })?;
+                    Ok(p_out_path)
+                });
+                joins.push(join);
+            }
+            let mut results = Vec::new();
+            for join in joins {
+                results.push(join.join().expect("skia slice panic"));
+            }
+            results
+        });
+        let mut seg_paths: Vec<PathBuf> = Vec::new();
+        for r in slice_results {
+            seg_paths.push(r?);
+        }
+
+        // Gabung potongan → output final (pola sama dengan fframes chunked).
+        crate::fframes_engine::concat_segments(&ffmpeg, &seg_paths, opts.out)?;
+        for seg in &seg_paths {
+            let _ = std::fs::remove_file(seg);
+        }
+        on_progress(frame_count, frame_count);
+        return Ok(());
+    }
+
+    // ── Jalur satu proses (engine cpu & tak dikenal) ────────────────────────
     let mut child = Command::new(&ffmpeg)
         .args(&head)
+        // head tidak lagi membawa "-i" penutup — slice menambah -ss/-i sendiri.
+        .arg("-i")
         .arg(opts.video)
         // Backend pipe = rawvideo RGBA (bukan PNG per-frame): rasterizer
         // mengirim byte piksel mentah — tanpa zlib deflate per frame.
@@ -344,146 +473,60 @@ pub fn render_video(
     };
 
     let mut stdin = child.stdin.take().context("ffmpeg stdin")?;
-    // Frame tanpa caption: satu buffer RGBA(nanti) transparan penuh dipakai
-    // ulang — rawvideo input butuh piksel berukuran canvas.
+    // Frame tanpa caption: satu buffer RGBA transparan penuh dipakai ulang —
+    // rawvideo input butuh piksel berukuran canvas.
     let zeros_rgba =
         std::sync::Arc::new(vec![0u8; probe.width as usize * probe.height as usize * 4]);
     let mut write_err: Option<std::io::Error> = None;
 
-    if opts.engine == "skia" {
-        // ── Skia: raster PARALEL GPU — satu renderer per thread rayon ────────
-        // SkiaVulkanCtx disengaja `unsafe impl Sync` oleh fframes:
-        // create_skia_context() round-robin antrean (`next_queue.fetch_add` +
-        // queue-lock per antrean), jadi tiap thread pegang GPU context sendiri
-        // tanpa tabrakan antrean. CPU memakai thread untuk parse SVG + copy.
-        let raster = skia_raster
-            .as_ref()
-            .context("renderer skia tidak terbuat (bug internal engine skia)")?;
-        // ── Skia PARALEL: K worker thread, renderer dibuat DI thread-nya ─────
-        // (Skia surface/context tak Send → renderer tak boleh berpindah thread).
-        // Backend shared (SkiaVulkanCtx Sync: antrean round-robin + lock per
-        // antrean). Frame f kerjakan worker f % K; tulis stdin tetap berurutan.
-        const SKIA_THREADS: usize = 12;
-        const WINDOW: u32 = 256; // RAM: 256×8.3MB ≈ 2.2GB
-        let mut base = 0u32;
-        while base < frame_count {
-            let w_end = (base + WINDOW).min(frame_count);
-            let win: Vec<Option<Vec<u8>>> =
-                std::thread::scope(|scope| -> Result<Vec<Option<Vec<u8>>>> {
-                let mut lane_joins = Vec::new();
-                for lane_i in 0..SKIA_THREADS {
-                    let raster_lane = raster;
-                    let doc_lane = &doc;
-                    let ctx_lane = &ctx;
-                    let join = scope.spawn(move || {
-                        let mut renderer = raster_lane.make_renderer();
-                        let mut lane_out: Vec<Option<Vec<u8>>> = Vec::new();
-                        let mut f = base + lane_i as u32;
-                        while f < w_end {
-                            let now_ms = (f as f64) * 1000.0 / fps_f64;
-                            let svg = caption_core::templates::render(
-                                &doc_lane.template,
-                                doc_lane,
-                                now_ms as f32,
-                                ctx_lane,
-                            )
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("template tak dikenal: {}", doc_lane.template)
-                            })?;
-                            let s = svg.to_string();
-                            let bytes = if s.is_empty() {
-                                None
-                            } else {
-                                Some(renderer.render_frame_rgba(&s, probe.width, probe.height)?)
-                            };
-                            lane_out.push(bytes);
-                            f += SKIA_THREADS as u32;
-                        }
-                        Ok::<_, anyhow::Error>(lane_out)
-                    });
-                    lane_joins.push(join);
-                }
-                // Gabung lane → window berurutan (frame f = lane f%K, posisi f/K).
-                let mut window: Vec<Option<Vec<u8>>> = vec![None; (w_end - base) as usize];
-                for (lane_i, join) in lane_joins.into_iter().enumerate() {
-                    for (p, bytes) in join
-                        .join()
-                        .expect("skia lane panic")
-                        .map_err(anyhow::Error::from)?
-                        .into_iter()
-                        .enumerate()
-                    {
-                        window[p * SKIA_THREADS + lane_i] = bytes;
-                    }
-                }
-                Ok(window)
-            })?;
-            for payload in &win {
-                let bytes: &[u8] = match payload {
-                    Some(b) => b,
-                    None => zeros_rgba.as_slice(),
-                };
-                if let Err(err) = stdin.write_all(bytes) {
-                    write_err = Some(err);
-                    break;
-                }
+    // ── CPU (dan engine tak dikenal): raster PARALEL rayon ─────────────────
+    // Semua thread logis dipakai; cache + pool DIBUAT SEKALI per thread rayon
+    // lalu dipakai ulang antar frame (dulu: dibuat-luang tiap frame — jadi
+    // cache subtitle gol statis tidak tersimpan).
+    const BATCH_FRAMES: u32 = 32;
+    let mut batch_start = 0u32;
+    while batch_start < frame_count {
+        let batch_end = (batch_start + BATCH_FRAMES).min(frame_count);
+        let batch = (batch_start..batch_end)
+            .into_par_iter()
+            .map_init(
+                || CpuWorkerState {
+                    doc: &doc,
+                    ctx: &ctx,
+                    fdb: font_source.database(),
+                    fps_f64,
+                    width: probe.width,
+                    height: probe.height,
+                    cache: svgr::SvgrCache::new(4),
+                    pool: svgr::PixmapPool::new(),
+                },
+                |w, f| w.render_frame(f),
+            )
+            .collect::<Result<Vec<Option<Vec<u8>>>, anyhow::Error>>();
+        let batch = match batch {
+            Ok(v) => v,
+            Err(err) => {
+                // abort batch — tutup pipe vis-à-vis ffmpeg lalu lempar.
+                drop(stdin);
+                let _ = child.wait();
+                return Err(err);
             }
-            if write_err.is_some() {
-                break;
-            }
-            on_progress(w_end, frame_count);
-            base = w_end;
-        }
-    } else {
-        // ── CPU (dan engine tak dikenal): raster PARALEL rayon ────────────────
-        // Semua thread logis dipakai; cache + pool DIBUAT SEKALI per thread rayon
-        // lalu dipakai ulang antar frame (dulu: dibuat-luang tiap frame — jadi
-        // cache subtitle gol statis tidak tersimpan).
-        const BATCH_FRAMES: u32 = 32;
-        let mut batch_start = 0u32;
-        while batch_start < frame_count {
-            let batch_end = (batch_start + BATCH_FRAMES).min(frame_count);
-            let batch = (batch_start..batch_end)
-                .into_par_iter()
-                .map_init(
-                    || CpuWorkerState {
-                        doc: &doc,
-                        ctx: &ctx,
-                        fdb: font_source.database(),
-                        fps_f64,
-                        width: probe.width,
-                        height: probe.height,
-                        cache: svgr::SvgrCache::new(4),
-                        pool: svgr::PixmapPool::new(),
-                    },
-                    |w, f| w.render_frame(f),
-                )
-                .collect::<Result<Vec<Option<Vec<u8>>>, anyhow::Error>>();
-            let batch = match batch {
-                Ok(v) => v,
-                Err(err) => {
-                    // abort batch — tutup pipe vis-à-vis ffmpeg lalu lempar.
-                    drop(stdin);
-                    let _ = child.wait();
-                    return Err(err);
-                }
+        };
+        for item in batch {
+            let payload: &[u8] = match &item {
+                Some(bytes) => bytes,
+                None => zeros_rgba.as_slice(),
             };
-            for item in batch {
-                let payload: &[u8] = match &item {
-                    Some(bytes) => bytes,
-                    None => zeros_rgba.as_slice(),
-                };
-                if let Err(err) = stdin.write_all(payload) {
-                    write_err = Some(err);
-                    break;
-                }
-            }
-            if write_err.is_some() {
+            if let Err(err) = stdin.write_all(payload) {
+                write_err = Some(err);
                 break;
             }
-            on_progress(batch_end, frame_count);
-            batch_start = batch_end;
         }
+        if write_err.is_some() {
+            break;
+        }
+        on_progress(batch_end, frame_count);
+        batch_start = batch_end;
     }
     drop(stdin);
     let status = child.wait().context("tunggu ffmpeg")?;
@@ -498,6 +541,323 @@ pub fn render_video(
         bail!("{reason}\n--- ffmpeg stderr ---\n{stderr_text}");
     }
     on_progress(frame_count, frame_count);
+    Ok(())
+}
+
+// ── skia slice: satu proses ffmpeg + raster lane + double-buffer + cache ───
+
+/// Hitung band vertikal caption: sample `SAMPLES` frame merata, raster
+/// full-frame, union baris yang punya piksel alpha>0, + margin bleed blur.
+/// None = full-frame (caption menyebar / sampling gagal).
+#[cfg(feature = "gpu-skia")]
+fn compute_caption_band(
+    raster: &SkiaRasterizer,
+    doc: &CaptionDocument,
+    ctx: &FFramesContext<'_, '_>,
+    frame_count: u32,
+    fps_f64: f64,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32)> {
+    const SAMPLES: u32 = 24;
+    const MARGIN: u32 = 128;
+    let mut renderer = raster.make_renderer();
+    let mut y_min = height;
+    let mut y_max = 0u32;
+    let mut found_any = false;
+    for i in 0..SAMPLES {
+        let f = (i * frame_count / SAMPLES.max(1)).min(frame_count.saturating_sub(1));
+        let now_ms = (f as f64) * 1000.0 / fps_f64;
+        let svg = caption_core::templates::render(&doc.template, doc, now_ms as f32, ctx)?;
+        let s = svg.to_string();
+        if s.is_empty() {
+            continue;
+        }
+        // Raster full-frame lalu pindai baris alpha.
+        let data = renderer.render_frame_rgba(&s, width, height).ok()?;
+        let row_bytes = width as usize * 4;
+        for (row, chunk) in data.chunks_exact(row_bytes).enumerate() {
+            let has_paint = chunk.chunks_exact(4).any(|px| px[3] != 0);
+            if has_paint {
+                found_any = true;
+                y_min = y_min.min(row as u32);
+                y_max = y_max.max(row as u32 + 1);
+            }
+        }
+    }
+    if !found_any {
+        return None;
+    }
+    let y0 = y_min.saturating_sub(MARGIN);
+    let y1 = (y_max + MARGIN).min(height);
+    let bh = y1 - y0;
+    if bh >= height * 85 / 100 {
+        return None; // caption menyebar — band tak berguna
+    }
+    Some((y0, bh))
+}
+
+/// Bungkus ulang SVG dengan viewBox tergeser ke band: konten koordinat penuh
+/// tetap utuh, root baru memetakan y∈[y0, y0+bh) → [0, bh).
+fn wrap_svg_band(svg: &str, width: u32, y0: u32, bh: u32) -> Option<String> {
+    let open_end = svg.find('>')? + 1;
+    let close = svg.rfind("</svg>")?;
+    if close < open_end {
+        return None;
+    }
+    let inner = &svg[open_end..close];
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{bh}\" viewBox=\"0 {y0} {width} {bh}\">{inner}</svg>"
+    ))
+}
+
+
+struct SkiaSliceParams<'a> {
+    ffmpeg: &'a Path,
+    head: &'a [String],
+    encode_args: &'a [String],
+    video: &'a Path,
+    probe: &'a VideoProbe,
+    doc: &'a CaptionDocument,
+    ctx: &'a FFramesContext<'a, 'a>,
+    raster: &'a SkiaRasterizer,
+    cache: Arc<RasterCache>,
+    zeros: Arc<Vec<u8>>,
+    /// Rentang frame global slice ini (inklusif-eksklusif).
+    range: std::ops::Range<u32>,
+    lanes: usize,
+    window: u32,
+    fps_f64: f64,
+    out: PathBuf,
+    progress_ref: &'a std::sync::atomic::AtomicU32,
+    hwaccel: Option<&'a str>,
+    /// Band crop: baris atas + tinggi pita (None = full-frame).
+    band_y: u32,
+    band_h: u32,
+}
+
+fn run_skia_slice(p: SkiaSliceParams<'_>) -> Result<()> {
+    let s0 = p.range.start;
+    let s1 = p.range.end;
+    let start_sec = s0 as f64 / p.fps_f64;
+    let count = s1 - s0;
+    // ffmpeg per-slice: seek ke awal potongan, batasi jumlah frame.
+    let mut cmd = Command::new(p.ffmpeg);
+    for a in p.head {
+        if a == "-i" {
+            break;
+        }
+        cmd.arg(a);
+    }
+    cmd.args(["-ss", &format!("{start_sec}")]);
+    cmd.arg("-i").arg(p.video);
+    cmd.args(["-framerate", &p.probe.fps_str()]);
+    cmd.args([
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-video_size",
+        &format!("{}x{}", p.probe.width, p.band_h),
+        "-i",
+        "pipe:0",
+    ]);
+    // Overlay pita caption di baris band_y (pita penuh lebar).
+    if p.band_h == p.probe.height {
+        cmd.args([
+            "-filter_complex",
+            "[0:v][1:v]overlay=format=auto:shortest=1[v]",
+        ]);
+    } else {
+        cmd.args([
+            "-filter_complex",
+            &format!("[0:v][1:v]overlay=format=auto:shortest=1:x=0:y={}[v]", p.band_y),
+        ]);
+    }
+    cmd.args(["-map", "[v]", "-map", "0:a?", "-c:a", "copy"]);
+    cmd.args(p.encode_args);
+    cmd.args(["-frames:v", &count.to_string()]);
+    cmd.arg(&p.out);
+    cmd.stdin(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("jalankan {} (slice {s0}..{s1})", p.ffmpeg.display()))?;
+    // Kumpulkan stderr slice untuk pesan error yang jelas.
+    let stderr_handle = child.stderr.take().context("ffmpeg stderr slice")?;
+    let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let stderr_collector = {
+        let buf = Arc::clone(&stderr_buf);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut h = stderr_handle;
+            let mut tmp = [0u8; 4096];
+            loop {
+                match h.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut b = buf.lock().unwrap();
+                        if b.len() < 16 * 1024 {
+                            b.extend_from_slice(&tmp[..n]);
+                        }
+                    }
+                }
+            }
+        })
+    };
+    let mut stdin = child.stdin.take().context("ffmpeg stdin slice")?;
+
+    let raster_total = std::sync::atomic::AtomicU64::new(0);
+    let mut write_err: Option<std::io::Error> = None;
+    let mut written: u32 = 0;
+    let mut pending: Option<Vec<Option<Arc<Vec<u8>>>>> = None;
+    let mut pending_end: u32 = s0;
+    let mut base = s0;
+    while base < s1 {
+        let w_end = (base + p.window).min(s1);
+        let r0 = std::time::Instant::now();
+        let win: Vec<Option<Arc<Vec<u8>>>> =
+            std::thread::scope(|scope| -> Result<Vec<Option<Arc<Vec<u8>>>>> {
+                let mut lane_joins = Vec::new();
+                for lane_i in 0..p.lanes {
+                    let raster_lane = p.raster;
+                    let doc_lane = p.doc;
+                    let ctx_lane = p.ctx;
+                    let cache_lane = Arc::clone(&p.cache);
+                    let join = scope.spawn(move || {
+                        let mut renderer = raster_lane.make_renderer();
+                        let mut lane_out: Vec<Option<Arc<Vec<u8>>>> = Vec::new();
+                        let mut f = base + lane_i as u32;
+                        while f < w_end {
+                            let now_ms = (f as f64) * 1000.0 / p.fps_f64;
+                            let t_build = std::time::Instant::now();
+                            let svg = caption_core::templates::render(
+                                &doc_lane.template,
+                                doc_lane,
+                                now_ms as f32,
+                                ctx_lane,
+                            )
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("template tak dikenal: {}", doc_lane.template)
+                            })?;
+                            let raw = svg.to_string();
+                            let s = if raw.is_empty() {
+                                String::new()
+                            } else if p.band_h == p.probe.height {
+                                raw
+                            } else {
+                                wrap_svg_band(&raw, p.probe.width, p.band_y, p.band_h)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!("wrap band svg gagal (frame {f})")
+                                    })?
+                            };
+                            SVG_BUILD_US.fetch_add(
+                                t_build.elapsed().as_micros() as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                            let bytes = if s.is_empty() {
+                                None
+                            } else if let Some(hit) = cache_lane.get(&s) {
+                                Some(hit)
+                            } else {
+                                let t_r = std::time::Instant::now();
+                                let data =
+                                    renderer.render_frame_rgba(&s, p.probe.width, p.band_h)?;
+                                RASTER_US.fetch_add(
+                                    t_r.elapsed().as_micros() as u64,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                                let arc = Arc::new(data);
+                                cache_lane.insert(&s, Arc::clone(&arc));
+                                Some(arc)
+                            };
+                            lane_out.push(bytes);
+                            f += p.lanes as u32;
+                        }
+                        Ok::<_, anyhow::Error>(lane_out)
+                    });
+                    lane_joins.push(join);
+                }
+                // Selagi lane me-raster window ini, tulis window SEBELUMNYA.
+                if let Some(prev) = pending.take() {
+                    for payload in &prev {
+                        let bytes: &[u8] = match payload {
+                            Some(b) if !b.is_empty() => b.as_slice(),
+                            _ => p.zeros.as_slice(),
+                        };
+                        if let Err(err) = stdin.write_all(bytes) {
+                            write_err = Some(err);
+                            break;
+                        }
+                    }
+                    written = pending_end - s0;
+                    p.progress_ref.fetch_add(
+                        (pending_end - s0) - (pending_end - s0),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    raster_total.fetch_add(
+                        r0.elapsed().as_millis() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                // Gabung lane → window berurutan (frame f = lane f%K, posisi f/K).
+                let mut window: Vec<Option<Arc<Vec<u8>>>> = vec![None; (w_end - base) as usize];
+                for (lane_i, join) in lane_joins.into_iter().enumerate() {
+                    for (pp, bytes) in join
+                        .join()
+                        .expect("skia lane panic")
+                        .map_err(anyhow::Error::from)?
+                        .into_iter()
+                        .enumerate()
+                    {
+                        window[pp * p.lanes + lane_i] = bytes;
+                    }
+                }
+                Ok(window)
+            })?;
+        pending = Some(win);
+        pending_end = w_end;
+        if write_err.is_some() {
+            break;
+        }
+        base = w_end;
+    }
+    // Tulis window terakhir.
+    if write_err.is_none() {
+        if let Some(last) = pending.take() {
+            for payload in &last {
+                let bytes: &[u8] = match payload {
+                    Some(b) if !b.is_empty() => b.as_slice(),
+                    _ => p.zeros.as_slice(),
+                };
+                if let Err(err) = stdin.write_all(bytes) {
+                    write_err = Some(err);
+                    break;
+                }
+            }
+            written = s1 - s0;
+            p.progress_ref
+                .fetch_add(written, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    drop(stdin);
+    let status = child.wait().context("tunggu ffmpeg slice")?;
+    stderr_collector.join().ok();
+    let rt = raster_total.load(std::sync::atomic::Ordering::Relaxed);
+    let hits = HITS.load(std::sync::atomic::Ordering::Relaxed);
+    let misses = MISSES.load(std::sync::atomic::Ordering::Relaxed);
+    let build_ms = SVG_BUILD_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
+    let raster_ms = RASTER_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
+    eprintln!(
+        "[render] profil skia slice {s0}..{s1}: raster={rt}ms hits={hits} misses={misses} svg_build={build_ms:.0}ms raster_only={raster_ms:.0}ms"
+    );
+    if !status.success() || write_err.is_some() {
+        let reason = match write_err {
+            Some(err) => format!("pipe gagal: {err}"),
+            None => "ffmpeg exit non-zero".to_string(),
+        };
+        let stderr_text = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).to_string();
+        bail!("{reason}\n--- ffmpeg stderr slice {s0}..{s1} ---\n{stderr_text}");
+    }
     Ok(())
 }
 
@@ -711,11 +1071,18 @@ impl SkiaRendererOwned<'_> {
         .map_err(|err| anyhow::anyhow!("render skia: {err}"))?;
         // RgbaFrame = straight RGBA; pipe rawvideo memakai premultiplied agar
         // setara byte-dengan-jalur PNG lama (tiny-skia Pixmap premultiplied).
-        let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
-        for src in frame.pixels.chunks_exact(4) {
+        // Konversi bulk ke buffer pre-alokasi — dulu per-piksel
+        // extend_from_slice (2 juta iterasi @1080p ≈ 15-25ms/frame).
+        let n = width as usize * height as usize * 4;
+        let mut bytes = vec![0u8; n];
+        debug_assert_eq!(frame.pixels.len(), n);
+        for (dst, src) in bytes.chunks_exact_mut(4).zip(frame.pixels.chunks_exact(4)) {
             let px = svgr::tiny_skia::ColorU8::from_rgba(src[0], src[1], src[2], src[3])
                 .premultiply();
-            bytes.extend_from_slice(&[px.red(), px.green(), px.blue(), px.alpha()]);
+            dst[0] = px.red();
+            dst[1] = px.green();
+            dst[2] = px.blue();
+            dst[3] = px.alpha();
         }
         Ok(bytes)
     }
@@ -764,3 +1131,67 @@ impl SkiaRendererOwned<'_> {
     }
 }
 
+
+/// Cache raster per-SVG: frame statis dalam satu cue menghasilkan SVG identik,
+/// jadi hasil raster (RGBA premultiplied siap-pipe) boleh dipakai ulang.
+/// Key = hash string SVG; LRU sederhana berkapasitas `cap` entri (8.3MB/frame
+/// @1080p — 64 entri ≈ 530MB RAM). Hit = skip raster + readback GPU.
+struct RasterCache {
+    inner: std::sync::Mutex<RasterCacheState>,
+    cap: usize,
+}
+
+struct RasterCacheState {
+    map: std::collections::HashMap<u64, Arc<Vec<u8>>>,
+    order: std::collections::VecDeque<u64>,
+}
+
+impl RasterCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(RasterCacheState {
+                map: std::collections::HashMap::new(),
+                order: std::collections::VecDeque::new(),
+            }),
+            cap,
+        }
+    }
+
+    fn hash(svg: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        svg.hash(&mut h);
+        h.finish()
+    }
+
+    fn get(&self, svg: &str) -> Option<Arc<Vec<u8>>> {
+        let key = Self::hash(svg);
+        let mut g = self.inner.lock().unwrap();
+        let hit = g.map.get(&key).cloned()?;
+        g.order.retain(|k| *k != key);
+        g.order.push_back(key);
+        HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(hit)
+    }
+
+    fn insert(&self, svg: &str, val: Arc<Vec<u8>>) {
+        MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let key = Self::hash(svg);
+        let mut g = self.inner.lock().unwrap();
+        if g.map.insert(key, val).is_some() {
+            g.order.retain(|k| *k != key);
+        }
+        g.order.push_back(key);
+        while g.order.len() > self.cap {
+            if let Some(old) = g.order.pop_front() {
+                g.map.remove(&old);
+            }
+        }
+    }
+}
+
+/// Diagnostik cache raster (agregat lintas lane/slice).
+static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SVG_BUILD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RASTER_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

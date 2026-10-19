@@ -43,7 +43,81 @@ pub fn font_count() -> usize {
 pub fn raster_svg(svg: &str, width: u32, height: u32) -> Result<Vec<u8>, JsValue> {
     let pixmap = render_svg_to_pixmap(svg, width, height)
         .map_err(|err| JsValue::from_str(&format!("raster svg: {err}")))?;
-    Ok(pixmap.data().to_vec())
+    let mut data = pixmap.data().to_vec();
+    // Premultiplied (tiny-skia) → straight alpha: canvas ImageData /
+    // WebCodecs RGBA mengharapkan straight. Di Rust ≈ 1-2ms vs unpremultiply
+    // di JS per frame ≈ 5ms (jalur export memanggil ini tiap cache-miss).
+    for px in data.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 255 || a == 0 {
+            continue; // a=255 identik; a=0 premul sudah rgb=0.
+        }
+        px[0] = ((px[0] as u32 * 255 + a / 2) / a).min(255) as u8;
+        px[1] = ((px[1] as u32 * 255 + a / 2) / a).min(255) as u8;
+        px[2] = ((px[2] as u32 * 255 + a / 2) / a).min(255) as u8;
+    }
+    Ok(data)
+}
+
+/// Profil fase raster (debug dev, panggil dari harness diagnostik).
+#[wasm_bindgen]
+pub fn raster_svg_profile(svg: &str, width: u32, height: u32) -> String {
+    let t0 = js_sys::Date::now();
+    let opt = svgr::usvgr::Options::default();
+    let tree = match FONTDB.with(|db| svgr::usvgr::Tree::from_str(svg, &opt, &db.borrow())) {
+        Ok(t) => t,
+        Err(e) => return format!("parse-error: {e}"),
+    };
+    let t1 = js_sys::Date::now();
+    let mut pixmap = match svgr::tiny_skia::Pixmap::new(width, height) {
+        Some(p) => p,
+        None => return "alloc-error".into(),
+    };
+    let t2 = js_sys::Date::now();
+    let ts = tree.size();
+    let transform = svgr::tiny_skia::Transform::identity();
+    let _ = ts;
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Some(svgr::SvgrCache::new(4));
+        }
+        let cache = c.as_mut().unwrap();
+        POOL.with(|p| {
+            let pool = p.borrow();
+            let ctx = svgr::Context::new_from_pixmap(&pixmap);
+            svgr::render(&tree, transform, &mut pixmap.as_mut(), cache, &pool, &ctx);
+        });
+    });
+    let t3 = js_sys::Date::now();
+    let data = pixmap.data();
+    let mut nonzero = 0usize;
+    for px in data.chunks_exact(4) {
+        if px[3] != 0 {
+            nonzero += 1;
+        }
+    }
+    let t4 = js_sys::Date::now();
+    let mut out = pixmap.data().to_vec();
+    for px in out.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 255 || a == 0 {
+            continue;
+        }
+        px[0] = ((px[0] as u32 * 255 + a / 2) / a).min(255) as u8;
+        px[1] = ((px[1] as u32 * 255 + a / 2) / a).min(255) as u8;
+        px[2] = ((px[2] as u32 * 255 + a / 2) / a).min(255) as u8;
+    }
+    let t5 = js_sys::Date::now();
+    format!(
+        "parse={:.2} alloc={:.2} render={:.2} scan={:.2} unpremul+to_vec={:.2} nonzero={}",
+        t1 - t0,
+        t2 - t1,
+        t3 - t2,
+        t4 - t3,
+        t5 - t4,
+        nonzero
+    )
 }
 
 /// Satu frame burn-in penuh di WASM: komposit frame video (base_rgba)
@@ -95,10 +169,15 @@ pub fn burn_frame(
 // ── internal: raster SVG → Pixmap ──────────────────────────────────────────
 
 fn render_svg_to_pixmap(svg: &str, width: u32, height: u32) -> Result<svgr::tiny_skia::Pixmap, String> {
-    let fontdb = FONTDB.with(|db| db.borrow().clone());
     let opt = svgr::usvgr::Options::default();
-    let tree = svgr::usvgr::Tree::from_str(svg, &opt, &fontdb)
-        .map_err(|err| format!("parse: {err}"))?;
+    // Parse dengan BORROW, bukan clone fontdb — clone memindahkan seluruh
+    // data font (10-30MB) tiap raster ≈ 5-7ms. `svgr::render` tidak menerima
+    // fontdb (font sudah di-resolve Tree saat parse), jadi borrow cukup dan
+    // thread-local tidak di-re-entri.
+    let tree = FONTDB.with(|db| {
+        svgr::usvgr::Tree::from_str(svg, &opt, &db.borrow())
+            .map_err(|err| format!("parse: {err}"))
+    })?;
 
     let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| format!("alokasi pixmap {width}x{height}"))?;

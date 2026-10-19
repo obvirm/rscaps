@@ -1,4 +1,5 @@
 import { loadBridge, type LoadedBridge } from "./wasm";
+import { splitSvgLayers } from "./svgLayers";
 import { transcribeBlob, type TranscribeStage } from "./transcribe";
 import { burnInExport, computeOutputSize, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
 import {
@@ -73,6 +74,9 @@ class StudioState {
   playing = $state(false);
   durationFrames = $state(300);
   fps = $state(30);
+  // Profiler dev: akumulasi ms render_frame bridge (lihat exportprof).
+  rfAcc = 0;
+  rfN = 0;
   videoWidth = $state(1920);
   videoHeight = $state(1080);
   videoUrl = $state<string | null>(null);
@@ -631,23 +635,11 @@ class StudioState {
    */
   renderFrameSvgLayers(frame: number): { base: string; blend?: string | null } | null {
     if (!this.wasm) return null;
+    const rf0 = performance.now();
     const raw = this.wasm.bridge.render_frame(BigInt(frame));
-    if (!raw) return null;
-    // Split base/blend: hapus node <text> satunya — struktur grup (font attrs,
-    // rise, clip defs) TETAP dipertahankan di kedua layer. Hanya menyalin node
-    // teks tanpa konteks grup membuat usvgr kehilangan font-family/size
-    // (render kosong - bug 2026-10).
-    const BLEND = "mix-blend-mode: difference";
-    if (!raw.includes(BLEND)) return { base: raw };
-    const TEXT_RE = /<text[\s\S]*?<\/text>/g;
-    const texts = raw.match(TEXT_RE) ?? [];
-    const blendTexts = texts.filter((t) => t.includes(BLEND));
-    const baseTexts = texts.filter((t) => !t.includes(BLEND));
-    let baseSvg = raw;
-    for (const t of blendTexts) baseSvg = baseSvg.replace(t, "");
-    let blendSvg = raw;
-    for (const t of baseTexts) blendSvg = blendSvg.replace(t, "");
-    return { base: baseSvg, blend: blendSvg };
+    this.rfAcc += performance.now() - rf0;
+    this.rfN += 1;
+    return splitSvgLayers(raw);
   }
 
   async renderRaster(): Promise<void> {
@@ -1342,7 +1334,14 @@ class StudioState {
         fontFaceCss: this.fontFaceCss,
       });
       const ext = opts.format === "webm" ? "webm" : "mp4";
+      if (import.meta.env.DEV && this.rfN > 0) {
+        console.log(
+          `[exportprof] render_frame=${(this.rfAcc / this.rfN).toFixed(3)}ms x${this.rfN}`,
+        );
+      }
+      console.log("[exportstage] downloadBlob start");
       this.downloadBlob(out, `${project.name || "export"}.${ext}`);
+      console.log("[exportstage] downloadBlob end");
       this.setStatus(`exported ${project.name}.${ext}`);
     } catch (err) {
       console.error(err);

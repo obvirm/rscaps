@@ -290,7 +290,11 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
 
     // ── Font: sekali untuk UKURAN kata (measure_words) + raster text→path ─
     let mut font_source = CliFontSource::new();
-    font_source.load_system();
+    if std::env::var("RSCAPS_LOAD_SYSTEM_FONTS").as_deref() == Ok("1") {
+        font_source.load_system();
+    } else {
+        font_source.load_windows_core();
+    }
     for dir in doc::candidate_font_dirs(args.fonts) {
         if dir.is_dir() {
             font_source.load_dir(&dir);

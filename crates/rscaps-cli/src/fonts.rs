@@ -28,6 +28,23 @@ impl CliFontSource {
         self.db.load_system_fonts();
     }
 
+    /// Font inti ala studio web: Arial + Arial Black dari C:\Windows\Fonts
+    /// (font lain tetangga dari folder template dimuat terpisah via
+    /// `load_dir`). JAUH lebih kecil dari seluruh fontdb sistem — usvgr text
+    /// layout skala dengan ukuran fontdb.
+    pub fn load_windows_core(&mut self) {
+        const CORE: &[&str] = &["arial.ttf", "ariblk.ttf"];
+        let dir = Path::new("C:\\Windows\\Fonts");
+        for name in CORE {
+            let p = dir.join(name);
+            if p.is_file() {
+                if let Ok(bytes) = std::fs::read(&p) {
+                    self.db.load_font_data(bytes);
+                }
+            }
+        }
+    }
+
     pub fn load_dir(&mut self, path: impl AsRef<Path>) {
         self.db.load_fonts_dir(path);
     }

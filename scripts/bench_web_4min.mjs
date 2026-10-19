@@ -12,7 +12,7 @@ const execP = promisify(exec);
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const URL = "http://localhost:5177/";
 const VIDEO = "E:\\temp\\opencode\\web4min.mp4";
-const SRT = "E:\\temp\\opencode\\web4min.srt";
+const SRT = process.env.BENCH_SRT || "E:\\temp\\opencode\\web4min.srt";
 const OUT_CSV = "E:\\temp\\opencode\\web4min_usage.csv";
 const OUT_JSON = "E:\\temp\\opencode\\web4min_result.json";
 
@@ -93,6 +93,7 @@ async function main() {
       "--disable-dev-shm-usage",
     ],
     defaultViewport: { width: 1920, height: 1080 },
+    protocolTimeout: 600000,
   });
   const page = await browser.newPage();
   // Download hasil ekspor ke folder tetap (bukan Downloads Windows) dan
@@ -225,7 +226,7 @@ async function main() {
     // Quality high (default sudah high).
     const qualitySel = await page.$("#ex-quality");
     if (qualitySel) {
-      await qualitySel.select("high");
+      await qualitySel.select(process.env.BENCH_QUALITY || "high");
       await sleep(100);
     }
 

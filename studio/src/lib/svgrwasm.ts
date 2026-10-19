@@ -82,3 +82,18 @@ export async function burnFrameWasm(
   const wasm = await initSvgrWasm();
   return wasm.burn_frame(baseRgba, svg, blendSvg, width, height);
 }
+
+/**
+ * Raster SVG caption SAJA di WASM → pixels RGBA (premultiplied, tiny-skia).
+ * Dipakai jalur GPU-composite: raster caption di WASM (paritas glyph CLI),
+ * komposit source-over/difference di GPU canvas — piksel video TIDAK
+ * readback ke CPU.
+ */
+export async function rasterSvgWasm(
+  svg: string,
+  width: number,
+  height: number,
+): Promise<Uint8Array> {
+  const wasm = await initSvgrWasm();
+  return wasm.raster_svg(svg, width, height);
+}
