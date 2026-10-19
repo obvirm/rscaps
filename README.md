@@ -1,11 +1,11 @@
 # rscaps
 
-> **Headless caption rendering, pure — no browser.**
-> Animated, burned-in subtitles rendered by a Rust engine that emits SVG. No DOM per word, no CSS animation contract, no browser in the render path.
+> **The faster alternative to tscaps — headless, browser-free caption rendering.**
+> Animated, burned-in subtitles rendered by a Rust engine that emits SVG. No DOM per word, no CSS animation contract, no browser in the render path — and measured faster than tscaps at the same workload.
 
-rscaps is a clean-room, headless alternative to the caption pipeline of [tscaps](https://github.com/francozanardi/tscaps). tscaps styles captions as HTML + CSS and lets the **browser** rasterize the DOM at every frame. rscaps takes the same document/template idea and re-solves it as a **pure rendering engine**: one Rust string of SVG per frame, produced by `caption-core`, identical for preview and export.
+rscaps is a clean-room alternative to the caption pipeline of [tscaps](https://github.com/francozanardi/tscaps). tscaps styles captions as HTML + CSS and lets the **browser** rasterize the DOM at every frame. rscaps takes the same document/template idea and re-solves it as a **pure rendering engine**: one Rust string of SVG per frame, produced by `caption-core`, identical for preview and export.
 
-The architecture was resolved from tscaps and re-realized without the browser: instead of "captions = live CSS in a DOM the browser paints", captions are computed geometry + paint in Rust. The result renders anywhere a rasterizer runs — a CLI, a server, a native shell — not only where a browser exists.
+The architecture was resolved from tscaps and re-realized without the browser: instead of "captions = live CSS in a DOM the browser paints", captions are computed geometry + paint in Rust. The result renders anywhere a rasterizer runs — a CLI, a server, a native shell — not only where a browser exists. And because the export path never round-trips pixels through the DOM, it wins on speed too (see [Benchmarks](#benchmarks)).
 
 ## What it is
 
@@ -28,6 +28,25 @@ The architecture was resolved from tscaps and re-realized without the browser: i
 | Per-word edit surface | CSS classes / custom properties | document model + per-word overrides |
 
 One engine, one output format (SVG), one place where caption logic lives. Preview and export cannot drift because they are the same call.
+
+## Benchmarks
+
+Same machine, same clip, measured back-to-back (4-minute 1080p30 burn-in, 7200 frames, 120 cues; 6-core/12-thread desktop + NVIDIA GPU). Reproduce with `scripts/bench_web_4min.mjs`, `scripts/tmp_tscaps_bench.mjs`, and `scripts/bench_cli_matrix.mjs`.
+
+| Pipeline | Wall | Notes |
+|---|---|---|
+| **rscaps web export** | **36.9s** | 6 GPU workers + pipelined encoder, zero pixel round-trips |
+| tscaps (web) | 48.9s | measured back-to-back under identical load; serial main-thread pipeline |
+| **rscaps CLI** (`--engine skia --hw-encode`) | **27.6s** | band crop + per-SVG raster cache + K-slice ffmpeg (was 65.3s before optimization) |
+
+Why it wins:
+
+- **Zero pixel transport on web**: the video frame stays on the GPU, captions composite in workers, and the encoder consumes GPU frames directly. tscaps snapshots a canvas per frame through a serial main-thread loop.
+- **The encoder is the only wall**: decode, caption raster, and muxing overlap fully behind the hardware encoder's pace (`encOut` diagnostics in the export profiler).
+- **CLI band crop**: captions occupy a fraction of the frame, so only that vertical band is rasterized and piped (~2.7× less blur work and pipe bytes), with a sampled-bbox fallback to full-frame when captions spread.
+- **Per-SVG raster cache**: static frames inside one cue produce identical SVGs — a ~75% hit rate skips raster and GPU readback entirely.
+
+Export features on the web path: codec fallback chain (AVC → HEVC → AV1, hardware-accelerated), an explicit bitrate table (7/14/21/46 Mbps baselines at 720p/1080p/1440p/4K), `contentHint: 'text'`, and audio interleaved with the video drain (no separate audio phase).
 
 ## Architecture
 
@@ -90,11 +109,14 @@ cargo run -p rscaps-cli -- render --video in.mp4 --srt subs.srt \
 
 Engines and encode options:
 
-- `--engine fframes` — **full fframes pipeline** (raster + encode + audio mux in Rust). Long videos are rendered in chunks (`frame_range` + `ffmpeg concat`), so there is no length cap. Canvas follows the real video size (portrait works).
-- `--engine cpu` (default) / `--engine skia` — older overlay path: `svgr` raster → PNG pipe → `ffmpeg` overlay.
+- `--engine skia` — **fastest headless path**: 12 GPU raster lanes, per-SVG raster cache, double-buffered pipe, and 3 parallel ffmpeg processes over a band-cropped caption transport, joined with `concat -c copy`. Pair with `--hw-encode` for hardware encode.
+- `--engine fframes` — full fframes pipeline (raster + encode + audio mux in Rust). Long videos are rendered in chunks (`frame_range` + `ffmpeg concat`), so there is no length cap. Canvas follows the real video size (portrait works).
+- `--engine cpu` (default) — classic overlay path: `svgr` raster → RGBA pipe → `ffmpeg` overlay.
 - `--hw-encode` + `--hw-encoder h264_nvenc|h264_qsv|h264_vaapi|h264_videotoolbox|h264_amf` — GPU encode (falls back to `libx264` when the encoder is unavailable).
 - `--hwaccel <auto|cuda|d3d11va|vaapi|qsv>` — decode with an FFmpeg hardware accel.
 - `--crf`, `--preset`, `--ffmpeg-dir` — encoding controls (FFmpeg/ffprobe located via flag, `RSCAPS_FFMPEG_DIR`, or `PATH`).
+
+Fonts follow the studio contract by default: only the template fonts (`tplfonts`) plus Arial/Arial Black are loaded — a full system fontdb slows text layout. Set `RSCAPS_LOAD_SYSTEM_FONTS=1` to restore full system font coverage for exotic scripts.
 
 `serve` runs a localhost API (`--bind`/`--port`, default `127.0.0.1:8787`) for render jobs with progress.
 

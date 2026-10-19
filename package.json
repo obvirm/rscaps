@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "license": "SEE LICENSE IN README.md",
+  "description": "Faster, headless alternative to tscaps — browser-free animated caption rendering (Rust engine + SVG), CLI + web studio",
   "scripts": {
     "dev": "vite",
     "build:studio": "vite build",
