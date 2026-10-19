@@ -280,6 +280,17 @@ pub fn render_video(
         head.push("-hwaccel".to_string());
         head.push(ha.to_string());
     }
+    // Env override jumlah thread decode per proses slice (opsional; default:
+    // apa adanya ffmpeg). Raster kini murah (region filter ketat + dedupe
+    // layer) sehingga thread decode ffmpeg tak lagi menindas lane.
+    if let Ok(v) = std::env::var("RSCAPS_FFMPEG_THREADS") {
+        if let Ok(n) = v.parse::<u32>() {
+            if n > 0 {
+                head.push("-threads".to_string());
+                head.push(n.to_string());
+            }
+        }
+    }
     // Encoder hardware bila diminta & tersedia; selain itu libx264.
     let use_hw = opts.hw_encode && hw_encoder_available(&ffmpeg, opts.hw_encoder);
     if opts.hw_encode && !use_hw {
@@ -310,8 +321,15 @@ pub fn render_video(
     // dan cache per-SVG dibagi rata ke tiap slice; double-buffer tetap jalan
     // per slice (raster window N+1 selagi window N ditulis).
     if opts.engine == "skia" || opts.engine == "cpu" {
-        const SLICES: usize = 3;
-        const LANES_PER_SLICE: usize = 12 / SLICES;
+        let slices = std::env::var("RSCAPS_SLICES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(3);
+        let lanes_per_slice = (std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(12) / slices)
+            .max(1);
         const WINDOW: u32 = 128; // RAM: SLICES×WINDOW×8.3MB ≈ 3.2GB
         let lane_raster = if opts.engine == "skia" {
             #[cfg(feature = "gpu-skia")]
@@ -363,10 +381,10 @@ pub fn render_video(
             probe.width as usize * band_h as usize * 4
         ]);
 
-        let frames_per_slice = frame_count.div_ceil(SLICES as u32);
+        let frames_per_slice = frame_count.div_ceil(slices as u32);
         let slice_results: Vec<Result<PathBuf, anyhow::Error>> = std::thread::scope(|scope| {
             let mut joins = Vec::new();
-            for slice_i in 0..SLICES {
+            for slice_i in 0..slices {
                 let s0 = (slice_i as u32 * frames_per_slice).min(frame_count);
                 let s1 = ((slice_i as u32 + 1) * frames_per_slice).min(frame_count);
                 if s0 >= s1 {
@@ -402,7 +420,7 @@ pub fn render_video(
                         cache,
                         zeros,
                         range: s0..s1,
-                        lanes: LANES_PER_SLICE,
+                        lanes: lanes_per_slice,
                         window: WINDOW,
                         fps_f64,
                         out: seg_path,
@@ -448,11 +466,16 @@ fn cpu_frame_rgba(
     pool: &svgr::PixmapPool,
 ) -> Result<Vec<u8>> {
     let opt = svgr::usvgr::Options::default();
+    let t0 = std::time::Instant::now();
     let tree = svgr::usvgr::Tree::from_str(svg, &opt, fontdb)
         .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
+    let parse_us = t0.elapsed().as_micros();
+    let t1 = std::time::Instant::now();
     let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| anyhow::anyhow!("gagal alokasi pixmap {width}×{height}"))?;
     let ctx = svgr::Context::new_from_pixmap(&pixmap);
+    let alloc_us = t1.elapsed().as_micros();
+    let t2 = std::time::Instant::now();
     svgr::render(
         &tree,
         svgr::tiny_skia::Transform::identity(),
@@ -461,7 +484,24 @@ fn cpu_frame_rgba(
         pool,
         &ctx,
     );
-    Ok(pixmap.data().to_vec())
+    let render_us = t2.elapsed().as_micros();
+    if let Ok(th) = std::env::var("RSCAPS_DEBUG_SLOW") {
+        let th: u128 = th.parse().unwrap_or(50_000);
+        if render_us > th {
+            eprintln!(
+                "SLOW render={render_us}us size={width}x{height} svg_len={} texts={}",
+                svg.len(),
+                svg.matches("<text").count()
+            );
+        }
+    }
+    let out = pixmap.data().to_vec();
+    let copy_us = t2.elapsed().as_micros() - render_us;
+    PHASE_PARSE.fetch_add(parse_us as u64, std::sync::atomic::Ordering::Relaxed);
+    PHASE_ALLOC.fetch_add(alloc_us as u64, std::sync::atomic::Ordering::Relaxed);
+    PHASE_RENDER.fetch_add(render_us as u64, std::sync::atomic::Ordering::Relaxed);
+    PHASE_COPY.fetch_add(copy_us as u64, std::sync::atomic::Ordering::Relaxed);
+    Ok(out)
 }
 
 // ── slice: satu proses ffmpeg + raster lane + double-buffer + cache ────────
@@ -814,12 +854,16 @@ fn run_skia_slice(p: SliceParams<'_>) -> Result<()> {
     let status = child.wait().context("tunggu ffmpeg slice")?;
     stderr_collector.join().ok();
     let rt = raster_total.load(std::sync::atomic::Ordering::Relaxed);
-    let hits = HITS.load(std::sync::atomic::Ordering::Relaxed);
-    let misses = MISSES.load(std::sync::atomic::Ordering::Relaxed);
+    let hits = HITS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let misses = MISSES.swap(0, std::sync::atomic::Ordering::Relaxed);
     let build_ms = SVG_BUILD_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
     let raster_ms = RASTER_US.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1000.0;
     eprintln!(
-        "[render] profil slice {s0}..{s1}: raster={rt}ms hits={hits} misses={misses} svg_build={build_ms:.0}ms raster_only={raster_ms:.0}ms"
+        "[render] profil slice {s0}..{s1}: raster={rt}ms hits={hits} misses={misses} svg_build={build_ms:.0}ms raster_only={raster_ms:.0}ms fase: parse={}ms alloc={}ms render={}ms copy={}ms",
+        PHASE_PARSE.swap(0, std::sync::atomic::Ordering::Relaxed) / 1000,
+        PHASE_ALLOC.swap(0, std::sync::atomic::Ordering::Relaxed) / 1000,
+        PHASE_RENDER.swap(0, std::sync::atomic::Ordering::Relaxed) / 1000,
+        PHASE_COPY.swap(0, std::sync::atomic::Ordering::Relaxed) / 1000,
     );
     if !status.success() || write_err.is_some() {
         let reason = match write_err {
@@ -1100,3 +1144,7 @@ static HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)
 static MISSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SVG_BUILD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static RASTER_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PHASE_PARSE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PHASE_ALLOC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PHASE_RENDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PHASE_COPY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

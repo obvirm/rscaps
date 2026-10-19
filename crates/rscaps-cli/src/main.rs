@@ -10,6 +10,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
@@ -369,11 +373,19 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
                     std::fs::write(args.out.join(format!("{name}.png")), bytes)
                         .with_context(|| format!("tulis {}", args.out.join(format!("{name}.png")).display()))?;
                 } else {
+                    let t_r = std::time::Instant::now();
                     let pixmap = render_png(&s, width, height, &svg_opt, font_source.database(), &mut cache, &pool, args.engine)
                         .with_context(|| format!("raster {name}"))?;
+                    let render_us = t_r.elapsed().as_micros();
                     let bytes = pixmap
                         .encode_png()
                         .with_context(|| format!("encode {name}.png"))?;
+                    if std::env::var_os("RSCAPS_DEBUG_TIMING").is_some() {
+                        eprintln!(
+                            "timing {name}: render={render_us}us encode={}us",
+                            t_r.elapsed().as_micros() - render_us
+                        );
+                    }
                     std::fs::write(args.out.join(format!("{name}.png")), bytes)?;
                 }
             }

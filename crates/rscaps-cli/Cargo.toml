@@ -21,6 +21,9 @@ fframes_skia_renderer = { version = "1.2.1-rc.38", optional = true, features = [
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
 rayon = "1"
+# Heap per-thread tanpa lock global: 12 lane raster × ratusan alloc/frame di
+# heap Windows default saling antre (366ms/miss vs 4ms single-thread).
+mimalloc = "0.1"
 
 [features]
 default = []

@@ -274,6 +274,25 @@ pub fn render<'a>(
     // berantai (yang membuat bayangan menumpuk → awan gelap). Merge dari
     // layer bawah ke atas, SourceGraphic paling atas.
     let words_svg = layout::dedupe_text_attrs(&words_svg);
+
+    // Region filter selimut bleed blur saja (3σ + dy): region % besar
+    // (400%/600%) membuat box blur 5-pass menghitung 3-4× area perlu dan
+    // mendominasi waktu raster CPU (~433ms -> ~56ms per frame @1080p).
+    // Tiga layer soft identik (dy/σ sama) ditumpuk browser = alpha
+    // 1-(1-A)³ — diekspresikan eksak via feFuncA table 17 titik (Δα ≤ 2/255),
+    // satu blur σ besar diganti tiga.
+    let bleed = 3.0 * soft_std + soft_dy + 8.0;
+    let n_lines = lines.len().max(1) as f32;
+    let ink_w = lines
+        .iter()
+        .map(|&(s, e)| widths[s..e].iter().map(|w| w + 2.0 * margin).sum::<f32>())
+        .fold(1.0f32, f32::max)
+        + stroke_px;
+    let ink_h = (n_lines - 1.0) * line_h + ascent + descent + stroke_px;
+    let fx = format!("{:.1}%", -bleed / ink_w * 100.0);
+    let fw = format!("{:.1}%", (ink_w + 2.0 * bleed) / ink_w * 100.0);
+    let fy = format!("{:.1}%", -bleed / ink_h * 100.0);
+    let fh = format!("{:.1}%", (ink_h + 2.0 * bleed) / ink_h * 100.0);
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -282,7 +301,7 @@ pub fn render<'a>(
             height={video_h}
         >
             <defs>
-                <filter id="cleo-shadow" x="-150%" y="-250%" width="400%" height="600%">
+                <filter id="cleo-shadow" x={fx} y={fy} width={fw} height={fh}>
                     <feOffset in="SourceAlpha" dx={0.0} dy={0.0} result="t-o"/>
                     <feGaussianBlur in="t-o" stdDeviation={tight_std} result="t-b"/>
                     <feFlood flood-color={SHADOW_COLOR} flood-opacity={1.0} result="t-f"/>
@@ -291,18 +310,11 @@ pub fn render<'a>(
                     <feGaussianBlur in="l1-o" stdDeviation={soft_std} result="l1-b"/>
                     <feFlood flood-color={SHADOW_COLOR} flood-opacity={1.0} result="l1-f"/>
                     <feComposite in="l1-f" in2="l1-b" operator="in" result="l1"/>
-                    <feOffset in="SourceAlpha" dx={0.0} dy={soft_dy} result="l2-o"/>
-                    <feGaussianBlur in="l2-o" stdDeviation={soft_std} result="l2-b"/>
-                    <feFlood flood-color={SHADOW_COLOR} flood-opacity={1.0} result="l2-f"/>
-                    <feComposite in="l2-f" in2="l2-b" operator="in" result="l2"/>
-                    <feOffset in="SourceAlpha" dx={0.0} dy={soft_dy} result="l3-o"/>
-                    <feGaussianBlur in="l3-o" stdDeviation={soft_std} result="l3-b"/>
-                    <feFlood flood-color={SHADOW_COLOR} flood-opacity={1.0} result="l3-f"/>
-                    <feComposite in="l3-f" in2="l3-b" operator="in" result="l3"/>
+                    <feComponentTransfer in="l1" result="l123">
+                        <feFuncA type="table" tableValues="0 0.176 0.3301 0.4636 0.5781 0.675 0.7559 0.822 0.875 0.9163 0.9473 0.9695 0.9844 0.9934 0.998 0.9998 1"/>
+                    </feComponentTransfer>
                     <feMerge>
-                        <feMergeNode in="l3"/>
-                        <feMergeNode in="l2"/>
-                        <feMergeNode in="l1"/>
+                        <feMergeNode in="l123"/>
                         <feMergeNode in="t"/>
                         <feMergeNode in="SourceGraphic"/>
                     </feMerge>

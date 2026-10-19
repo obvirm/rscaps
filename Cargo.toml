@@ -8,5 +8,8 @@ edition = "2024"
 license = "MIT"
 
 [profile.release]
-opt-level = "s"
+# "3" bukan "s": loop raster per-piksel (svgr/tiny-skia/usvgr, burn-in)
+# melambat ~20-50x dengan opt-level "s" (cold render cleo 150ms -> ~4ms).
+# lto "thin" (bukan "true"): lto penuh memicu rustc ICE di crate exr.
+opt-level = 3
 lto = "thin"

@@ -61,6 +61,13 @@ PATH default** — semua perintah cargo yang menyentuh fframes (dev/release, che
 test) HARUS prepend PATH itu dulu. Kalau lihat `E0463` untuk `fframes_media_dir_macro`:
 bukan bug kode, PATH ffmpeg belum masuk.
 
+**GOTCHA WAJIB (PROFILE):** `[profile.release]` workspace WAJIB `opt-level = 3`
+(JANGAN `"s"`) + `lto = "thin"` (lto penuh = rustc ICE `STATUS_STACK_BUFFER_OVERRUN`
+di crate `exr`). opt-level `"s"` memperlambat loop raster per-piksel svgr/tiny-skia
+~3-4× (cold render cleo 124ms → 150-450ms) dan dulu membuat SEMUA varian CLI + WASM
+lambat. `svgr-wasm` adalah workspace member — `[profile]` di Cargo.toml-nya DIABAIKAN
+cargo; profil root yang berlaku.
+
 ## CLI native (`rscaps-cli`)
 
 - `render --engine fframes` = **pipeline fframes penuh** (raster + encode + audio mux); `--engine cpu|skia` = jalur overlay lama (svgr raster → PNG pipe → ffmpeg overlay). `frames --engine fframes` tak didukung (error ramah).
@@ -79,5 +86,7 @@ bukan bug kode, PATH ffmpeg belum masuk.
 - Selene template: pernah text hilang — akar utama (FIXED): family "Montserrat" tak resolve di fontdb karena fontsource membawa nama internal "Montserrat Thin" — kini semua emit `font-family` lewat `stack::svg_font_family()` (font-stack: nama browser + alternat name-table), menyelesaikan juga mira/rhea/kai/lyra/pastor/luna. Sisa risiko: `filter="url(#selene-word)"` per-`<text>` — kalau selene kosong, investigasi terpisah.
 - Template yang emit `font-family` ke SVG WAJIB lewat `stack::svg_font_family()` (lihat stack.rs) — jangan tempel nama keluarga mentah, atau rasterizer non-browser bisa kehilangan teks.
 - Glif non-latin TIDAK dimiliki font template: ukur via `stack::fallback_char_advance` (CJK/kana/hangul 1em, Thai/Lao dasar 0.62em + gabung 0, lain 0.5em — perkiraan font sistem; tscaps mengukur via DOM). Jangan kembali ke 0 (tumpang tindih) atau `utf16*0.5` blanket (CJK melebar setengah).
+- **Raster CPU per-frame (usvgr)**: SVG cold (konten beda tiap frame) dengan filter blur = jalur mahal — box blur 5-pass + salinan backbuf per layer; region filter % besar (400%/600%) melipatgandakan areanya (dulu ~450-636ms/frame @1080p wasm, 124-150ms native opt-3). FIX di emit cleo: region selimut bleed saja (3σ+dy, % adaptif dari ink-bbox) + 3 layer soft identik didedupe via `feFuncA type="table"` 17 titik (eksak 1-(1-A)³, Δα≤2/255, nonzero piksel identik) → ~16ms native. **JANGAN kembalikan region % besar atau layer blur duplikat** — sama sekali tak terlihat matanya, tetapi memakan waktu raster 8×. Band crop `compute_caption_band` margin 128px ≥ bleed 105px ✓.
+- **Diagnostik raster** (env-gated): `RSCAPS_DEBUG_TIMING` (frames cmd: render vs encode PNG), `RSCAPS_DEBUG_SLOW=<us>` (log render > ambang + fase parse/alloc/render/copy di profil slice), counter HITS/MISSES/PHASE_* di `render.rs`. Env opsional: `RSCAPS_SLICES` (default 3), `RSCAPS_FFMPEG_THREADS` (default apa adanya ffmpeg). Allocator global CLI = **mimalloc** (heap lock Windows menghambat lane paralel).
 - Masih gap vs tscaps: timeline, transcript tingkat kata/scene, sheets multi-track, element inspector, export WebCodecs belum diuji end-to-end setelah fix dimensi. (Sudah beres: gallery template live-preview, undo/redo + restore template defaults.)
 - **Web export (2026-10, commit `5d6f566`)**: pipeline = decode → `createImageBitmap` → transfer ke 6 worker (`burnWorker.ts`: readback pixel + burn WASM + bungkus `VideoFrame` transferable) → `VideoSampleSource` (tanpa canvas encode; mp4/avc pakai `prefer-hardware`). 4-menit 1080p30 ≈ 61-68s (baseline 140.6s), CPU avg ~89% peak 100%. **Dua jebakan regresi caption — JANGAN DIPERBAIKI ULANG:** (1) `prepare(fps)` **mereset dokumen bridge** — `setDocumentJson` wajib dijalankan SETELAH `add_video_source_placeholder` + `prepare`, kalau sebelumnya `render_frame` mengembalikan grup `<g></g>` kosong (tak ada teks); (2) split base/blend (`renderFrameSvgLayers`) harus **mempertahankan struktur grup** (font attrs/rise/clip defs) di kedua layer — menyalin node `<text>` saja ke svg baru membuat usvgr kehilangan `font-family`/`font-size` → blend raster 0 glyph (luna: semua kata difference, base kosong = normal, blend yang membawa teks). Download Chrome headless tak reliable untuk blob 288MB — harness menyimpan blob via stream chunk (`__saveChunk` di `bench_web_4min.mjs`).
