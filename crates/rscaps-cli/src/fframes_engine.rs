@@ -29,8 +29,9 @@ use crate::render::{probe_video, tool_bin};
 /// Ukuran potongan (chunk): hanya chunk ini yang di-pre-decode ke RAM.
 /// Video lebih panjang dirender per potongan (fframes `frame_range`) lalu
 /// digabung dengan ffmpeg concat — jadi tak ada cap total. Override lewat env
-/// `RSCAPS_FFRAMES_CHUNK` (untuk uji).
-const CHUNK_FRAMES: usize = 600;
+/// `RSCAPS_FFRAMES_CHUNK` (untuk uji). 300 bukan 600: pipelining decode
+/// menahan 2 potongan di RAM (2 × 300 × 8.3MB ≈ 5GB).
+const CHUNK_FRAMES: usize = 300;
 
 fn chunk_frames() -> usize {
     std::env::var("RSCAPS_FFRAMES_CHUNK")
@@ -112,13 +113,17 @@ fn decode_frames_once(
     let mut stdout = child.stdout.take().context("ffmpeg stdout")?;
     let mut stderr = child.stderr.take().context("ffmpeg stderr")?;
     let mut frames = Vec::new();
-    let mut buf = vec![0u8; frame_bytes];
     let mut idx = 0usize;
 
     loop {
+        // Baca langsung ke buffer milik frame (satu salinan). JANGAN pakai
+        // `PreloadedImageData::new`: ia mem-blend per-piksel via f32 skalar
+        // (~11ms/frame @1080p) — no-op murni untuk frame video h264 yang
+        // selalu opaque (α=255 dari konversi yuv420 → rgba).
+        let mut data = vec![0u8; frame_bytes];
         let mut read_total = 0usize;
         while read_total < frame_bytes {
-            match stdout.read(&mut buf[read_total..]) {
+            match stdout.read(&mut data[read_total..]) {
                 Ok(0) => break,
                 Ok(n) => read_total += n,
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -128,8 +133,13 @@ fn decode_frames_once(
         if read_total < frame_bytes {
             break;
         }
-        let id = format!("frame_{idx}");
-        frames.push(Arc::new(PreloadedImageData::new(id, width, height, &buf)));
+        debug_assert!(data.chunks_exact(4).all(|p| p[3] == 255), "frame tak opaque");
+        frames.push(Arc::new(PreloadedImageData {
+            id: format!("frame_{idx}"),
+            data: std::borrow::Cow::Owned(data),
+            width,
+            height,
+        }));
         idx += 1;
     }
 
@@ -505,33 +515,60 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     }
 
     // Video panjang → potongan ≤ `chunk` frame, digabung dengan ffmpeg concat.
-    // Hanya potongan aktif yang ada di RAM, jadi tak ada cap total.
-    eprintln!("[fframes] video {duration_frames} frame > {chunk} → render per potongan");
+    // Hanya 2 potongan aktif di RAM (yang dirender + yang di-decode) — decode
+    // potongan berikutnya berjalan di thread lain SELAGI potongan aktif
+    // dirender, jadi decoder tak masuk critical path.
+    eprintln!("[fframes] video {duration_frames} frame > {chunk} → render per potongan (pipelined)");
     let mut segments: Vec<PathBuf> = Vec::new();
-    let mut start = 0usize;
+    type Frames = Vec<std::sync::Arc<PreloadedImageData>>;
+    let spawn_decode = |s: usize, c: usize| {
+        let ffmpeg = ffmpeg.clone();
+        let video = opts.video.to_path_buf();
+        let hwaccel = opts.hwaccel.map(str::to_string);
+        let start_sec = s as f64 / target_fps as f64;
+        std::thread::spawn(move || {
+            decode_frames_rgba(
+                &ffmpeg,
+                &video,
+                probe.width,
+                probe.height,
+                target_fps,
+                hwaccel.as_deref(),
+                start_sec,
+                c,
+            )
+        })
+    };
+    let mut next_start = 0usize;
     let mut seg_idx = 0usize;
-    while start < duration_frames {
-        let end = (start + chunk).min(duration_frames);
-        let count = end - start;
-        let start_sec = start as f64 / target_fps as f64;
-        eprintln!("[fframes] potongan {seg_idx}: frame {start}..{end} ({count})");
-
-        let frames = decode_frames_rgba(
-            &ffmpeg,
-            opts.video,
-            probe.width,
-            probe.height,
-            target_fps,
-            opts.hwaccel,
-            start_sec,
-            count,
-        )?;
+    let mut pending: Option<(usize, usize, usize, std::thread::JoinHandle<anyhow::Result<Frames>>)> = None;
+    if next_start < duration_frames {
+        let end = (next_start + chunk).min(duration_frames);
+        let count = end - next_start;
+        pending = Some((next_start, end, count, spawn_decode(next_start, count)));
+        next_start = end;
+        seg_idx += 1;
+    }
+    while let Some((start, end, count, join)) = pending.take() {
+        eprintln!("[fframes] potongan {}: frame {start}..{end} ({count})", seg_idx);
+        let frames = match join.join() {
+            Ok(r) => r?,
+            Err(_) => anyhow::bail!("thread decode panic"),
+        };
+        // Spawn decode potongan berikutnya SEBELUM render (overlap).
+        if next_start < duration_frames {
+            let end2 = (next_start + chunk).min(duration_frames);
+            let count2 = end2 - next_start;
+            pending = Some((next_start, end2, count2, spawn_decode(next_start, count2)));
+            next_start = end2;
+            seg_idx += 1;
+        }
         let media = FframesMedia {
             images: images_of(&frames),
             fonts: fonts.clone(),
             audio: audio_map.clone(),
         };
-        let seg_path = tmp_dir.join(format!("seg_{seg_idx}.mp4"));
+        let seg_path = tmp_dir.join(format!("seg_{start}.mp4"));
         let render_opts = RenderOptions {
             media: Some(&media),
             video_encoder_options: video_encoder.clone(),
@@ -542,6 +579,7 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             frame_range: Some(start..end),
             ..Default::default()
         };
+        let t_render = std::time::Instant::now();
         dispatch_render(
             src_w,
             src_h,
@@ -552,9 +590,11 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             &render_opts,
             &seg_path,
         )?;
+        eprintln!(
+            "[fframes] profil potongan: render={render_ms}ms ({count} frame)",
+            render_ms = t_render.elapsed().as_millis(),
+        );
         segments.push(seg_path);
-        start = end;
-        seg_idx += 1;
     }
 
     concat_segments(&ffmpeg, &segments, opts.out)?;
