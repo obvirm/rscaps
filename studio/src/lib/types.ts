@@ -202,11 +202,15 @@ export type WhisperBackend = "cpu" | "webgpu";
 export type WhisperModel = "tiny" | "base" | "small" | "medium" | "large";
 
 export const WHISPER_MODELS: { id: WhisperModel; label: string }[] = [
-  { id: "tiny", label: "Tiny — ~39 MB" },
+  { id: "tiny", label: "Tiny — ~152 MB" },
   { id: "base", label: "Base — ~75 MB" },
-  { id: "small", label: "Small — ~244 MB" },
-  { id: "medium", label: "Medium — ~769 MB" },
-  { id: "large", label: "Large — ~1.5 GB" },
+  { id: "small", label: "Small — ~923 MB" },
+  // Disabled: fp32 decoder+encoder 2.9 GB blows the wasm32 4 GB linear-memory
+  // ceiling once sessions + KV caches are resident (ort-web loads from memory).
+  { id: "medium", label: "Medium — ~2.9 GB" },
+  // Disabled: Xenova ships large-v3 as external-data onnx (+5.9 GB) which
+  // commit_from_memory cannot resolve, beyond the same wasm32 ceiling.
+  { id: "large", label: "Large — ~5.9 GB" },
 ];
 
 // Whisper language token ids run in a fixed alphabetical order starting at

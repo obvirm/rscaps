@@ -16,13 +16,44 @@ pub mod wasm {
     use crate::mel;
     use crate::tokenizer::{self, WhisperTokenizer};
 
-    // whisper-base architecture constants (see Xenova/whisper-base config.json).
-    const NUM_LAYERS: usize = 6;
-    const NUM_HEADS: usize = 8;
-    const HEAD_DIM: usize = 64;
-    const D_MODEL: usize = 512;
+    // Architecture constants (see each Xenova/whisper-* config.json). Defaults
+    // are whisper-base; JS calls set_arch() before load_encoder to select the
+    // model architecture (tiny/base/small/medium/large-v3 all share encoder
+    // len 1500, head_dim 64 and the token-id layout).
     const ENC_LEN: usize = 1500;
-    const VOCAB: usize = 51865;
+    const HEAD_DIM_DEFAULT: usize = 64;
+
+    /// One whisper model architecture. All fields are read per call so a
+    /// single wasm build can serve every model size.
+    #[derive(Clone, Copy)]
+    struct Arch {
+        layers: usize,
+        heads: usize,
+        head_dim: usize,
+        d_model: usize,
+        vocab: usize,
+        n_mels: usize,
+    }
+
+    impl Arch {
+        const BASE: Arch = Arch {
+            layers: 6,
+            heads: 8,
+            head_dim: HEAD_DIM_DEFAULT,
+            d_model: 512,
+            vocab: 51865,
+            n_mels: 80,
+        };
+    }
+
+    static ARCH: Mutex<Arch> = Mutex::new(Arch::BASE);
+
+    fn arch() -> Arch {
+        // A poisoned lock only means a previous call panicked mid-run; the
+        // stored config itself is still valid, so keep serving it.
+        *ARCH.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     const NOTIMESTAMPS: i64 = 50363;
     const TIMESTAMP_BEGIN: i64 = 50364;
     /// `<|nospeech|>` == `<|30.00|>`: the terminal timestamp Whisper emits when
@@ -206,6 +237,21 @@ pub mod wasm {
         Ok(())
     }
 
+    /// Select the model architecture BEFORE load_encoder/load_decoder (the
+    /// decoder graph shape and mel size depend on it). Defaults to whisper-base.
+    #[wasm_bindgen]
+    pub fn set_arch(layers: u32, heads: u32, head_dim: u32, d_model: u32, vocab: u32, n_mels: u32) {
+        let a = Arch {
+            layers: layers.max(1) as usize,
+            heads: heads.max(1) as usize,
+            head_dim: head_dim.max(1) as usize,
+            d_model: d_model.max(1) as usize,
+            vocab: vocab.max(1) as usize,
+            n_mels: n_mels.max(1) as usize,
+        };
+        *ARCH.lock().unwrap_or_else(|p| p.into_inner()) = a;
+    }
+
     /// Load the whisper encoder ONNX model into memory.
     #[wasm_bindgen]
     pub async fn load_encoder(bytes: &[u8]) -> Result<(), JsValue> {
@@ -236,11 +282,11 @@ pub mod wasm {
         load_encoder(bytes).await
     }
 
-    /// Compute the whisper log-mel (80 × 3000, mel-major) for a mono 16 kHz
+    /// Compute the whisper log-mel (n_mels × 3000, mel-major) for a mono 16 kHz
     /// signal. Exposed so the feature extractor can be verified in isolation.
     #[wasm_bindgen]
     pub fn mel_from_audio(samples: &[f32]) -> Vec<f32> {
-        mel::log_mel(samples)
+        mel::log_mel(samples, arch().n_mels)
     }
 
     /// Take an f32 tensor output by name, sync it to Rust memory, and return
@@ -259,14 +305,16 @@ pub mod wasm {
         Ok((dims, data.to_vec()))
     }
 
-    /// Run the whisper encoder directly on log-mel features shaped (1, 80, 3000),
-    /// flattened row-major. Returns the (1, 1500, 512) hidden states flattened.
+    /// Run the whisper encoder directly on log-mel features shaped (1, n_mels, 3000),
+    /// flattened row-major. Returns the (1, 1500, d_model) hidden states flattened.
     #[wasm_bindgen]
     pub async fn encode(features: &[f32]) -> Result<Vec<f32>, JsValue> {
-        if features.len() != mel::N_MELS * mel::N_FRAMES {
+        let a = arch();
+        let expected = a.n_mels * mel::N_FRAMES;
+        if features.len() != expected {
             return Err(JsValue::from_str(&format!(
                 "expected {} floats, got {}",
-                mel::N_MELS * mel::N_FRAMES,
+                expected,
                 features.len()
             )));
         }
@@ -276,7 +324,7 @@ pub mod wasm {
         let input_name = session.inputs()[0].name().to_string();
 
         let mel_arr =
-            Array3::from_shape_vec((1, mel::N_MELS, mel::N_FRAMES), features.to_vec()).map_err(js)?;
+            Array3::from_shape_vec((1, a.n_mels, mel::N_FRAMES), features.to_vec()).map_err(js)?;
         let value = Value::from_array(mel_arr).map_err(js)?;
         let run_opts = RunOptions::new().map_err(js)?;
 
@@ -294,10 +342,10 @@ pub mod wasm {
     }
 
     /// End-to-end audio → encoder: compute log-mel from a mono 16 kHz signal
-    /// and run the encoder. Returns (1, 1500, 512) hidden states flattened.
+    /// and run the encoder. Returns (1, 1500, d_model) hidden states flattened.
     #[wasm_bindgen]
     pub async fn encode_audio(samples: &[f32]) -> Result<Vec<f32>, JsValue> {
-        let features = mel::log_mel(samples);
+        let features = mel::log_mel(samples, arch().n_mels);
         encode(&features).await
     }
 
@@ -305,15 +353,16 @@ pub mod wasm {
     /// output as JSON. Used to diagnose the present-encoder-KV shape issue.
     #[wasm_bindgen]
     pub async fn debug_prefill(hidden: &[f32]) -> Result<String, JsValue> {
+        let a = arch();
         drop(vec![0u8; 64 * 1024 * 1024]);
         let mut dec_guard = DECODER.lock().map_err(js)?;
         let session = dec_guard.as_mut().ok_or_else(|| JsValue::from_str("load_decoder not called"))?;
 
-        let enc = Array3::from_shape_vec((1, ENC_LEN, D_MODEL), hidden.to_vec()).map_err(js)?;
+        let enc = Array3::from_shape_vec((1, ENC_LEN, a.d_model), hidden.to_vec()).map_err(js)?;
         let enc_value = Value::from_array(enc).map_err(js)?;
-        let empty = || Array4::zeros((1, NUM_HEADS, 0, HEAD_DIM));
-        let past_dec: Vec<(Array4<f32>, Array4<f32>)> = (0..NUM_LAYERS).map(|_| (empty(), empty())).collect();
-        let past_enc: Vec<(Array4<f32>, Array4<f32>)> = (0..NUM_LAYERS).map(|_| (empty(), empty())).collect();
+        let empty = || Array4::zeros((1, a.heads, 0, a.head_dim));
+        let past_dec: Vec<(Array4<f32>, Array4<f32>)> = (0..a.layers).map(|_| (empty(), empty())).collect();
+        let past_enc: Vec<(Array4<f32>, Array4<f32>)> = (0..a.layers).map(|_| (empty(), empty())).collect();
 
         let prompt: Vec<i64> = vec![tokenizer::SOT, 50259, 50359, NOTIMESTAMPS];
         let ids_arr = Array2::from_shape_vec((1, prompt.len()), prompt).map_err(js)?;
@@ -325,7 +374,7 @@ pub mod wasm {
             "use_cache_branch".to_string(),
             Value::from_array(Array1::from_vec(vec![false])).map_err(js)?.into(),
         ));
-        for i in 0..NUM_LAYERS {
+        for i in 0..a.layers {
             inputs.push((format!("past_key_values.{i}.decoder.key"), Value::from_array(past_dec[i].0.clone()).map_err(js)?.into()));
             inputs.push((format!("past_key_values.{i}.decoder.value"), Value::from_array(past_dec[i].1.clone()).map_err(js)?.into()));
             inputs.push((format!("past_key_values.{i}.encoder.key"), Value::from_array(past_enc[i].0.clone()).map_err(js)?.into()));
@@ -375,10 +424,11 @@ pub mod wasm {
         max_tokens: usize,
         audio_duration: f32,
     ) -> Result<String, JsValue> {
-        if hidden.len() != ENC_LEN * D_MODEL {
+        let a = arch();
+        if hidden.len() != ENC_LEN * a.d_model {
             return Err(JsValue::from_str(&format!(
                 "hidden expects {} floats, got {}",
-                ENC_LEN * D_MODEL,
+                ENC_LEN * a.d_model,
                 hidden.len()
             )));
         }
@@ -400,7 +450,7 @@ pub mod wasm {
         // reuse — keeping every view valid for the whole decode loop.
         drop(vec![0u8; 64 * 1024 * 1024]);
 
-        let enc = Array3::from_shape_vec((1, ENC_LEN, D_MODEL), hidden.to_vec()).map_err(js)?;
+        let enc = Array3::from_shape_vec((1, ENC_LEN, a.d_model), hidden.to_vec()).map_err(js)?;
         // Create the encoder-hidden tensor ONCE and reuse it via a borrowed View
         // each step. Cloning the 3 MB array every iteration grew the wasm heap,
         // detaching buffer views the ORT runtime held mid-run ("detached
@@ -423,11 +473,11 @@ pub mod wasm {
         // made the model treat the cache as already populated and it returned
         // present.* at the wrong length. The wasm-heap detach that zero-length
         // tensors can trigger is prevented by the 64 MB pre-grow above.
-        let empty = || Array4::zeros((1, NUM_HEADS, 0, HEAD_DIM));
+        let empty = || Array4::zeros((1, a.heads, 0, a.head_dim));
         let mut past_dec: Vec<(Array4<f32>, Array4<f32>)> =
-            (0..NUM_LAYERS).map(|_| (empty(), empty())).collect();
+            (0..a.layers).map(|_| (empty(), empty())).collect();
         let mut past_enc: Vec<(Array4<f32>, Array4<f32>)> =
-            (0..NUM_LAYERS).map(|_| (empty(), empty())).collect();
+            (0..a.layers).map(|_| (empty(), empty())).collect();
 
         let mut input_ids: Vec<i64> = prompt.clone();
         let mut generated: Vec<i64> = Vec::new();
@@ -444,7 +494,7 @@ pub mod wasm {
         loop {
             iter += 1;
             let ids_arr = Array2::from_shape_vec((1, input_ids.len()), input_ids.clone()).map_err(js)?;
-            let mut inputs: Vec<(String, SessionInputValue)> = Vec::with_capacity(3 + NUM_LAYERS * 4);
+            let mut inputs: Vec<(String, SessionInputValue)> = Vec::with_capacity(3 + a.layers * 4);
             inputs.push((
                 "input_ids".to_string(),
                 Value::from_array(ids_arr).map_err(js)?.into(),
@@ -457,7 +507,7 @@ pub mod wasm {
                 "use_cache_branch".to_string(),
                 Value::from_array(Array1::from_vec(vec![use_cache])).map_err(js)?.into(),
             ));
-            for i in 0..NUM_LAYERS {
+            for i in 0..a.layers {
                 inputs.push((
                     format!("past_key_values.{i}.decoder.key"),
                     Value::from_array(past_dec[i].0.clone()).map_err(js)?.into(),
@@ -483,25 +533,25 @@ pub mod wasm {
                 .await
                 .map_err(|e| JsValue::from_str(&format!("take logits: {:?}", e)))?;
             let seq_len = *logits_dims.get(1).unwrap_or(&1);
-            let base = seq_len.saturating_sub(1) * VOCAB;
-            if base + VOCAB > logits.len() {
+            let base = seq_len.saturating_sub(1) * a.vocab;
+            if base + a.vocab > logits.len() {
                 return Err(JsValue::from_str(&format!(
                     "logits bounds: dims={:?} len={} base={} vocab={}",
                     logits_dims,
                     logits.len(),
                     base,
-                    VOCAB
+                    a.vocab
                 )));
             }
             apply_logits_processors(
-                &mut logits[base..base + VOCAB],
+                &mut logits[base..base + a.vocab],
                 &generated,
                 return_timestamps,
                 audio_duration,
             );
             let mut best_id = 0i64;
             let mut best_score = f32::NEG_INFINITY;
-            for (k, &logit) in logits[base..base + VOCAB].iter().enumerate() {
+            for (k, &logit) in logits[base..base + a.vocab].iter().enumerate() {
                 if logit > best_score {
                     best_score = logit;
                     best_id = k as i64;
@@ -509,7 +559,7 @@ pub mod wasm {
             }
 
             // Advance KV cache from present.* outputs.
-            for i in 0..NUM_LAYERS {
+            for i in 0..a.layers {
                 let (dkd, k) = take_f32(&mut outputs, &format!("present.{i}.decoder.key"))
                     .await
                     .map_err(|e| JsValue::from_str(&format!("take present.{}.decoder.key: {:?}", i, e)))?;
@@ -517,7 +567,7 @@ pub mod wasm {
                     .await
                     .map_err(|e| JsValue::from_str(&format!("take present.{}.decoder.value: {:?}", i, e)))?;
                 let ds = *dkd.get(2).unwrap_or(&1);
-                let expected = NUM_HEADS * ds * HEAD_DIM;
+                let expected = a.heads * ds * a.head_dim;
                 if k.len() != expected || v.len() != expected {
                     return Err(JsValue::from_str(&format!(
                         "present.{i}.decoder shape: dk={:?} k_len={} v_len={} expected={}",
@@ -527,8 +577,8 @@ pub mod wasm {
                         expected
                     )));
                 }
-                past_dec[i].0 = Array4::from_shape_vec((1, NUM_HEADS, ds, HEAD_DIM), k).map_err(js)?;
-                past_dec[i].1 = Array4::from_shape_vec((1, NUM_HEADS, ds, HEAD_DIM), v).map_err(js)?;
+                past_dec[i].0 = Array4::from_shape_vec((1, a.heads, ds, a.head_dim), k).map_err(js)?;
+                past_dec[i].1 = Array4::from_shape_vec((1, a.heads, ds, a.head_dim), v).map_err(js)?;
 
                 let es = if use_cache {
                     // Encoder KV is constant across decode steps. When
@@ -547,7 +597,7 @@ pub mod wasm {
                         .await
                         .map_err(|e| JsValue::from_str(&format!("take present.{}.encoder.value: {:?}", i, e)))?;
                     let es = *ekd.get(2).unwrap_or(&1);
-                    let expected_e = NUM_HEADS * es * HEAD_DIM;
+                    let expected_e = a.heads * es * a.head_dim;
                     if ek.len() != expected_e || ev.len() != expected_e {
                         return Err(JsValue::from_str(&format!(
                             "iter={} use_cache={} ids_len={} present.{i}.encoder shape: ek={:?} k_len={} v_len={} expected={} (present.{i}.decoder dk={:?})",
@@ -561,8 +611,8 @@ pub mod wasm {
                             dkd
                         )));
                     }
-                    past_enc[i].0 = Array4::from_shape_vec((1, NUM_HEADS, es, HEAD_DIM), ek).map_err(js)?;
-                    past_enc[i].1 = Array4::from_shape_vec((1, NUM_HEADS, es, HEAD_DIM), ev).map_err(js)?;
+                    past_enc[i].0 = Array4::from_shape_vec((1, a.heads, es, a.head_dim), ek).map_err(js)?;
+                    past_enc[i].1 = Array4::from_shape_vec((1, a.heads, es, a.head_dim), ev).map_err(js)?;
                     es
                 };
                 let _ = es;

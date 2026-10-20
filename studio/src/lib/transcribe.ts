@@ -19,11 +19,27 @@ export type ProgressFn = (fraction: number, stage: TranscribeStage) => void;
 // its title/subtext. `fraction` is the overall 0→1 progress across all phases.
 export type TranscribeStage = "engine" | "model" | "audio" | "transcribe" | "done";
 
-// The spike engine is compiled for the whisper-base architecture only (6 enc/dec
-// layers, d_model 512, 8 heads, vocab 51865). Other sizes need their own
-// constants baked into the wasm, so we refuse them loudly instead of producing
-// garbage.
-const SUPPORTED_MODELS: ReadonlySet<WhisperModel> = new Set(["base"]);
+// The spike engine serves every model size through a runtime arch config that
+// JS passes via set_arch() before the ONNX bytes are loaded (layers/heads/
+// d_model/n_mels differ per size; encoder len 1500, head_dim 64 and the token
+// layout are shared). Keep in sync with each Xenova/whisper-* config.json.
+const MODEL_ARCH: Partial<
+  Record<WhisperModel, { layers: number; heads: number; dModel: number; nMels: number }>
+> = {
+  // Xenova ONNX exports use a uniform head_dim of 64, so heads = d_model / 64
+  // (tiny's original config is 4 heads x 96, but the graph is 6 heads x 64).
+  tiny: { layers: 4, heads: 6, dModel: 384, nMels: 80 },
+  base: { layers: 6, heads: 8, dModel: 512, nMels: 80 },
+  small: { layers: 12, heads: 12, dModel: 768, nMels: 80 },
+  // medium (2.9 GB fp32) and large-v3 (5.9 GB external-data onnx) exceed the
+  // wasm32 4 GB linear-memory ceiling with sessions + KV caches resident, and
+  // external-data weights cannot be fed through commit_from_memory — both stay
+  // unsupported and show as disabled options in the model picker.
+};
+
+const SUPPORTED_MODELS: ReadonlySet<WhisperModel> = new Set(
+  Object.keys(MODEL_ARCH) as WhisperModel[],
+);
 
 export function isModelSupported(model: WhisperModel): boolean {
   return SUPPORTED_MODELS.has(model);
@@ -36,6 +52,14 @@ const CHUNK_SAMPLES = 30 * SAMPLE_RATE;
 interface WhisperModule {
   default: (wasmUrl?: string) => Promise<unknown>;
   init: () => Promise<void>;
+  set_arch: (
+    layers: number,
+    heads: number,
+    headDim: number,
+    dModel: number,
+    vocab: number,
+    nMels: number,
+  ) => void;
   load_encoder: (bytes: Uint8Array) => Promise<void>;
   load_decoder: (bytes: Uint8Array) => Promise<void>;
   load_tokenizer: (json: string) => void;
@@ -53,8 +77,11 @@ interface WhisperModule {
 const TRANSCRIBE_TASK = 50359n; // <|transcribe|>
 const MAX_TOKENS = 448;
 
-let cached: WhisperModule | null = null;
-let loading: Promise<WhisperModule> | null = null;
+// One module instance per model: the wasm holds that model's encoder/decoder
+// sessions and arch, so switching size in the UI must reload (set_arch +
+// re-fetch the ONNX files for the new size).
+const cached = new Map<WhisperModel, WhisperModule>();
+const loading = new Map<WhisperModel, Promise<WhisperModule>>();
 
 function ensureOk(res: Response, url: string): Response {
   if (!res.ok) throw new Error(`fetch failed ${res.status}: ${url}`);
@@ -90,9 +117,11 @@ async function fetchBytes(
 }
 
 async function loadWhisper(model: WhisperModel, onProgress: ProgressFn): Promise<WhisperModule> {
-  if (cached) return cached;
-  if (loading) return loading;
-  loading = (async () => {
+  const hit = cached.get(model);
+  if (hit) return hit;
+  const inflight = loading.get(model);
+  if (inflight) return inflight;
+  const task = (async () => {
     onProgress(0.02, "engine");
     const pkgUrl = "/wpkg/whisper_spike.js";
     const mod = (await import(/* @vite-ignore */ pkgUrl)) as WhisperModule;
@@ -102,10 +131,17 @@ async function loadWhisper(model: WhisperModel, onProgress: ProgressFn): Promise
     const g = globalThis as { ort?: { env?: { wasm?: { numThreads?: number } } } };
     if (g.ort?.env?.wasm) g.ort.env.wasm.numThreads = 1;
 
+    // Arch BEFORE the ONNX bytes: the decoder graph shape and mel size depend
+    // on it. head_dim is 64 and logits vocab 51865 across every size (large-v3
+    // carries a 51866th tokenizer entry but its logits stay 51865).
+    const a = MODEL_ARCH[model];
+    if (!a) throw new Error(`model "${model}" has no arch config`);
+    mod.set_arch(a.layers, a.heads, 64, a.dModel, 51865, a.nMels);
+
     onProgress(0.05, "model");
     const base = `/models/whisper-${model}/`;
     // Fetch sequentially with byte progress so the bar moves smoothly during a
-    // first-run download (encoder ~23 MB, decoder ~54 MB).
+    // first-run download (base encoder ~23 MB, decoder ~54 MB).
     const enc = await fetchBytes(base + "encoder_model.onnx", (f) =>
       onProgress(0.05 + f * 0.13, "model"),
     );
@@ -118,14 +154,14 @@ async function loadWhisper(model: WhisperModel, onProgress: ProgressFn): Promise
     await mod.load_encoder(enc);
     await mod.load_decoder(dec);
     mod.load_tokenizer(tok);
-    cached = mod;
+    cached.set(model, mod);
     return mod;
   })();
+  loading.set(model, task);
   try {
-    return await loading;
-  } catch (err) {
-    loading = null;
-    throw err;
+    return await task;
+  } finally {
+    loading.delete(model);
   }
 }
 
@@ -142,7 +178,7 @@ export async function transcribeBlob(
 ): Promise<TranscribeResult> {
   if (!isModelSupported(model)) {
     throw new Error(
-      `model "${model}" is not supported by this engine build yet (only: ${[...SUPPORTED_MODELS].join(", ")}). Pick Base in Advanced.`,
+      `model "${model}" is not supported by this engine build yet (supported: ${[...SUPPORTED_MODELS].join(", ")}).`,
     );
   }
   const mod = await loadWhisper(model, onProgress);

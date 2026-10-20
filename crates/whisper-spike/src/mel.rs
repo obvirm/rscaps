@@ -8,6 +8,8 @@ use rustfft::FftPlanner;
 pub const SAMPLE_RATE: usize = 16000;
 pub const N_FFT: usize = 400;
 pub const HOP_LENGTH: usize = 160;
+/// Default mel bins (whisper tiny..medium); large-v3 uses 128 (see set_arch).
+#[allow(dead_code)]
 pub const N_MELS: usize = 80;
 pub const N_FRAMES: usize = 3000;
 pub const N_SAMPLES: usize = 480000; // 30 s
@@ -40,21 +42,22 @@ fn mel_to_hz(mel: f64) -> f64 {
     }
 }
 
-/// Triangular Slaney-normalized mel filterbank, row-major (N_MELS × (N_FFT/2+1)).
-pub fn mel_filterbank() -> Vec<f32> {
+/// Triangular Slaney-normalized mel filterbank, row-major (n_mels × (N_FFT/2+1)).
+/// n_mels varies per model: 80 (tiny..medium), 128 (large-v3).
+pub fn mel_filterbank(n_mels: usize) -> Vec<f32> {
     let n_bins = N_FFT / 2 + 1; // 201
     let fft_freqs: Vec<f64> = (0..n_bins).map(|i| i as f64 * SAMPLE_RATE as f64 / N_FFT as f64).collect();
 
     let mel_min = hz_to_mel(FMIN);
     let mel_max = hz_to_mel(FMAX);
-    let n_pts = N_MELS + 2;
+    let n_pts = n_mels + 2;
     let mel_points: Vec<f64> = (0..n_pts)
         .map(|i| mel_min + (mel_max - mel_min) * i as f64 / (n_pts - 1) as f64)
         .map(mel_to_hz)
         .collect();
 
-    let mut filters = vec![0.0f32; N_MELS * n_bins];
-    for m in 0..N_MELS {
+    let mut filters = vec![0.0f32; n_mels * n_bins];
+    for m in 0..n_mels {
         let lower = mel_points[m];
         let center = mel_points[m + 1];
         let upper = mel_points[m + 2];
@@ -100,9 +103,9 @@ fn reflect_pad(x: &[f32], pad: usize) -> Vec<f32> {
 }
 
 /// Compute whisper log-mel for a mono 16 kHz signal. Returns a flat
-/// (N_MELS × N_FRAMES) = (80 × 3000) mel-major buffer. Audio is zero-padded
+/// (n_mels × N_FRAMES) mel-major buffer. Audio is zero-padded
 /// (or truncated) to exactly a 30 s window.
-pub fn log_mel(audio: &[f32]) -> Vec<f32> {
+pub fn log_mel(audio: &[f32], n_mels: usize) -> Vec<f32> {
     // Fixed 30 s window.
     let mut samples = vec![0.0f32; N_SAMPLES];
     let copy = audio.len().min(N_SAMPLES);
@@ -116,7 +119,7 @@ pub fn log_mel(audio: &[f32]) -> Vec<f32> {
     let fft = planner.plan_fft_forward(N_FFT);
 
     let n_bins = N_FFT / 2 + 1; // 201
-    let filters = mel_filterbank();
+    let filters = mel_filterbank(n_mels);
 
     // Magnitude-squared STFT: (N_FRAMES × n_bins).
     let mut mag2 = vec![0.0f32; N_FRAMES * n_bins];
@@ -135,12 +138,12 @@ pub fn log_mel(audio: &[f32]) -> Vec<f32> {
         }
     }
 
-    // mel_spec (N_FRAMES × N_MELS) then log-normalize, output (N_MELS × N_FRAMES).
-    let mut out = vec![0.0f32; N_MELS * N_FRAMES];
+    // mel_spec (N_FRAMES × n_mels) then log-normalize, output (n_mels × N_FRAMES).
+    let mut out = vec![0.0f32; n_mels * N_FRAMES];
     let mut logmax = f32::NEG_INFINITY;
     // First pass: log10(clamp(mel,1e-10)) into out (mel-major layout).
     for t in 0..N_FRAMES {
-        for m in 0..N_MELS {
+        for m in 0..n_mels {
             let mut acc = 0.0f32;
             let row = &filters[m * n_bins..(m + 1) * n_bins];
             let mrow = &mag2[t * n_bins..(t + 1) * n_bins];
