@@ -487,6 +487,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Well, my friends, today we gather.".into(),
+                sheet: None,
             }],
             ..Default::default()
         };
@@ -513,6 +514,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Hello there.".into(),
+                sheet: None,
             }],
             ..Default::default()
         };

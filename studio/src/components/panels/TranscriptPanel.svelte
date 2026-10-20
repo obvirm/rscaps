@@ -209,6 +209,20 @@
               onchange={(e) => onTimeChange(i, "end_ms", (e.currentTarget as HTMLInputElement).value)}
             />
             <span class="spacer"></span>
+            {#if store.sheets.length > 0}
+              <select
+                class="sheet-pick"
+                value={cue.sheet ?? ""}
+                onchange={(e) => store.assignCue(i, e.currentTarget.value)}
+                title="Sheet cue ini"
+                aria-label="Sheet cue {i + 1}"
+              >
+                <option value="">Default</option>
+                {#each store.sheets as s (s.id)}
+                  <option value={s.id}>{s.name}</option>
+                {/each}
+              </select>
+            {/if}
             <button class="del" onclick={() => store.removeCue(i)} title="Delete caption" aria-label="Delete caption {i + 1}">
               <Trash2 size={12} />
             </button>
@@ -408,6 +422,15 @@
   }
   .locate:hover {
     color: rgb(var(--accent));
+  }
+  .sheet-pick {
+    max-width: 84px;
+    background: rgb(var(--bg-2));
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--r-xs);
+    color: rgb(var(--fg-1));
+    font-size: 10px;
+    padding: 1px 3px;
   }
   .del:hover {
     color: rgb(var(--error));

@@ -333,6 +333,7 @@ mod tests {
                 end_ms: 3000,
                 text: "One very long sentence that definitely needs a second segment here."
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };

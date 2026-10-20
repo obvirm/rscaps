@@ -11,6 +11,7 @@
     WrapText,
     MousePointer2,
     Code2,
+    Layers,
   } from "@lucide/svelte";
   import { store } from "../lib/state.svelte";
   import TemplatesPanel from "./panels/TemplatesPanel.svelte";
@@ -23,6 +24,7 @@
   import MotionPanel from "./panels/MotionPanel.svelte";
   import EffectsPanel from "./panels/EffectsPanel.svelte";
   import LayoutPanel from "./panels/LayoutPanel.svelte";
+  import SheetsPanel from "./panels/SheetsPanel.svelte";
 
   let { active = $bindable("templates") }: { active?: string } = $props();
 
@@ -37,6 +39,7 @@
   const rail = [
     { id: "templates", label: "Templates", icon: LayoutTemplate },
     { id: "transcript", label: "Transcript", icon: Subtitles },
+    { id: "sheets", label: "Sheets", icon: Layers },
     { id: "typography", label: "Typography", icon: Type },
     { id: "style", label: "Style", icon: Palette },
     { id: "position", label: "Position", icon: Move },
@@ -66,6 +69,8 @@
         <TemplatesPanel />
       {:else if active === "transcript"}
         <TranscriptPanel />
+      {:else if active === "sheets"}
+        <SheetsPanel />
       {:else if active === "typography"}
         <TypographyPanel />
       {:else if active === "style"}

@@ -561,6 +561,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "One two three four five six seven eight nine ten.".into(),
+                sheet: None,
             }],
             params: crate::CaptionParams {
                 max_chars: Some(10),
@@ -690,11 +691,13 @@ mod tests {
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One sentence.".into(),
+                    sheet: None,
                 },
                 crate::Cue {
                     start_ms: 1500,
                     end_ms: 2500,
                     text: "Second one.".into(),
+                    sheet: None,
                 },
             ],
             ..Default::default()
@@ -717,11 +720,13 @@ mod tests {
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One sentence.".into(),
+                    sheet: None,
                 },
                 crate::Cue {
                     start_ms: 4000,
                     end_ms: 5000,
                     text: "Far away.".into(),
+                    sheet: None,
                 },
             ],
             ..Default::default()
@@ -740,11 +745,13 @@ mod tests {
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One sentence.".into(),
+                    sheet: None,
                 },
                 crate::Cue {
                     start_ms: 1500,
                     end_ms: 2500,
                     text: "Second one.".into(),
+                    sheet: None,
                 },
             ],
             ..Default::default()
@@ -784,6 +791,7 @@ mod tests {
                     start_ms: 0,
                     end_ms: 1000,
                     text: "Hello.".into(),
+                    sheet: None,
                 }],
                 ..Default::default()
             };
@@ -803,6 +811,7 @@ mod tests {
                 end_ms: 1000,
                 // Latin majority over the whole doc → majority vote would say LTR.
                 text: "hello world rscaps مرحبا".into(),
+                sheet: None,
             }],
             params: crate::CaptionParams {
                 direction: direction.into(),
@@ -827,6 +836,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 1000,
                 text: "مرحبا بالعالم مرحبا hello".into(),
+                sheet: None,
             }],
             params: crate::CaptionParams {
                 direction: "ltr".into(),

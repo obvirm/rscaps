@@ -254,6 +254,7 @@ mod tests {
                     start_ms: i as u32 * 2000,
                     end_ms: i as u32 * 2000 + 1500,
                     text: (*text).into(),
+                    sheet: None,
                 })
                 .collect(),
             ..Default::default()

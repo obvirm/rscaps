@@ -343,6 +343,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "one two".into(),
+                sheet: None,
             }],
             ..Default::default()
         };
@@ -374,6 +375,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait, hold on and look at this one here now.".into(),
+                sheet: None,
             }],
             ..Default::default()
         };

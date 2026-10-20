@@ -4,6 +4,16 @@ export interface Cue {
   start_ms: number;
   end_ms: number;
   text: string;
+  /** Sheet id pemilik cue (absen/kosong = sheet default dokumen). */
+  sheet?: string;
+}
+
+/** Sheet (track gaya) — mirror dari caption-core::Sheet. */
+export interface Sheet {
+  id: string;
+  name: string;
+  template?: string;
+  params?: CaptionParams;
 }
 
 /** Effects overrides — tri-state: absent = template default, else force. */
@@ -98,6 +108,8 @@ export interface CaptionDocument {
   cues: Cue[];
   params: CaptionParams;
   template?: string;
+  /** Sheet tambahan (track gaya); sheet default = dokumen sendiri. */
+  sheets?: Sheet[];
 }
 
 // ── Template catalog (straight from caption-core) ─────────────────────────

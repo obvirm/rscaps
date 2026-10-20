@@ -387,6 +387,7 @@ mod tests {
                 text: "First clause is here, second clause follows right after this one, \
                        and the third clause carries on for a while longer."
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };

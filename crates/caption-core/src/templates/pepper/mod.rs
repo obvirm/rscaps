@@ -391,6 +391,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "this is way more than eighteen characters, right.".into(),
+                sheet: None,
             }],
             ..Default::default()
         };

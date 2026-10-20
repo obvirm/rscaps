@@ -704,6 +704,7 @@ mod tests {
                 end_ms: 6000,
                 text: "We said, this is quite a long sentence that will need to be split into several segments here."
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };
@@ -739,16 +740,19 @@ mod tests {
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One two.".into(),
+                    sheet: None,
                 },
                 crate::Cue {
                     start_ms: 1200,
                     end_ms: 2000,
                     text: "Three four.".into(),
+                    sheet: None,
                 },
                 crate::Cue {
                     start_ms: 4000,
                     end_ms: 5000,
                     text: "Five six.".into(),
+                    sheet: None,
                 },
             ],
             ..Default::default()

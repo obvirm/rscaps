@@ -110,6 +110,8 @@ class StudioState {
   // ── Element inspector ───────────────────────────────────────────────────
   /** Index kata global yang terpilih di preview (null = tak ada). */
   selectedWord = $state<number | null>(null);
+  /** Sheet aktif yang menerima edit panel ("" = sheet default dokumen). */
+  activeSheetId = $state("");
   /**
    * Bingkai layar (px relatif `.video-box`) kata terpilih — dipakai overlay
    * seleksi di PreviewStage. Diukur ulang tiap render (kata bisa bergerak
@@ -147,8 +149,18 @@ class StudioState {
       return null;
     }
   });
-  params = $derived(this.doc?.params ?? null);
-  activeTemplate = $derived(this.templates.find((t) => t.id === this.doc?.template) ?? null);
+  params = $derived.by<CaptionParams | null>(() => {
+    // Panel menampilkan params target edit: sheet aktif (mewarisi doc saat
+    // belum punya params sendiri) atau params dokumen.
+    if (this.activeSheet) return this.activeSheet.params ?? this.doc?.params ?? null;
+    return this.doc?.params ?? null;
+  });
+  activeTemplate = $derived.by(() => {
+    // Template target edit: sheet aktif punya template sendiri (kosong = v0),
+    // sheet default memakai doc.template.
+    const id = this.activeSheet ? (this.activeSheet.template ?? "") : (this.doc?.template ?? "");
+    return this.templates.find((t) => t.id === id) ?? null;
+  });
   cues = $derived.by<Cue[]>(() => {
     try {
       const doc = JSON.parse(this.docText) as CaptionDocument;
@@ -161,6 +173,10 @@ class StudioState {
   timeText = $derived(formatTime(this.frame / this.fps));
   durationText = $derived(formatTime(this.durationSec));
   scrubMax = $derived(Math.max(this.durationFrames - 1, 0));
+  /** Sheet tambahan dokumen (tanpa sheet default). */
+  sheets = $derived(this.doc?.sheets ?? []);
+  /** Sheet aktif (null = sheet default dokumen). */
+  activeSheet = $derived(this.sheets.find((s) => s.id === this.activeSheetId) ?? null);
 
   // ── Helpers ─────────────────────────────────────────────────────────────
   setStatus(message: string, isError = false): void {
@@ -716,14 +732,20 @@ class StudioState {
   // ── Document mutations ──────────────────────────────────────────────────
   setTemplate(id: string): boolean {
     return this.updateDoc((doc) => {
+      if (this.activeSheetId) {
+        const sheet = doc.sheets?.find((s) => s.id === this.activeSheetId);
+        if (sheet) {
+          sheet.template = id;
+          return;
+        }
+      }
       doc.template = id;
     });
   }
 
   setDirection(dir: Direction): boolean {
     return this.updateDoc((doc) => {
-      doc.params = doc.params || this.defaultDocument().params;
-      doc.params.direction = dir;
+      this.editTargetParams(doc).direction = dir;
     });
   }
 
@@ -737,10 +759,28 @@ class StudioState {
     this.frame = f;
   }
 
+  /**
+   * Params object yang sedang diedit panel: sheet aktif (dibuat on-demand,
+   * mewarisi doc.params saat pertama disentuh) atau params dokumen.
+   */
+  private editTargetParams(doc: CaptionDocument): CaptionParams {
+    if (this.activeSheetId) {
+      doc.sheets = doc.sheets ?? [];
+      const sheet = doc.sheets.find((s) => s.id === this.activeSheetId);
+      if (sheet) {
+        sheet.params =
+          sheet.params ??
+          (JSON.parse(JSON.stringify(doc.params)) as CaptionParams);
+        return sheet.params;
+      }
+    }
+    return doc.params;
+  }
+
   /** Merge a params patch, re-render the overlay, mark the project dirty. */
   setParams(patch: Partial<CaptionParams>): boolean {
     const ok = this.updateDoc((doc) => {
-      doc.params = { ...(doc.params ?? this.defaultDocument().params), ...patch };
+      Object.assign(this.editTargetParams(doc), patch);
     }, "params");
     if (ok) {
       this.applyParams();
@@ -752,8 +792,8 @@ class StudioState {
   /** Merge into `params.effects` (tri-state overrides). */
   setEffectsParams(patch: Partial<EffectsParams>): boolean {
     const ok = this.updateDoc((doc) => {
-      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
-      doc.params.effects = { ...(doc.params.effects ?? {}), ...patch };
+      const p = this.editTargetParams(doc);
+      p.effects = { ...(p.effects ?? {}), ...patch };
     }, "params");
     if (ok) {
       this.applyParams();
@@ -765,8 +805,8 @@ class StudioState {
   /** Set one data-driven style control value (`params.style_values`). */
   setStyleValue(id: string, value: string | number | boolean): boolean {
     const ok = this.updateDoc((doc) => {
-      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
-      doc.params.style_values = { ...(doc.params.style_values ?? {}), [id]: value };
+      const p = this.editTargetParams(doc);
+      p.style_values = { ...(p.style_values ?? {}), [id]: value };
     }, "params");
     if (ok) {
       this.applyParams();
@@ -778,9 +818,98 @@ class StudioState {
   /** Apply a template variant (preset) by merging its overrides. */
   applyVariantOverrides(overrides: Record<string, string | number | boolean>): boolean {
     const ok = this.updateDoc((doc) => {
-      doc.params = { ...(doc.params ?? this.defaultDocument().params) };
-      doc.params.style_values = { ...(doc.params.style_values ?? {}), ...overrides };
+      const p = this.editTargetParams(doc);
+      p.style_values = { ...(p.style_values ?? {}), ...overrides };
     }, "params");
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  // ── Sheets (C7: multi-track gaya) ────────────────────────────────────────
+  /** Sheet baru (tanpa template — v0) dan jadikan aktif. */
+  addSheet(): boolean {
+    const ok = this.updateDoc((doc) => {
+      doc.sheets = doc.sheets ?? [];
+      const id = `sh-${Date.now().toString(36)}-${Math.floor(Math.random() * 46656).toString(36)}`;
+      doc.sheets.push({ id, name: `Sheet ${doc.sheets.length + 1}` });
+      this.activeSheetId = id;
+    });
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  /** Hapus sheet; cue-nya kembali ke sheet default. */
+  removeSheet(id: string): boolean {
+    const ok = this.updateDoc((doc) => {
+      doc.sheets = (doc.sheets ?? []).filter((s) => s.id !== id);
+      for (const cue of doc.cues) {
+        if (cue.sheet === id) delete cue.sheet;
+      }
+    });
+    if (ok) {
+      if (this.activeSheetId === id) this.activeSheetId = "";
+      this.applyDocument().then(() => this.scheduleSave());
+    }
+    return ok;
+  }
+
+  renameSheet(id: string, name: string): boolean {
+    const ok = this.updateDoc((doc) => {
+      const sheet = doc.sheets?.find((s) => s.id === id);
+      if (sheet) sheet.name = name;
+    });
+    if (ok) {
+      this.scheduleSave();
+    }
+    return ok;
+  }
+
+  /** Ganti template sheet ("" = renderer v0). */
+  setSheetTemplate(id: string, template: string): boolean {
+    const ok = this.updateDoc((doc) => {
+      const sheet = doc.sheets?.find((s) => s.id === id);
+      if (sheet) sheet.template = template;
+    });
+    if (ok) {
+      this.applyDocument().then(() => this.scheduleSave());
+    }
+    return ok;
+  }
+
+  /** Reset sheet ke inheritance penuh (buang params + template sendiri). */
+  resetSheet(id: string): boolean {
+    const ok = this.updateDoc((doc) => {
+      const sheet = doc.sheets?.find((s) => s.id === id);
+      if (sheet) {
+        delete sheet.params;
+        sheet.template = "";
+      }
+    });
+    if (ok) {
+      this.applyDocument().then(() => this.scheduleSave());
+    }
+    return ok;
+  }
+
+  /** Setel sheet aktif yang menerima edit panel ("" = default). */
+  setActiveSheet(id: string): void {
+    this.activeSheetId = id;
+  }
+
+  /** Assign satu cue ke sheet ("" = default). Re-render, timing tetap. */
+  assignCue(index: number, sheetId: string): boolean {
+    const ok = this.updateDoc((doc) => {
+      const cue = doc.cues[index];
+      if (!cue) return;
+      if (sheetId) cue.sheet = sheetId;
+      else delete cue.sheet;
+    });
     if (ok) {
       this.applyParams();
       this.scheduleSave();

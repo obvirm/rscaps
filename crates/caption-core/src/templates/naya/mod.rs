@@ -431,6 +431,7 @@ mod tests {
                 end_ms: 3000,
                 text: "This caption is definitely long enough to need several segments here."
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };

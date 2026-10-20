@@ -350,6 +350,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "make it big".into(),
+                sheet: None,
             }],
             ..Default::default()
         };
@@ -371,11 +372,13 @@ mod tests {
                     start_ms: 0,
                     end_ms: 1000,
                     text: "First part.".into(),
+                    sheet: None,
                 },
                 crate::Cue {
                     start_ms: 1500,
                     end_ms: 2500,
                     text: "Second part.".into(),
+                    sheet: None,
                 },
             ],
             ..Default::default()

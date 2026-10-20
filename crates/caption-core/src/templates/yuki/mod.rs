@@ -264,6 +264,7 @@ mod tests {
                 end_ms: 3000,
                 text: "A fairly long single sentence that will need splitting at forty two chars."
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };

@@ -322,6 +322,7 @@ mod tests {
                 end_ms: 3000,
                 text: "She waited by the door until the rain finally stopped falling."
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };

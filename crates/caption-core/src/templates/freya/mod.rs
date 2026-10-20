@@ -528,6 +528,7 @@ mod tests {
                 end_ms: 3000,
                 text: "Wait, hold on now and look at this one here, please."
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };

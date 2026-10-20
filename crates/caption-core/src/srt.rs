@@ -98,6 +98,7 @@ pub fn parse(text: &str, _format: Format) -> Result<Parsed, String> {
             start_ms,
             end_ms,
             text: clean,
+            sheet: None,
         });
     }
 
@@ -235,6 +236,7 @@ mod tests {
             start_ms: start,
             end_ms: end,
             text: text.to_string(),
+            sheet: None,
         }
     }
 

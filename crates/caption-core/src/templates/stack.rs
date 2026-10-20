@@ -473,6 +473,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: text.into(),
+                sheet: None,
             }],
             ..Default::default()
         }

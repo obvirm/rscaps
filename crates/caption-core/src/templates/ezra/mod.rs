@@ -810,11 +810,13 @@ mod tests {
                     start_ms: 0,
                     end_ms: 2500,
                     text: "Every word lands right here now".into(),
+                    sheet: None,
                 },
                 Cue {
                     start_ms: 2500,
                     end_ms: 5500,
                     text: "وما زال الكتاب مفتوحاً".into(),
+                    sheet: None,
                 },
             ],
             ..Default::default()

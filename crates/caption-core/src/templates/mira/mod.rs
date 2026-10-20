@@ -366,6 +366,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Hi ok.".into(),
+                sheet: None,
             }],
             ..Default::default()
         };
@@ -406,6 +407,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait, WHAT I saw.".into(),
+                sheet: None,
             }],
             ..Default::default()
         };

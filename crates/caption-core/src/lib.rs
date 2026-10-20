@@ -13,6 +13,25 @@ pub struct Cue {
     pub start_ms: u32,
     pub end_ms: u32,
     pub text: String,
+    /// Sheet id pemilik cue (None/empty = sheet default dokumen).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+}
+
+/// Satu sheet (track gaya): template + params opsional yang menimpa
+/// dokumen. Cue ditugaskan ke sheet lewat `Cue::sheet`; cue tanpa sheet
+/// milik sheet default (doc.template/doc.params).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sheet {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// Template native untuk sheet ini; kosong = renderer v0.
+    #[serde(default)]
+    pub template: String,
+    /// Params khusus sheet; None = pakai doc.params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<CaptionParams>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +318,10 @@ pub struct CaptionDocument {
     /// Native template id; empty falls back to the v0 renderer.
     #[serde(default)]
     pub template: String,
+    /// Sheet tambahan (track gaya). Sheet default = dokumen sendiri
+    /// (doc.template + doc.params + cue tanpa `sheet`) — tak masuk list ini.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheets: Vec<Sheet>,
 }
 
 fn default_duration_frames() -> u32 {
@@ -312,6 +335,7 @@ impl Default for CaptionDocument {
             cues: Vec::new(),
             params: CaptionParams::default(),
             template: String::new(),
+            sheets: Vec::new(),
         }
     }
 }
@@ -485,6 +509,32 @@ pub fn template_catalog_json() -> String {
     templates::template_catalog_json()
 }
 
+/// Gabungkan SVG sheet overlay ke sheet dasar: inner `overlay` (def +
+/// body) disisipkan sebelum `</svg>` base, dengan semua `id="…"` dan
+/// `url(#…)` diberi prefix `s{idx}-` supaya defs antar-sheet tak bentrok.
+/// Semua renderer (native template + v0) memancarkan `<svg>` penuh dengan
+/// viewBox kanvas yang sama, jadi penumpukan langsung valid.
+fn merge_svgs(base: String, overlay: &str, idx: usize) -> String {
+    let Some(open_end) = overlay.find('>') else {
+        return base;
+    };
+    let Some(close) = overlay.rfind("</svg>") else {
+        return base;
+    };
+    if close <= open_end {
+        return base;
+    }
+    let inner = &overlay[open_end + 1..close];
+    let prefix = format!("s{idx}-");
+    let namespaced = inner
+        .replace("id=\"", &format!("id=\"{prefix}"))
+        .replace("url(#", &format!("url(#{prefix}"));
+    match base.rfind("</svg>") {
+        Some(pos) => format!("{}{}{}", &base[..pos], namespaced, &base[pos..]),
+        None => base,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct CaptionVideo;
 
@@ -513,23 +563,132 @@ impl Video for CaptionVideo {
 
         let now_ms = frame.seconds() * 1000.0;
 
-        // Native templates own their whole document window (gap-free tails
-        // cross cue boundaries), so they run before the per-cue lookup.
-        if !doc.template.is_empty() {
-            if let Some(svg) = templates::render(&doc.template, &doc, now_ms, ctx) {
-                return svg;
-            }
+        // ── Rencana render per sheet ─────────────────────────────────────────
+        // Sheet default (doc-level) selalu indeks 0; sheet eksplisit menyusul
+        // sesuai urutan `doc.sheets`. Sheet tanpa cue dilewati. Cukup satu
+        // sheet kandidat → jalur cepat tanpa clone/merge.
+        let has_extra_cues = doc.sheets.iter().any(|s| {
+            doc.cues
+                .iter()
+                .any(|c| c.sheet.as_deref() == Some(s.id.as_str()))
+        });
+
+        if !has_extra_cues {
+            // Jalur cepat: hanya sheet default (perilaku pra-sheets).
+            return render_one(
+                &doc,
+                &doc.template,
+                &doc.params,
+                &doc.cues,
+                now_ms,
+                &mut frame,
+                ctx,
+            );
         }
 
-        let Some(cue) = doc
+        // Kandidat: (sheet_idx, template, params, cues) — sheet yang seluruh
+        // cue-nya sudah jauh lewat (+1500ms) di-skip supaya tak di-clone.
+        let mut plans: Vec<(usize, &str, &CaptionParams, Vec<Cue>)> = Vec::new();
+        let default_cues: Vec<Cue> = doc
             .cues
             .iter()
-            .find(|cue| now_ms >= cue.start_ms as f32 && now_ms < cue.end_ms as f32)
-        else {
+            .filter(|c| c.sheet.as_deref().map_or(true, |s| s.is_empty()))
+            .cloned()
+            .collect();
+        if !default_cues.is_empty() {
+            let last_end = default_cues.iter().map(|c| c.end_ms).max().unwrap_or(0);
+            if (now_ms as u32) <= last_end.saturating_add(1500) {
+                plans.push((0, doc.template.as_str(), &doc.params, default_cues));
+            }
+        }
+        for (i, sheet) in doc.sheets.iter().enumerate() {
+            let cues: Vec<Cue> = doc
+                .cues
+                .iter()
+                .filter(|c| c.sheet.as_deref() == Some(sheet.id.as_str()))
+                .cloned()
+                .collect();
+            if cues.is_empty() {
+                continue;
+            }
+            let last_end = cues.iter().map(|c| c.end_ms).max().unwrap_or(0);
+            if (now_ms as u32) > last_end.saturating_add(1500) {
+                continue;
+            }
+            let params = sheet.params.as_ref().unwrap_or(&doc.params);
+            plans.push((i + 1, sheet.template.as_str(), params, cues));
+        }
+        if plans.len() == 1 {
+            let p = plans.remove(0);
+            return render_one(&doc, p.1, p.2, &p.3, now_ms, &mut frame, ctx);
+        }
+
+        // Render tiap sheet (template native butuh &CaptionDocument penuh —
+        // bangun doc sementara per sheet), lalu gabung string-nya.
+        let mut rendered: Vec<(usize, String)> = Vec::new();
+        for (idx, template, params, cues) in plans {
+            let temp = CaptionDocument {
+                duration_frames: doc.duration_frames,
+                cues,
+                params: params.clone(),
+                template: template.to_string(),
+                sheets: Vec::new(),
+            };
+            let svg = render_one(&temp, template, params, &temp.cues, now_ms, &mut frame, ctx);
+            let value = svg.value;
+            if value.is_empty() {
+                continue;
+            }
+            rendered.push((idx, value));
+        }
+        let Some((_, base)) = rendered.first().cloned() else {
             return Svgr::empty();
         };
+        let merged = rendered
+            .iter()
+            .skip(1)
+            .fold(base, |acc, (idx, svg)| merge_svgs(acc, svg, *idx));
+        Svgr::from(merged)
+    }
 
-        let params = &doc.params;
+}
+
+/// Render satu sheet: template native (doc sementara) atau v0.
+/// `template` kosong = renderer v0 (cue aktif pertama).
+#[allow(clippy::too_many_arguments)]
+fn render_one<'a>(
+    doc: &CaptionDocument,
+    template: &str,
+    params: &CaptionParams,
+    cues: &[Cue],
+    now_ms: f32,
+    frame: &mut Frame,
+    ctx: &FFramesContext<'a, '_>,
+) -> Svgr<'a> {
+    if !template.is_empty() {
+        if let Some(svg) = templates::render(template, doc, now_ms, ctx) {
+            return svg;
+        }
+    }
+
+    let Some(cue) = cues
+        .iter()
+        .find(|cue| now_ms >= cue.start_ms as f32 && now_ms < cue.end_ms as f32)
+    else {
+        return Svgr::empty();
+    };
+
+    render_v0(cue, params, now_ms, frame, ctx)
+}
+
+/// Renderer v0: satu cue aktif, params dokumen/sheet.
+fn render_v0<'a>(
+    cue: &Cue,
+    params: &CaptionParams,
+    now_ms: f32,
+    frame: &mut Frame,
+    ctx: &FFramesContext<'a, '_>,
+) -> Svgr<'a> {
         let pop_in_ms = params.pop_in_ms.max(1) as f32;
         let local_ms = now_ms - cue.start_ms as f32;
         let progress = (local_ms / pop_in_ms).clamp(0.0, 1.0);
@@ -607,7 +766,6 @@ impl Video for CaptionVideo {
             </svg>
         )
     }
-}
 
 // ── tests ─────────────────────────────────────────────────────────────────
 
@@ -658,5 +816,27 @@ mod tests {
         assert!(doc.params.letter_spacing_em.is_none());
         assert!(doc.params.effects.gap_free.is_none());
         assert!(doc.params.max_lines.is_none());
+        assert!(doc.sheets.is_empty());
+        assert!(doc.cues[0].sheet.is_none());
+    }
+
+    #[test]
+    fn merge_svgs_namespaces_overlay_ids() {
+        let base = r#"<svg viewBox="0 0 10 10"><defs><filter id="a-shadow"/></defs><g filter="url(#a-shadow)"/></svg>"#.to_string();
+        let overlay = r#"<svg viewBox="0 0 10 10"><defs><filter id="a-shadow"/></defs><g filter="url(#a-shadow)"/></svg>"#;
+        let merged = merge_svgs(base, overlay, 1);
+        // Overlay id diberi prefix supaya tak menimpa id base.
+        assert!(merged.contains(r#"id="s1-a-shadow""#));
+        assert!(merged.contains(r#"url(#s1-a-shadow)"#));
+        // Id base tetap.
+        assert!(merged.contains(r#"id="a-shadow""#));
+        // Overlay berada di dalam root svg base (satu dokumen).
+        assert_eq!(merged.matches("</svg>").count(), 1);
+    }
+
+    #[test]
+    fn merge_svgs_handles_missing_close() {
+        assert_eq!(merge_svgs("<svg></svg>".to_string(), "bukan-svg", 0), "<svg></svg>");
+        assert_eq!(merge_svgs(String::new(), "<svg><g/></svg>", 0), String::new());
     }
 }

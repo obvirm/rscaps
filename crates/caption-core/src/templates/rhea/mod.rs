@@ -355,6 +355,7 @@ mod tests {
                 end_ms: 3000,
                 text: "Wait, this is fine. But then the whole idea shifts again, doesn't it now?"
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };

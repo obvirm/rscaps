@@ -292,6 +292,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait, what now. Fine, then!".into(),
+                sheet: None,
             }],
             ..Default::default()
         };
@@ -317,6 +318,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "wait... \"ok\" then -- bye".into(),
+                sheet: None,
             }],
             ..Default::default()
         };

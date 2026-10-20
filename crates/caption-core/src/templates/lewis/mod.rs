@@ -320,6 +320,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "no commas, no stops — just words".into(),
+                sheet: None,
             }],
             ..Default::default()
         };

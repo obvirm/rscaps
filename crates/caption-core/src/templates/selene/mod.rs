@@ -503,6 +503,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Hello world. Bye now.".into(),
+                sheet: None,
             }],
             ..Default::default()
         };
@@ -517,6 +518,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "one two three four five six seven eight nine ten".into(),
+                sheet: None,
             }],
             ..Default::default()
         };
@@ -536,6 +538,7 @@ mod tests {
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait... \"hi\" -- ok".into(),
+                sheet: None,
             }],
             ..Default::default()
         };

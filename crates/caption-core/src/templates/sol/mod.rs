@@ -639,6 +639,7 @@ mod tests {
                 end_ms: 3000,
                 text: "hold on, this one runs quite long for a single line."
                     .into(),
+                sheet: None,
             }],
             ..Default::default()
         };
