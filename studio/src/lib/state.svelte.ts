@@ -917,6 +917,41 @@ class StudioState {
     return ok;
   }
 
+  /** Setel role sheet ("peak"/"hook"/"" = tanpa role) → kata di cue-nya ikut bertag. */
+  setSheetRole(id: string, role: string): boolean {
+    const ok = this.updateDoc((doc) => {
+      const sheet = doc.sheets?.find((s) => s.id === id);
+      if (!sheet) return;
+      if (role) sheet.role = role;
+      else delete sheet.role;
+    });
+    if (ok) {
+      this.applyDocument().then(() => this.scheduleSave());
+    }
+    return ok;
+  }
+
+  /** Toggle tag manual pada satu kata (index global = listWords). */
+  toggleWordTag(wordIndex: number, tag: string): boolean {
+    const ok = this.updateDoc((doc) => {
+      const key = String(wordIndex);
+      doc.word_tags ??= {};
+      const list = doc.word_tags[key] ?? [];
+      const at = list.indexOf(tag);
+      if (at >= 0) list.splice(at, 1);
+      else list.push(tag);
+      if (list.length > 0) doc.word_tags[key] = list;
+      else delete doc.word_tags[key];
+      if (Object.keys(doc.word_tags).length === 0) delete doc.word_tags;
+    });
+    if (ok) {
+      this.applyParams();
+      this.scheduleSave();
+      void this.listWords();
+    }
+    return ok;
+  }
+
   // ── Element inspector (per-word overrides) ──────────────────────────────
   /** Pilih (atau lepas, `null`) kata di preview — membuka panel Element. */
   selectWord(i: number | null): void {

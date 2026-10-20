@@ -9,9 +9,8 @@
 //! `gap_free` + `remove_punctuation` over clause-boundary segments (18/8
 //! chars).
 //!
-//! Unported: `.line:has(:is(.emphasis, .accent, .entity))` swaps the tape
-//! to gold — it keys off word *tags* (`semanticTags`), which the native
-//! `Cue` text does not carry; likewise `--tscaps-text-decoration`.
+//! Ported: `.line:has(:is(.emphasis, .accent, .entity))` menukar tape ke
+//! gold via tag kata (manual/otomatis). Tersisa: `--tscaps-text-decoration`.
 
 use fframes::{FFramesContext, Svgr};
 
@@ -36,6 +35,8 @@ const MAX_WIDTH_RATIO: f32 = 0.72; // lineSplitter.maxWidthRatio default
 const PRIMARY: &str = "#ffffff"; // --tscaps-primary-color default
 // .line background chrome: bg-color / bg-radius / bg-padding-x/y.
 const TAPE_BG: &str = "#1a1a1a";
+const HIGHLIGHT_BG: &str = "#ffd700"; // --tscaps-highlight-bg-color default
+const HIGHLIGHT_TEXT: &str = "#000000"; // --tscaps-highlight-text-color default
 const TAPE_RADIUS_EM: f32 = 0.17;
 const TAPE_PAD_X_EM: f32 = 0.28;
 const TAPE_PAD_Y_EM: f32 = 0.11;
@@ -192,10 +193,27 @@ pub fn render<'a>(
         let box_left = center_x - box_w / 2.0;
         let content_left = box_left + pad_x;
 
+        // Tag `.line:has(:is(.emphasis, .accent, .entity))` tscaps: satu
+        // kata ber-tag di baris ini menukar seluruh tape ke gold + teks
+        // hitam (tag manual; cue SRT polos tetap tape gelap).
+        let highlighted = segment.words[start..end]
+            .iter()
+            .any(|w| w.has_tag("emphasis") || w.has_tag("accent") || w.has_tag("entity"));
+        let line_bg = if highlighted {
+            st.color("highlight-bg-color", HIGHLIGHT_BG)
+        } else {
+            tape_bg.clone()
+        };
+        let line_fill = if highlighted {
+            st.color("highlight-text-color", HIGHLIGHT_TEXT)
+        } else {
+            ov.primary.clone()
+        };
+
         // The tape is the line: painted first, glyphs on top of it.
         body.push_str(&format!(
             "<rect x=\"{box_left}\" y=\"{box_top}\" width=\"{box_w}\" height=\"{box_h}\" \
-             rx=\"{tape_r}\" ry=\"{tape_r}\" fill=\"{tape_bg}\"/>"
+             rx=\"{tape_r}\" ry=\"{tape_r}\" fill=\"{line_bg}\"/>"
         ));
 
         // First word starts flush with the padding (its left margin is
@@ -232,8 +250,7 @@ pub fn render<'a>(
                 .map(|t| format!(" transform=\"{t}\""))
                 .unwrap_or_default();
             body.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{wo}{wo_transform}>{text}</text>",
-                fill = ov.primary,
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{line_fill}\"{family_attr}{wo}{wo_transform}>{text}</text>",
             ));
         }
     }

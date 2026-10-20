@@ -226,8 +226,9 @@ pub fn render<'a>(
                 format!(" font-family=\"{family}\"")
             };
             let text = layout::escape_xml(&word.display);
-            // Tag `.quote` tscaps: kata ber-tanda-kutip seluruhnya warna quote.
-            let fill = if style::word_has_quote(&word.display) {
+            // Tag `.quote` tscaps: kata dalam rentang kutip (SpanTagger)
+            // seluruhnya warna quote.
+            let fill = if word.has_tag("quote") {
                 st.color("quote-color", "#e6d647")
             } else {
                 ov.primary.clone()

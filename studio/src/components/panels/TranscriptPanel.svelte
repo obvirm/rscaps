@@ -1,12 +1,30 @@
 <script lang="ts">
-  import { Plus, Search, Trash2, LocateFixed } from "@lucide/svelte";
+  import { Plus, Search, Trash2, LocateFixed, Tag } from "@lucide/svelte";
   import { store } from "../../lib/state.svelte";
-  import { formatTime } from "../../lib/types";
+  import { formatTime, WORD_TAG_OPTIONS } from "../../lib/types";
   import type { WordInfo, Cue } from "../../lib/types";
 
   let query = $state("");
   let view = $state<"cue" | "word">("cue");
   let editingWord = $state<number | null>(null);
+
+  // Popover tag kata: index kata + posisi layar tempat klik kanan terjadi.
+  let tagFor = $state<number | null>(null);
+  let tagAt = $state({ x: 0, y: 0 });
+
+  function openTagMenu(e: MouseEvent, w: WordInfo): void {
+    e.preventDefault();
+    tagFor = w.index;
+    tagAt = { x: e.clientX, y: e.clientY };
+  }
+
+  function tagListOf(index: number): string[] {
+    return store.words.find((w) => w.index === index)?.tags ?? [];
+  }
+
+  function toggleTag(index: number, tag: string): void {
+    store.toggleWordTag(index, tag);
+  }
 
   const cues = $derived(store.cues);
   const words = $derived(store.words);
@@ -276,9 +294,11 @@
                     class="word"
                     class:active={w.index === activeWordIndex}
                     class:editing={editingWord === w.index}
+                    class:tagged={w.tags.length > 0}
                     onclick={() => seekMs(w.start_ms)}
                     ondblclick={() => (editingWord = w.index)}
-                    title="{timeLabel(w.start_ms)} - click: seek, double-click: edit"
+                    oncontextmenu={(e) => openTagMenu(e, w)}
+                    title="{timeLabel(w.start_ms)} - click: seek, double-click: edit, right-click: tags"
                   >{w.text}</button>
                 {/if}
               {/each}
@@ -292,6 +312,41 @@
     </div>
   {/if}
 </div>
+
+{#if tagFor !== null}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <div
+    class="tag-popover"
+    style="left:{Math.min(tagAt.x, window.innerWidth - 190)}px; top:{Math.min(tagAt.y, window.innerHeight - 200)}px"
+    onclick={(e) => e.stopPropagation()}
+    role="menu"
+    aria-label="Word tags"
+  >
+    <div class="tag-head">
+      <Tag size={11} />
+      <span>{store.words.find((w) => w.index === tagFor)?.text ?? ""}</span>
+    </div>
+    {#each WORD_TAG_OPTIONS as opt (opt.id)}
+      {@const idx = tagFor ?? 0}
+      <label class="tag-row">
+        <input
+          type="checkbox"
+          checked={tagListOf(idx).includes(opt.id)}
+          onchange={() => toggleTag(idx, opt.id)}
+        />
+        <span>{opt.label}</span>
+        {#if (opt.id === "quote" || opt.id === "number")}
+          <em class="tag-auto">auto</em>
+        {/if}
+      </label>
+    {/each}
+  </div>
+{/if}
+
+<svelte:window
+  onclick={() => tagFor !== null && (tagFor = null)}
+  onkeydown={(e) => e.key === "Escape" && tagFor !== null && (tagFor = null)}
+/>
 
 <style>
   .transcript-panel {
@@ -541,6 +596,63 @@
     background: rgb(var(--accent) / 0.2);
     border-color: rgb(var(--accent) / 0.6);
     color: rgb(var(--fg-0));
+  }
+  .word.tagged::after {
+    content: "";
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    margin-left: 4px;
+    border-radius: 999px;
+    background: rgb(var(--accent));
+    vertical-align: 2px;
+  }
+  .tag-popover {
+    position: fixed;
+    z-index: 60;
+    min-width: 170px;
+    padding: 8px;
+    border-radius: var(--r-sm);
+    background: rgb(var(--bg-1));
+    border: 1px solid rgb(var(--border));
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.4);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .tag-head {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 6px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    color: rgb(var(--fg-2));
+    border-bottom: 1px solid rgb(var(--border));
+    margin-bottom: 4px;
+    text-transform: lowercase;
+  }
+  .tag-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 6px;
+    border-radius: var(--r-xs);
+    font-size: 12px;
+    color: rgb(var(--fg-1));
+    cursor: pointer;
+  }
+  .tag-row:hover {
+    background: rgb(var(--bg-2));
+  }
+  .tag-row input {
+    accent-color: rgb(var(--accent));
+  }
+  .tag-auto {
+    margin-left: auto;
+    font-size: 10px;
+    color: rgb(var(--fg-faint));
+    font-style: normal;
   }
   .word-edit {
     width: 9ch;

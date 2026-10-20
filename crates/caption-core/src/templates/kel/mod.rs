@@ -33,6 +33,7 @@ const UPCOMING: &str = "#808080"; // --tscaps-upcoming-color default
 const HIGHLIGHT: &str = "#569cd6"; // --tscaps-highlight-color default
 const BG: &str = "#1e1e1e"; // --tscaps-bg-color default
 const HIGHLIGHT_BG: &str = "#252526"; // --tscaps-highlight-bg-color default
+const PEAK_BG: &str = "#00008b"; // --tscaps-peak-bg-color default
 const PAD_X_EM: f32 = 0.35; // --tscaps-word-padding-x default
 const PAD_Y_EM: f32 = 0.3; // --tscaps-word-padding-y default
 const RADIUS_EM: f32 = 0.18; // --tscaps-bg-radius default
@@ -105,12 +106,22 @@ fn fill_at(now_ms: f32, word_start: f32, word_end: f32, st: &style::Style) -> St
     }
 }
 
-/// Plate colour: only the spoken word swaps its background.
-fn bg_at(now_ms: f32, word_start: f32, word_end: f32, st: &style::Style) -> String {
-    if state::word_narration(now_ms, word_start, word_end).is_being() {
-        st.color("highlight-bg-color", HIGHLIGHT_BG)
-    } else {
-        st.color("bg-color", BG)
+/// Plate colour: only the spoken word swaps its background. Tag `peak`
+/// (tscaps `.word-being-narrated.peak` / `.word-already-narrated.peak`):
+/// begitu kata tercapai playhead, pilnya memakai peak-bg — kata yang
+/// belum tercapai tetap tampil sebagai kata biasa supaya reveal tak
+/// ter spoil.
+fn bg_at(now_ms: f32, word_start: f32, word_end: f32, peak: bool, st: &style::Style) -> String {
+    match state::word_narration(now_ms, word_start, word_end) {
+        state::Narration::Being => {
+            if peak {
+                st.color("peak-bg-color", PEAK_BG)
+            } else {
+                st.color("highlight-bg-color", HIGHLIGHT_BG)
+            }
+        }
+        state::Narration::Already if peak => st.color("peak-bg-color", PEAK_BG),
+        _ => st.color("bg-color", BG),
     }
 }
 
@@ -242,7 +253,7 @@ pub fn render<'a>(
             let word = &segment.words[start + j];
             plates_svg.push_str(&format!(
                 "<path d=\"{d}\" fill=\"{}\"/>",
-                bg_at(now_ms, word.start_ms, word.end_ms, &st)
+                bg_at(now_ms, word.start_ms, word.end_ms, word.has_tag("peak"), &st)
             ));
         }
         for (word_off, ((x, word), family)) in xs
@@ -376,8 +387,8 @@ mod tests {
         assert_eq!(fill_at(50.0, 100.0, 200.0, &st), UPCOMING);
         assert_eq!(fill_at(150.0, 100.0, 200.0, &st), HIGHLIGHT);
         assert_eq!(fill_at(250.0, 100.0, 200.0, &st), PRIMARY);
-        assert_eq!(bg_at(50.0, 100.0, 200.0, &st), BG);
-        assert_eq!(bg_at(150.0, 100.0, 200.0, &st), HIGHLIGHT_BG);
-        assert_eq!(bg_at(250.0, 100.0, 200.0, &st), BG);
+        assert_eq!(bg_at(50.0, 100.0, 200.0, false, &st), BG);
+        assert_eq!(bg_at(150.0, 100.0, 200.0, false, &st), HIGHLIGHT_BG);
+        assert_eq!(bg_at(250.0, 100.0, 200.0, false, &st), BG);
     }
 }

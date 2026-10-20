@@ -32,6 +32,10 @@ pub struct Sheet {
     /// Params khusus sheet; None = pakai doc.params.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<CaptionParams>,
+    /// Role semantik sheet (tscaps SheetRole): "peak"/"hook" — kata-kata
+    /// cue yang terikat sheet ini ikut bertag demikian (kel peak-bg, dll).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,9 +323,19 @@ pub struct CaptionDocument {
     #[serde(default)]
     pub template: String,
     /// Sheet tambahan (track gaya). Sheet default = dokumen sendiri
-    /// (doc.template + doc.params + cue tanpa `sheet`) — tak masuk list ini.
+    /// (doc.template + doc.params + cue tanpa `sheet`) - tak masuk list ini.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sheets: Vec<Sheet>,
+    /// Tag manual per kata (index global = alamat `element_overrides`) —
+    /// digabung dengan tag otomatis (quote/number) dan role sheet saat
+    /// render. JSON object: { "12": ["emphasis"], ... }.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub word_tags: std::collections::BTreeMap<u32, Vec<String>>,
+    /// Base index kata per cue (paralel dengan `cues`) — diisi render_frame
+    /// untuk doc sementara per-sheet agar index kata tetap global. Tidak
+    /// diserialisasi; kosong = hitung kumulatif dari nol.
+    #[serde(skip)]
+    pub word_index_bases: Vec<u32>,
 }
 
 fn default_duration_frames() -> u32 {
@@ -336,6 +350,8 @@ impl Default for CaptionDocument {
             params: CaptionParams::default(),
             template: String::new(),
             sheets: Vec::new(),
+            word_tags: std::collections::BTreeMap::new(),
+            word_index_bases: Vec::new(),
         }
     }
 }
@@ -405,6 +421,7 @@ pub fn list_words_json() -> String {
                 "text": w.text,
                 "start_ms": w.start_ms,
                 "end_ms": w.end_ms,
+                "tags": w.tags,
             })
         })
         .collect();
@@ -586,28 +603,49 @@ impl Video for CaptionVideo {
             );
         }
 
-        // Kandidat: (sheet_idx, template, params, cues) — sheet yang seluruh
-        // cue-nya sudah jauh lewat (+1500ms) di-skip supaya tak di-clone.
-        let mut plans: Vec<(usize, &str, &CaptionParams, Vec<Cue>)> = Vec::new();
-        let default_cues: Vec<Cue> = doc
-            .cues
-            .iter()
-            .filter(|c| c.sheet.as_deref().map_or(true, |s| s.is_empty()))
-            .cloned()
-            .collect();
+        // Kandidat: (sheet_idx, template, params, cues, bases, own_sheet) —
+        // sheet yang seluruh cue-nya sudah jauh lewat (+1500ms) di-skip
+        // supaya tak di-clone. Bases = index kata global per cue subset:
+        // doc sementara tidak boleh menggeser alamat kata (tag manual &
+        // element_overrides memakai index dokumen penuh).
+        let mut bases_full: Vec<u32> = Vec::with_capacity(doc.cues.len());
+        let mut running = 0u32;
+        for cue in &doc.cues {
+            bases_full.push(running);
+            running += crate::templates::pipeline::tokenize(&cue.text).len() as u32;
+        }
+        let mut plans: Vec<(usize, &str, &CaptionParams, Vec<Cue>, Vec<u32>, Option<&Sheet>)> =
+            Vec::new();
+        let mut default_cues: Vec<Cue> = Vec::new();
+        let mut default_bases: Vec<u32> = Vec::new();
+        for (i, cue) in doc.cues.iter().enumerate() {
+            if cue.sheet.as_deref().map_or(true, |s| s.is_empty()) {
+                default_cues.push(cue.clone());
+                default_bases.push(bases_full[i]);
+            }
+        }
         if !default_cues.is_empty() {
             let last_end = default_cues.iter().map(|c| c.end_ms).max().unwrap_or(0);
             if (now_ms as u32) <= last_end.saturating_add(1500) {
-                plans.push((0, doc.template.as_str(), &doc.params, default_cues));
+                plans.push((
+                    0,
+                    doc.template.as_str(),
+                    &doc.params,
+                    default_cues,
+                    default_bases,
+                    None,
+                ));
             }
         }
         for (i, sheet) in doc.sheets.iter().enumerate() {
-            let cues: Vec<Cue> = doc
-                .cues
-                .iter()
-                .filter(|c| c.sheet.as_deref() == Some(sheet.id.as_str()))
-                .cloned()
-                .collect();
+            let mut cues: Vec<Cue> = Vec::new();
+            let mut bases: Vec<u32> = Vec::new();
+            for (ci, cue) in doc.cues.iter().enumerate() {
+                if cue.sheet.as_deref() == Some(sheet.id.as_str()) {
+                    cues.push(cue.clone());
+                    bases.push(bases_full[ci]);
+                }
+            }
             if cues.is_empty() {
                 continue;
             }
@@ -616,7 +654,7 @@ impl Video for CaptionVideo {
                 continue;
             }
             let params = sheet.params.as_ref().unwrap_or(&doc.params);
-            plans.push((i + 1, sheet.template.as_str(), params, cues));
+            plans.push((i + 1, sheet.template.as_str(), params, cues, bases, Some(sheet)));
         }
         if plans.len() == 1 {
             let p = plans.remove(0);
@@ -624,15 +662,18 @@ impl Video for CaptionVideo {
         }
 
         // Render tiap sheet (template native butuh &CaptionDocument penuh —
-        // bangun doc sementara per sheet), lalu gabung string-nya.
+        // bangun doc sementara per sheet), lalu gabung string-nya. Sheet
+        // eksplisit ikut supaya role-nya (peak/hook) ikut men-tag kata.
         let mut rendered: Vec<(usize, String)> = Vec::new();
-        for (idx, template, params, cues) in plans {
+        for (idx, template, params, cues, bases, own_sheet) in plans {
             let temp = CaptionDocument {
                 duration_frames: doc.duration_frames,
                 cues,
                 params: params.clone(),
                 template: template.to_string(),
-                sheets: Vec::new(),
+                sheets: own_sheet.cloned().into_iter().collect(),
+                word_tags: doc.word_tags.clone(),
+                word_index_bases: bases,
             };
             let svg = render_one(&temp, template, params, &temp.cues, now_ms, &mut frame, ctx);
             let value = svg.value;

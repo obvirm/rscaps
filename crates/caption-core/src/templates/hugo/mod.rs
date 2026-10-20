@@ -28,7 +28,8 @@ const MAX_LINES: usize = 2; // lineSplitter.maxLines
 const MAX_WIDTH_RATIO: f32 = 0.74; // lineSplitter.maxWidthRatio
 const LINE_SPACING_EM: f32 = 0.0; // typography.lineSpacing: 0
 const PRIMARY: &str = "#ffffff"; // --tscaps-primary-color default
-const SHADOW_BLUR_EM: f32 = 0.267; // --tscaps-shadow-blur default (shadow-blur 0.267)
+const SHADOW_BLUR_EM: f32 = 0.267;
+const TAG_COLOR: &str = "#ffffff"; // --tscaps-tag-color default // --tscaps-shadow-blur default (shadow-blur 0.267)
 const OUTLINE_THICKNESS_EM: f32 = 0.0; // --tscaps-outline-thickness default (control 0)
 const OUTLINE_COLOR: &str = "#1a1a1a"; // --tscaps-outline-color default
 // flash-in($element: 'word', $plate: #ffffff, $duration: 0.1s, ease)
@@ -159,6 +160,7 @@ pub fn render<'a>(
     let descent = desc_ratio * fs;
     let half_leading = (line_h - (ascent + descent)) / 2.0;
     let glow_std = SHADOW_BLUR_EM * fs / 2.0;
+    let tag_color = st.color("tag-color", TAG_COLOR);
     let flash = recipes::FlashIn {
         duration_s: ov.duration_or(FLASH_DURATION_S),
     };
@@ -202,6 +204,10 @@ pub fn render<'a>(
                     format!(" font-family=\"{family}\"")
                 };
                 let text = layout::escape_xml(&ov.text_case.apply(&word.display));
+                // Tag `.emphasis/.accent/.entity` tscaps: warna + bloom
+                // warna tag (menggantikan glow primary dasar).
+                let tagged =
+                    word.has_tag("emphasis") || word.has_tag("accent") || word.has_tag("entity");
                 let stroke = if outline_thickness_em > 0.0 {
                     format!(
                         " stroke=\"{outline_color}\" stroke-width=\"{}\" paint-order=\"stroke\"",
@@ -231,10 +237,11 @@ pub fn render<'a>(
                     String::new()
                 };
                 words_svg.push_str(&format!(
-                    "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
-                     opacity=\"{}\" filter=\"url(#hugo-glow)\"{stroke}{wo}{wo_transform}>{text}</text>",
+                    "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
+                     opacity=\"{}\" filter=\"url(#{glow_id})\"{stroke}{wo}{wo_transform}>{text}</text>",
                     state.element_opacity,
-                    primary = ov.primary.as_str(),
+                    fill = if tagged { tag_color.as_str() } else { ov.primary.as_str() },
+                    glow_id = if tagged { "hugo-tag-glow" } else { "hugo-glow" },
                 ));
             }
             if state.plate_opacity > 0.0 {
@@ -276,6 +283,9 @@ pub fn render<'a>(
             <defs>
                 <filter id="hugo-glow" x="-40%" y="-80%" width="180%" height="320%">
                     <feDropShadow dx={0.0} dy={0.0} stdDeviation={glow_std} flood-color={ov.primary} flood-opacity={1.0}/>
+                </filter>
+                <filter id="hugo-tag-glow" x="-40%" y="-80%" width="180%" height="320%">
+                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={glow_std} flood-color={tag_color} flood-opacity={1.0}/>
                 </filter>
             </defs>
             {words_svg}

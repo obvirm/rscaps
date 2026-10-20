@@ -14,6 +14,8 @@ export interface Sheet {
   name: string;
   template?: string;
   params?: CaptionParams;
+  /** Role semantik: "peak"/"hook" — kata di cue sheet ini ikut bertag. */
+  role?: string;
 }
 
 /** Effects overrides — tri-state: absent = template default, else force. */
@@ -60,6 +62,9 @@ export interface WordInfo {
   text: string;
   start_ms: number;
   end_ms: number;
+  /** Tag semantik resolved (quote/number otomatis, peak/hook role sheet,
+   * manual dari doc.word_tags) — dari bridge listWords. */
+  tags: string[];
 }
 
 export interface CaptionParams {
@@ -110,7 +115,19 @@ export interface CaptionDocument {
   template?: string;
   /** Sheet tambahan (track gaya); sheet default = dokumen sendiri. */
   sheets?: Sheet[];
+  /** Tag manual per kata (key = index kata global dari listWords). */
+  word_tags?: Record<string, string[]>;
 }
+
+/** Tag yang bisa ditempel manual pada kata (urutan tscaps WORD_TAG_NAMES).
+ * quote/number juga terdeteksi otomatis; sisanya murni manual. */
+export const WORD_TAG_OPTIONS: { id: string; label: string }[] = [
+  { id: "number", label: "Number" },
+  { id: "quote", label: "Quote" },
+  { id: "emphasis", label: "Emphasis" },
+  { id: "accent", label: "Accent" },
+  { id: "entity", label: "Entity" },
+];
 
 // ── Template catalog (straight from caption-core) ─────────────────────────
 

@@ -14,6 +14,7 @@ fn main() {
         params: caption_core::CaptionParams::default(),
         template: "loki".into(),
         sheets: Vec::new(),
+        ..Default::default()
     };
     // Ukuran video UJI: 4:3 (speech-test.mp4 = 320×240 → kotak 4:3), canvas
     // preview memakai rasio ini di ui.slint; render engine pakai1920×1080.

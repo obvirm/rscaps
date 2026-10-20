@@ -10,9 +10,8 @@
 //! twelve-character threshold). Clause-boundary segments with `gap_free`,
 //! `carry_quotes` and `smart_punctuation`; block bottom-anchored at 0.82H.
 //!
-//! Unported: the `.emphasis/.accent/.entity` and `.quote` gradients key
-//! off word *tags* (`semanticTags`), which the native `Cue` text does not
-//! carry — only the plain `.word` gradient renders.
+//! Ported: gradien `.emphasis/.accent/.entity` (tag-color) dan `.quote`
+//! (quote-color) — tiga stop dari warna tag, campuran sesuai scss.
 //!
 //! Family note: Anton ships one static face (400) while the spec asks for
 //! weight 900 — the browser resolves to 400 too, so we query what we embed.
@@ -144,6 +143,11 @@ fn font_size_scale(char_count: usize) -> f32 {
 
 /// `color-mix(in srgb, <hex>, #000 <share*100>%)` — channel × (1 − share).
 fn mixed_down(hex: &str, share: f32) -> String {
+    mix_colors(hex, "#000000", share)
+}
+
+/// `color-mix(in srgb, {a}, {b} {share}%)` — share penuh milik b.
+fn mix_colors(a: &str, b: &str, share: f32) -> String {
     let parse = |s: &str| -> [f32; 3] {
         let h = s.trim_start_matches('#');
         [0, 2, 4]
@@ -153,14 +157,10 @@ fn mixed_down(hex: &str, share: f32) -> String {
             .try_into()
             .unwrap()
     };
-    let [r, g, b] = parse(hex);
-    let m = 1.0 - share;
-    format!(
-        "#{:02x}{:02x}{:02x}",
-        (r * m).round().clamp(0.0, 255.0) as u8,
-        (g * m).round().clamp(0.0, 255.0) as u8,
-        (b * m).round().clamp(0.0, 255.0) as u8
-    )
+    let [r1, g1, b1] = parse(a);
+    let [r2, g2, b2] = parse(b);
+    let ch = |x: f32, y: f32| ((x * (1.0 - share) + y * share).round().clamp(0.0, 255.0)) as u8;
+    format!("#{:02x}{:02x}{:02x}", ch(r1, r2), ch(g1, g2), ch(b1, b2))
 }
 
 /// `cubic-bezier(0.1, 0.55, 0.2, 1)` — noor's settle easing.
@@ -187,9 +187,8 @@ pub fn render<'a>(
     let video_h = crate::ctx_video_size(ctx).height;
     // User overrides (params) win over the template's spec constants.
     let ov = overrides::resolve(&doc.params, DEFAULTS);
-    // Style controls data-driven (panel Style → template.json defaults).
+    // Style controls data-driven (panel Style — template.json defaults).
     let st = style::Style::of(&doc.params, "noor");
-    let quote_color = st.color("quote-color", "#9ce874");
     let outline_color = st.color("outline-color", OUTLINE_COLOR);
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32)
         * font_size_scale(segment_char_count(&segment.words));
@@ -259,11 +258,22 @@ pub fn render<'a>(
     let primary = ov.primary.clone();
     let grad_top = mixed_down(&primary, GRADIENT_TOP_SHARE);
     let grad_bottom = mixed_down(&primary, GRADIENT_BOTTOM_SHARE);
+    // Tag gradients (tscaps `.quote` / `.emphasis,.accent,.entity`): tiga
+    // stop dari warna tag — quote dicampur #000, tag dicampur primary.
+    let quote_color = st.color("quote-color", "#9ce874");
+    let tag_color = st.color("tag-color", "#ffffff");
+    let quote_grad_top = mix_colors(&quote_color, "#000000", 0.22);
+    let quote_grad_bottom = mix_colors(&quote_color, "#000000", 0.48);
+    let tag_grad_top = mix_colors(&tag_color, &primary, 0.35);
+    let tag_grad_bottom = mix_colors(&tag_color, &primary, 0.65);
+    let is_tagged =
+        |w: &pipeline::TimedWord| w.has_tag("emphasis") || w.has_tag("accent") || w.has_tag("entity");
 
     // One gradient per line: every word in a line shares its box top and
     // height, so `.word`'s own 180° background lands on the same stops.
+    // Gradien quote/tag hanya saat barisnya membawa kata berkaitan.
     let mut defs_svg = String::new();
-    for (line_idx, _) in lines.iter().enumerate() {
+    for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * line_h;
         let grad_id = format!("noor-grad-{line_idx}");
         defs_svg.push_str(&format!(
@@ -275,6 +285,31 @@ pub fn render<'a>(
              </linearGradient>",
             line_top + line_h
         ));
+        let line_words = &segment.words[start..end];
+        if line_words.iter().any(|w| w.has_tag("quote")) {
+            let id = format!("noor-quote-{line_idx}");
+            defs_svg.push_str(&format!(
+                "<linearGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" \
+                 x1=\"0\" y1=\"{line_top}\" x2=\"0\" y2=\"{}\">\
+                 <stop offset=\"0\" stop-color=\"{quote_grad_top}\"/>\
+                 <stop offset=\"0.25\" stop-color=\"{quote_color}\"/>\
+                 <stop offset=\"1\" stop-color=\"{quote_grad_bottom}\"/>\
+                 </linearGradient>",
+                line_top + line_h
+            ));
+        }
+        if line_words.iter().any(is_tagged) {
+            let id = format!("noor-tag-{line_idx}");
+            defs_svg.push_str(&format!(
+                "<linearGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" \
+                 x1=\"0\" y1=\"{line_top}\" x2=\"0\" y2=\"{}\">\
+                 <stop offset=\"0\" stop-color=\"{tag_grad_top}\"/>\
+                 <stop offset=\"0.25\" stop-color=\"{tag_color}\"/>\
+                 <stop offset=\"1\" stop-color=\"{tag_grad_bottom}\"/>\
+                 </linearGradient>",
+                line_top + line_h
+            ));
+        }
     }
 
     let mut words_svg = format!(
@@ -304,10 +339,12 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
-            // `.quote` words take the whole-word quote colour instead of
-            // the gold gradient (semantik tag quote tscaps).
-            let fill = if style::word_has_quote(&word.display) {
-                quote_color.clone()
+            // Tag gradients (tscaps): quote = gradien quote-color, tag
+            // (emphasis/accent/entity) = gradien tag-color, sisanya gold.
+            let fill = if word.has_tag("quote") {
+                format!("url(#noor-quote-{line_idx})")
+            } else if is_tagged(word) {
+                format!("url(#noor-tag-{line_idx})")
             } else {
                 format!("url(#{grad_id})")
             };

@@ -16,16 +16,152 @@
 /// Semua kata dokumen dalam urutan stream (tokenize + spread per cue),
 /// dengan `index` global terpasang — sumber alamat `element_overrides`
 /// dan daftar kata untuk inspector studio (via bridge).
+///
+/// Tag semantik diresolvakan di sini (urutan = tscaps TaggerRegistry):
+/// quote (span otomatis), number (regex otomatis), role sheet (peak/hook),
+/// lalu tag manual dari `doc.word_tags` per index global.
+///
+/// Index kata GLOBAL: `doc.word_index_bases` (paralel dengan cues, diisi
+/// render_frame untuk doc sementara per-sheet) menjaga alamat kata tetap
+/// identik dengan dokumen penuh — tag manual & `element_overrides` tidak
+/// bergeser. Kosong = kumulatif dari nol (dokumen utuh).
 pub fn doc_words(doc: &crate::CaptionDocument) -> Vec<TimedWord> {
+    let sheet_of_cue: Vec<Option<&str>> =
+        doc.cues.iter().map(|c| c.sheet.as_deref()).collect();
     let mut stream: Vec<TimedWord> = Vec::new();
-    for cue in &doc.cues {
+    let mut cue_word_counts: Vec<usize> = Vec::with_capacity(doc.cues.len());
+    for (cue_i, cue) in doc.cues.iter().enumerate() {
         let tokens = tokenize(&cue.text);
+        let before = stream.len();
         stream.extend(spread(&tokens, cue.start_ms as f32, cue.end_ms as f32));
+        cue_word_counts.push(stream.len() - before);
+        // Role sheet menempel pada semua kata cue itu (tscaps: sheet
+        // ber-role `peak`/`hook` menandai kata-kata yang dinarasikan di
+        // sheet tersebut).
+        if let Some(role) = cue_role(doc, sheet_of_cue[cue_i]) {
+            for word in &mut stream[before..] {
+                push_tag(word, role);
+            }
+        }
     }
-    for (i, word) in stream.iter_mut().enumerate() {
-        word.index = i as u32;
+    apply_quote_tags(&mut stream);
+    apply_number_tags(&mut stream);
+    // Index global per kata: base eksplisit (doc per-sheet) atau kumulatif.
+    let mut cursor = 0usize;
+    let mut running_base = 0u32;
+    for (cue_i, &count) in cue_word_counts.iter().enumerate() {
+        let cue_base = doc
+            .word_index_bases
+            .get(cue_i)
+            .copied()
+            .unwrap_or(running_base);
+        for (local, word) in stream[cursor..cursor + count].iter_mut().enumerate() {
+            word.index = cue_base + local as u32;
+        }
+        cursor += count;
+        running_base = cue_base + count as u32;
+    }
+    for word in &mut stream {
+        if let Some(manual) = doc.word_tags.get(&word.index) {
+            for tag in manual {
+                push_tag(word, tag);
+            }
+        }
     }
     stream
+}
+
+/// Role tag sheet: "peak"/"hook" saja (kosong/unknown = tanpa tag).
+fn cue_role(doc: &crate::CaptionDocument, sheet_id: Option<&str>) -> Option<&'static str> {
+    let id = sheet_id?;
+    let sheet = doc.sheets.iter().find(|s| s.id == id)?;
+    match sheet.role.as_deref() {
+        Some("peak") => Some("peak"),
+        Some("hook") => Some("hook"),
+        _ => None,
+    }
+}
+
+fn push_tag(word: &mut TimedWord, tag: &str) {
+    if !word.tags.iter().any(|t| t == tag) {
+        word.tags.push(tag.to_string());
+    }
+}
+
+/// Port `SpanTagger` (QuoteTaggerDescriptor): kata di dalam rentang
+/// ber-tanda-kutip ganda, kata pembuka/penutup ikut, rentang menembus
+/// batas cue; yang tidak pernah ditutup = tidak ada yang bertag.
+/// Tanda: buka `"` / U+201C / U+00AB, tutup U+201D / U+00BB / `"`.
+/// Kutip tunggal sengaja diabaikan (bentrok dengan apostrof).
+fn apply_quote_tags(stream: &mut [TimedWord]) {
+    let mut span: Vec<usize> = Vec::new();
+    let mut inside = false;
+    for i in 0..stream.len() {
+        let opens = stream[i]
+            .text
+            .chars()
+            .next()
+            .is_some_and(|c| matches!(c, '"' | '\u{201C}' | '\u{00AB}'));
+        let closes = stream[i]
+            .text
+            .chars()
+            .last()
+            .is_some_and(|c| matches!(c, '"' | '\u{201D}' | '\u{00BB}'));
+        if inside {
+            span.push(i);
+            if closes {
+                for &j in &span {
+                    push_tag(&mut stream[j], "quote");
+                }
+                span.clear();
+                inside = false;
+            }
+        } else if opens {
+            span.push(i);
+            inside = true;
+            if closes {
+                for &j in &span {
+                    push_tag(&mut stream[j], "quote");
+                }
+                span.clear();
+                inside = false;
+            }
+        }
+    }
+}
+
+/// Port `NumberTaggerDescriptor` (RegexTagger `^\d+([.,]\d+)*$`): kata
+/// murni numerik — bulat/desimal, dengan `.`/`,` sebagai pemisah ribuan/
+/// desimal (mis. "2024", "1.5", "1.000"). Campuran alfanumerik ("v3",
+/// "10x") ditolak.
+fn apply_number_tags(stream: &mut [TimedWord]) {
+    for word in stream {
+        if is_pure_number(&word.text) {
+            push_tag(word, "number");
+        }
+    }
+}
+
+fn is_pure_number(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    let mut i = 0;
+    let digits = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return false;
+    }
+    i += digits;
+    while i < bytes.len() {
+        if bytes[i] != b',' && bytes[i] != b'.' {
+            return false;
+        }
+        i += 1;
+        let group = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if group == 0 {
+            return false;
+        }
+        i += group;
+    }
+    true
 }
 
 /// One whitespace-delimited token with its estimated narration window.
@@ -41,6 +177,11 @@ pub struct TimedWord {
     /// Index kata global (urutan dokumen, stream sebelum effects) —
     /// alamat `element_overrides` (inspector per-kata).
     pub index: u32,
+    /// Tag semantik (tscaps vocabulary): "quote"/"number" otomatis,
+    /// "peak"/"hook" dari role sheet, sisanya manual (doc.word_tags).
+    /// Terurut? Tidak — urutan penyisipan (span, number, role, manual),
+    /// unik. Konsumen pakai `has_tag`.
+    pub tags: Vec<String>,
 }
 
 impl TimedWord {
@@ -52,7 +193,13 @@ impl TimedWord {
             start_ms,
             end_ms,
             index: 0,
+            tags: Vec::new(),
         }
+    }
+
+    /// Kata membawa tag bernama itu (tag-* styling template).
+    pub fn has_tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|t| t == tag)
     }
 }
 
@@ -393,7 +540,26 @@ fn doc_fingerprint(doc: &crate::CaptionDocument) -> u64 {
         mix(&cue.start_ms.to_le_bytes());
         mix(&cue.end_ms.to_le_bytes());
         mix(cue.text.as_bytes());
+        mix(cue.sheet.as_deref().unwrap_or("").as_bytes());
         mix(&[0xff]);
+    }
+    // Tag semantik & alamat kata ikut ter-cache (WindowedSegment membawa
+    // TimedWord.tags + .index) — role sheet, tag manual, dan base index
+    // wajib memvalidasi cache.
+    for sheet in &doc.sheets {
+        mix(sheet.id.as_bytes());
+        mix(sheet.role.as_deref().unwrap_or("").as_bytes());
+        mix(&[0xfe]);
+    }
+    for base in &doc.word_index_bases {
+        mix(&base.to_le_bytes());
+    }
+    for (index, tags) in &doc.word_tags {
+        mix(&index.to_le_bytes());
+        for tag in tags {
+            mix(tag.as_bytes());
+            mix(&[0xfd]);
+        }
     }
     h
 }

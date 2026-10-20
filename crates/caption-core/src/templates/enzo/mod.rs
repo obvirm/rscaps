@@ -28,6 +28,7 @@ const MAX_LINES: usize = 3; // lineSplitter.maxLines
 const MAX_WIDTH_RATIO: f32 = 0.65; // lineSplitter.maxWidthRatio
 const FADE_DURATION_S: f32 = 0.16; // fade-in($duration: 0.16s)
 const PRIMARY: &str = "#ffffff"; // --tscaps-primary-color default
+const TAG_COLOR: &str = "#ffffff"; // --tscaps-tag-color default
 // text-shadow: 0 -0.4em 0.8em var(--tscaps-shadow-color, #333333)
 const SHADOW_DY_EM: f32 = -0.4;
 const SHADOW_BLUR_EM: f32 = 0.8;
@@ -154,20 +155,29 @@ pub fn render<'a>(
     let half_leading = (line_h - (ascent + descent)) / 2.0;
 
     // Shadow geometry (px from em ratios): the shade floats *above* the
-    // glyphs — dy is negative on purpose.
+    // glyphs - dy is negative on purpose.
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
     let stroke_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
+    let tag_color = st.color("tag-color", TAG_COLOR);
+    // Tag shadow (scss `.emphasis,.accent,.entity`): glow ketat warna tag +
+    // dua lapis shade warna shadow-color. Ukuran font-scale/font-family
+    // tag-nya Tier 2 (lihat catatan di atas).
+    let tag_glow_std = 0.087 * fs / 2.0;
+    let tag_haze_std = 0.368 * fs / 2.0;
+    let tag_shade_dy = -0.4 * fs;
+    let tag_shade_std = 0.8 * fs / 2.0;
 
     // Each word fades in on its own narration clock.
     let fade = recipes::FadeIn::with(0.0, ov.duration_or(FADE_DURATION_S));
 
-    let mut words_svg = format!(
-        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\" filter=\"url(#enzo-shadow)\">",
+    let group_attrs = format!(
+        "font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" letter-spacing=\"{ls_px}\"",
         font = ov.font_family,
         weight = ov.font_weight,
     );
+    let mut base_svg = String::new();
+    let mut tag_svg = String::new();
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * line_h;
         let baseline = line_top + half_leading + ascent;
@@ -213,15 +223,26 @@ pub fn render<'a>(
             } else {
                 String::new()
             };
-            words_svg.push_str(&format!(
+            let tagged =
+                word.has_tag("emphasis") || word.has_tag("accent") || word.has_tag("entity");
+            let word_svg = format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
                  stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\" opacity=\"{opacity}\"{wo}{wo_transform}>{text}</text>",
-                primary = ov.primary.as_str(),
-            ));
+                primary = if tagged { tag_color.as_str() } else { ov.primary.as_str() },
+            );
+            if tagged {
+                tag_svg.push_str(&word_svg);
+            } else {
+                base_svg.push_str(&word_svg);
+            }
         }
     }
-    words_svg.push_str("</g>");
+    let mut words_svg = format!(
+        "<g {attrs} filter=\"url(#enzo-shadow)\">{base_svg}</g>\
+         <g {attrs} filter=\"url(#enzo-tag-shadow)\">{tag_svg}</g>",
+        attrs = group_attrs,
+    );
 
     // User rotation wraps the block about its centre.
     if ov.angle_deg.abs() > f32::EPSILON {
@@ -245,6 +266,11 @@ pub fn render<'a>(
             <defs>
                 <filter id="enzo-shadow" x="-100%" y="-300%" width="300%" height="500%">
                     <feDropShadow dx={0.0} dy={shadow_dy} stdDeviation={shadow_std} flood-color={SHADOW_COLOR} flood-opacity={1.0}/>
+                </filter>
+                <filter id="enzo-tag-shadow" x="-100%" y="-300%" width="300%" height="500%">
+                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={tag_glow_std} flood-color={tag_color.as_str()} flood-opacity={1.0} result="t1"/>
+                    <feDropShadow in="t1" dx={0.0} dy={0.0} stdDeviation={tag_haze_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="t2"/>
+                    <feDropShadow in="t2" dx={0.0} dy={tag_shade_dy} stdDeviation={tag_shade_std} flood-color={SHADOW_COLOR} flood-opacity={1.0}/>
                 </filter>
             </defs>
             {words_svg}

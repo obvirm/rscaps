@@ -74,6 +74,17 @@
             <option value={t.id}>{t.label}</option>
           {/each}
         </select>
+        <select
+          class="role"
+          value={sheet.role ?? ""}
+          onchange={(e) => store.setSheetRole(sheet.id, e.currentTarget.value)}
+          title="Role sheet — kata di cue sheet ini ikut bertag (kel peak, dll)"
+          aria-label="Sheet role"
+        >
+          <option value="">- role -</option>
+          <option value="peak">Peak</option>
+          <option value="hook">Hook</option>
+        </select>
         <span class="count">{store.cues.filter((c) => c.sheet === sheet.id).length}</span>
         <button class="icon-btn" onclick={() => store.resetSheet(sheet.id)} title="Reset ke inheritance">
           <RotateCcw size={13} />
@@ -199,6 +210,16 @@
   .tpl {
     flex: none;
     max-width: 110px;
+    background: rgb(var(--bg-2));
+    border: 1px solid rgb(var(--border));
+    border-radius: var(--r-xs);
+    color: rgb(var(--fg-1));
+    font-size: 11px;
+    padding: 2px 4px;
+  }
+  .role {
+    flex: none;
+    max-width: 74px;
     background: rgb(var(--bg-2));
     border: 1px solid rgb(var(--border));
     border-radius: var(--r-xs);

@@ -38,6 +38,8 @@ const SHADE_DY_EM: f32 = 0.084;
 const SHADE_BLUR_EM: f32 = 0.238;
 const SHADE_ALPHA: f32 = 0.5;
 const SHADOW_COLOR: &str = "#000000"; // --tscaps-shadow-color default
+const TAG_COLOR: &str = "#ffffff"; // --tscaps-tag-color default
+const TAG_FONT_SCALE: f32 = 1.4; // --tscaps-tag-font-scale default (shadow sizes divide by it)
 // -webkit-text-stroke: var(--tscaps-outline-thickness, 0em) $outline-color
 const OUTLINE_THICKNESS_EM: f32 = 0.0;
 const OUTLINE_COLOR: &str = "#000000"; // --tscaps-outline-color default
@@ -166,17 +168,26 @@ pub fn render<'a>(
     let shade_dx = SHADE_DX_EM * fs;
     let shade_dy = SHADE_DY_EM * fs;
     let shade_std = SHADE_BLUR_EM * fs / 2.0;
+    let tag_color = st.color("tag-color", TAG_COLOR);
+    // Tag shadow blur dibagi scale (scss `calc(x / var(--tag-font-scale))`);
+    // scale font-nya sendiri belum diport (lihat catatan Tier 2 di mod docs).
+    let tag_bloom_std = bloom_std / TAG_FONT_SCALE;
+    let tag_haze_std = haze_std / TAG_FONT_SCALE;
     let stroke_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
 
     // Each word fades in on its own narration clock.
     let fade = recipes::FadeIn::with(0.0, ov.duration_or(FADE_DURATION_S));
 
-    let mut words_svg = format!(
-        "<g font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\" filter=\"url(#sara-shadow)\">",
+    // Tag `.emphasis/.accent/.entity` tscaps: kata ber-tag dapat warna +
+    // glow tag-color sendiri (menggantikan shadow dasar). Dua grup filter
+    // terpisah - tanpa filter per-kata, tanpa nested glow.
+    let group_attrs = format!(
+        "font-family=\"{font}\" font-weight=\"{weight}\" font-size=\"{fs}\" letter-spacing=\"{ls_px}\"",
         font = ov.font_family,
         weight = ov.font_weight,
     );
+    let mut base_svg = String::new();
+    let mut tag_svg = String::new();
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top = block_top + line_idx as f32 * line_h;
         let baseline = line_top + half_leading + ascent;
@@ -220,15 +231,26 @@ pub fn render<'a>(
             let wo_transform = element_css::word_svg_transform(&doc.params, word.index, &wo_ctx)
                 .map(|t| format!(" transform=\"{t}\""))
                 .unwrap_or_default();
-            words_svg.push_str(&format!(
+            let tagged =
+                word.has_tag("emphasis") || word.has_tag("accent") || word.has_tag("entity");
+            let word_svg = format!(
                 "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
                  stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\" opacity=\"{opacity}\"{wo}{wo_transform}>{text}</text>",
-                fill = ov.primary,
-            ));
+                fill = if tagged { tag_color.as_str() } else { ov.primary.as_str() },
+            );
+            if tagged {
+                tag_svg.push_str(&word_svg);
+            } else {
+                base_svg.push_str(&word_svg);
+            }
         }
     }
-    words_svg.push_str("</g>");
+    let mut words_svg = format!(
+        "<g {attrs} filter=\"url(#sara-shadow)\">{base_svg}</g>\
+         <g {attrs} filter=\"url(#sara-tag-shadow)\">{tag_svg}</g>",
+        attrs = group_attrs,
+    );
 
     // User rotation wraps the caption around the block centre.
     if ov.angle_deg.abs() > f32::EPSILON {
@@ -253,6 +275,11 @@ pub fn render<'a>(
                 <filter id="sara-shadow" x="-30%" y="-60%" width="180%" height="260%">
                     <feDropShadow dx={0.0} dy={0.0} stdDeviation={bloom_std} flood-color={ov.primary.as_str()} flood-opacity={1.0} result="s1"/>
                     <feDropShadow in="s1" dx={0.0} dy={0.0} stdDeviation={haze_std} flood-color={HAZE_COLOR} flood-opacity={1.0} result="s2"/>
+                    <feDropShadow in="s2" dx={shade_dx} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={SHADE_ALPHA}/>
+                </filter>
+                <filter id="sara-tag-shadow" x="-30%" y="-60%" width="180%" height="260%">
+                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={tag_bloom_std} flood-color={tag_color.as_str()} flood-opacity={1.0} result="s1"/>
+                    <feDropShadow in="s1" dx={0.0} dy={0.0} stdDeviation={tag_haze_std} flood-color={HAZE_COLOR} flood-opacity={1.0} result="s2"/>
                     <feDropShadow in="s2" dx={shade_dx} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={SHADE_ALPHA}/>
                 </filter>
             </defs>

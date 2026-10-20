@@ -247,7 +247,7 @@ pub fn render<'a>(
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
             // Tag `.quote` tscaps: kata ber-kutip → warna quote (+ italic).
-            let is_quote = style::word_has_quote(&word.display);
+            let is_quote = word.has_tag("quote");
             let fill = if is_quote {
                 st.color("quote-color", "#e6d647")
             } else {

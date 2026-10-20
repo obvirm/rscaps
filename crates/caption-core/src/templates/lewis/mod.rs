@@ -34,7 +34,9 @@ const MAX_WIDTH_RATIO: f32 = 0.72; // balanced-pixel-width default ratio
 const PRIMARY: &str = "#ffffff"; // --tscaps-primary-color default
 const OUTLINE_THICKNESS_EM: f32 = 0.1; // --tscaps-outline-thickness default
 const OUTLINE_COLOR: &str = "#000000"; // --tscaps-outline-color default
-const SHADOW_COLOR: &str = "#000000"; // --tscaps-shadow-color default
+const SHADOW_COLOR: &str = "#000000";
+const TAG_COLOR: &str = "#3be3f7"; // --tscaps-tag-color default
+const TAG_LIFT_COLOR: &str = "#52f73c"; // --tscaps-tag-lift-color default // --tscaps-shadow-color default
 // @mixin lit-from-behind($halo): halo, shade, halo, shade — CSS order,
 // each later link painting behind the previous.
 const HALO_BLUR_EM: f32 = 0.127; // 0 0 0.127em $halo
@@ -192,6 +194,10 @@ pub fn render<'a>(
     let halo_std = HALO_BLUR_EM * fs / 2.0;
     let shade_dy = SHADE_DY_EM * fs;
     let shade_std = SHADE_BLUR_EM * fs / 2.0;
+    // Tag variants (scss `.emphasis,.entity` / `.accent`): halo lit dari
+    // warna tag, shade tetap shadow-color.
+    let tag_color = st.color("tag-color", TAG_COLOR);
+    let lift_color = st.color("tag-lift-color", TAG_LIFT_COLOR);
 
     let mut words_svg = format!(
         "<g transform=\"translate({center_x} {block_cy}) scale({scale}) \
@@ -237,11 +243,19 @@ pub fn render<'a>(
             let wo_transform = wo_t
                 .map(|t| format!(" transform=\"{t}\""))
                 .unwrap_or_default();
+            let tagged = word.has_tag("emphasis") || word.has_tag("entity");
+            let lifted = word.has_tag("accent");
+            let (fill, filter_id) = if tagged {
+                (tag_color.as_str(), "lewis-tag")
+            } else if lifted {
+                (lift_color.as_str(), "lewis-lift")
+            } else {
+                (ov.primary.as_str(), "lewis-lit")
+            };
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
                  stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
-                 paint-order=\"stroke\" filter=\"url(#lewis-lit)\"{wo}{wo_transform}>{text}</text>",
-                primary = ov.primary.as_str(),
+                 paint-order=\"stroke\" filter=\"url(#{filter_id})\"{wo}{wo_transform}>{text}</text>",
             ));
         }
     }
@@ -271,6 +285,18 @@ pub fn render<'a>(
                     <feDropShadow dx={0.0} dy={0.0} stdDeviation={halo_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="h1"/>
                     <feDropShadow in="h1" dx={0.0} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="s1"/>
                     <feDropShadow in="s1" dx={0.0} dy={0.0} stdDeviation={halo_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="h2"/>
+                    <feDropShadow in="h2" dx={0.0} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={1.0}/>
+                </filter>
+                <filter id="lewis-tag" x="-50%" y="-60%" width="200%" height="260%">
+                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={halo_std} flood-color={tag_color.as_str()} flood-opacity={1.0} result="h1"/>
+                    <feDropShadow in="h1" dx={0.0} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="s1"/>
+                    <feDropShadow in="s1" dx={0.0} dy={0.0} stdDeviation={halo_std} flood-color={tag_color.as_str()} flood-opacity={1.0} result="h2"/>
+                    <feDropShadow in="h2" dx={0.0} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={1.0}/>
+                </filter>
+                <filter id="lewis-lift" x="-50%" y="-60%" width="200%" height="260%">
+                    <feDropShadow dx={0.0} dy={0.0} stdDeviation={halo_std} flood-color={lift_color.as_str()} flood-opacity={1.0} result="h1"/>
+                    <feDropShadow in="h1" dx={0.0} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={1.0} result="s1"/>
+                    <feDropShadow in="s1" dx={0.0} dy={0.0} stdDeviation={halo_std} flood-color={lift_color.as_str()} flood-opacity={1.0} result="h2"/>
                     <feDropShadow in="h2" dx={0.0} dy={shade_dy} stdDeviation={shade_std} flood-color={SHADOW_COLOR} flood-opacity={1.0}/>
                 </filter>
             </defs>
