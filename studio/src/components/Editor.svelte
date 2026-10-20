@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import CommandBar from "./CommandBar.svelte";
   import PreviewStage from "./PreviewStage.svelte";
+  import Timeline from "./Timeline.svelte";
   import Sidebar from "./Sidebar.svelte";
   import { store } from "../lib/state.svelte";
   import { router } from "../lib/router.svelte";
@@ -88,6 +89,7 @@
     >
       <main class="center-col">
         <PreviewStage />
+        <Timeline />
       </main>
 
       <!-- svelte-ignore a11y_no_static_element_interactions -->
