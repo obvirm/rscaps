@@ -88,6 +88,15 @@ try {
 
   await shot(out);
 
+  if (tabs.includes("transcript-word") || tabs.includes("words")) {
+    step("open transcript word view");
+    await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll(".view-toggle button"));
+      const w = btns.find((b) => b.textContent?.trim() === "Word");
+      if (w) w.click();
+    });
+    await new Promise((r) => setTimeout(r, 400));
+  }
   for (const tab of tabs) {
     const ok = await page.evaluate((tab) => {
       const btns = [...document.querySelectorAll(".rail-tab")];
@@ -95,6 +104,17 @@ try {
       if (b) b.click();
       return !!b;
     }, tab.toLowerCase());
+    if (tabs.includes("words")) {
+      await sleep(400);
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll(".view-toggle button"));
+        const w = btns.find((b) => b.textContent?.trim() === "Word");
+        if (w) w.click();
+      });
+      await sleep(600);
+      await shot(out.replace(/\.png$/, "_words.png"));
+      continue;
+    }
     if (!ok) {
       err(`tab not found: ${tab}`);
       continue;
