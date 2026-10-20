@@ -86,6 +86,20 @@ try {
     console.log("saved", path);
   };
 
+  const frameArg = process.argv.find((a) => a.startsWith("--frame="));
+  if (frameArg) {
+    const f = frameArg.slice(8);
+    step(`seek frame ${f}`);
+    await page.evaluate((f) => {
+      const el = document.querySelector('.frame-field input[type="number"]');
+      if (!el) throw new Error("frame input not found");
+      el.value = f;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }, f);
+    await sleep(1200);
+  }
+
   await shot(out);
 
   if (tabs.includes("transcript-word") || tabs.includes("words")) {

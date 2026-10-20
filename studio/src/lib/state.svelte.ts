@@ -97,6 +97,8 @@ class StudioState {
   svg = $state("");
   fontFaceCss = $state("");
   bootError = $state<string | null>(null);
+  /** Engine WASM siap (bootWasm selesai) - gerbang mode preview=export. */
+  wasmReady = $state(false);
   /** Template catalog from caption-core (populated on wasm boot). */
   templates = $state<TemplateEntry[]>([]);
   /** Canonical default params (sentinels for template-wins resolution). */
@@ -196,6 +198,7 @@ class StudioState {
       this.setStatus("initializing wasm…");
       const loaded = await loadBridge();
       this.wasm = loaded;
+      this.wasmReady = true;
       this.fontFaceCss = loaded.fontFaceCss;
       this.templates = loaded.templateCatalog;
       this.defaultParams = loaded.defaultDocument.params;

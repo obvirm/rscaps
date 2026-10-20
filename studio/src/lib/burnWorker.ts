@@ -24,12 +24,16 @@ interface BurnRequest {
   bitmap?: ImageBitmap | null;
   /** Fallback buffer mentah (jalur inline-ish). */
   buf?: ArrayBuffer;
+  /** Mode preview: respons = ImageBitmap komposit (bukan VideoFrame). */
+  preview?: boolean;
 }
 
 interface BurnResponse {
   idx: number;
   frame?: VideoFrame | null;
   buf: ArrayBuffer | null;
+  /** Mode preview: frame komposit sebagai ImageBitmap (transferable). */
+  bitmap?: ImageBitmap | null;
   error?: string;
 }
 
@@ -130,7 +134,7 @@ self.addEventListener("unhandledrejection", (ev) => {
 });
 
 self.onmessage = async (e: MessageEvent<BurnRequest>) => {
-  const { idx, svg, blend, width, height, t, dur, videoFrame, bitmap, buf } = e.data;
+  const { idx, svg, blend, width, height, t, dur, videoFrame, bitmap, buf, preview } = e.data;
   try {
     const ts = Math.round(t * 1e6);
     const durUs = Math.round(dur * 1e6) || undefined;
@@ -197,6 +201,14 @@ self.onmessage = async (e: MessageEvent<BurnRequest>) => {
         ctx.globalCompositeOperation = "difference";
         ctx.drawImage(blendBmp, 0, 0);
         ctx.globalCompositeOperation = "source-over";
+      }
+      // Mode preview: hasil komposit = ImageBitmap (transfer balik), bukan
+      // VideoFrame. Jalur raster+komposit identik dengan export.
+      if (preview) {
+        const bmp = await createImageBitmap(ctx.canvas);
+        const res: BurnResponse = { idx, frame: null, buf: null, bitmap: bmp };
+        (self as unknown as Worker).postMessage(res, [bmp]);
+        return;
       }
       const out = new VideoFrame(ctx.canvas as OffscreenCanvas, {
         timestamp: ts,
