@@ -29,7 +29,7 @@
     "active": true,
     "targets": "all",
     "shortDescription": "Faster, headless alternative to tscaps",
-    "longDescription": "Browser-free animated caption rendering: a Rust engine (caption-core) emits one SVG per frame for the CLI, the web studio, and the desktop shell. Clean-room re-solve of the tscaps pipeline without the browser in the render path.",
+    "longDescription": "Browser-free animated caption rendering: a Rust engine (caption-core) emits one SVG per frame for the CLI, the web studio, and the desktop shell. Clean-room re-solve of the tscaps pipeline without the browser in the render path. Burns a 4-minute 1080p video in ~29 seconds headless, ~34s from the web export.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

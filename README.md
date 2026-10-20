@@ -1,7 +1,7 @@
 # rscaps
 
 > **The faster alternative to tscaps — headless, browser-free caption rendering.**
-> Animated, burned-in subtitles rendered by a Rust engine that emits SVG. No DOM per word, no CSS animation contract, no browser in the render path — and measured faster than tscaps at the same workload.
+> Animated, burned-in subtitles rendered by a Rust engine that emits SVG. No DOM per word, no CSS animation contract, no browser in the render path — measured 1.5x faster than tscaps on the web export - the headless CLI burns a 4-minute 1080p30 video in ~29 seconds.
 
 rscaps is a clean-room alternative to the caption pipeline of [tscaps](https://github.com/francozanardi/tscaps). tscaps styles captions as HTML + CSS and lets the **browser** rasterize the DOM at every frame. rscaps takes the same document/template idea and re-solves it as a **pure rendering engine**: one Rust string of SVG per frame, produced by `caption-core`, identical for preview and export.
 
@@ -33,18 +33,39 @@ One engine, one output format (SVG), one place where caption logic lives. Previe
 
 Same machine, same clip, measured back-to-back (4-minute 1080p30 burn-in, 7200 frames, 120 cues; 6-core/12-thread desktop + NVIDIA GPU). Reproduce with `scripts/bench_web_4min.mjs`, `scripts/tmp_tscaps_bench.mjs`, and `scripts/bench_cli_matrix.mjs`.
 
-| Pipeline | Wall | Notes |
+### Web export vs tscaps
+
+Export click → completed export, measured back-to-back on the same day and load:
+
+| Pipeline | Wall | Speedup |
 |---|---|---|
-| **rscaps web export** | **36.9s** | 6 GPU workers + pipelined encoder, zero pixel round-trips |
-| tscaps (web) | 48.9s | measured back-to-back under identical load; serial main-thread pipeline |
-| **rscaps CLI** (`--engine skia --hw-encode`) | **27.6s** | band crop + per-SVG raster cache + K-slice ffmpeg (was 65.3s before optimization) |
+| **rscaps web export** | **33.8s** | **1.5×** |
+| tscaps (web) | 51.0s | - |
+
+### CLI engine matrix
+
+Every engine runs through the same slice architecture (band crop + per-SVG raster cache + double-buffer + K parallel ffmpeg processes). First column = before the optimization pass.
+
+| Engine + encode | Before | Now | Total speedup |
+|---|---|---|---|
+| `skia` + NVENC | 65.3s | **29.4s** | 2.2× |
+| `cpu` + NVENC | 328.8s | **28.8s** | **11.4×** |
+| `cpu` + NVENC + CUDA decode | 321.9s | **30.6s** | 10.5× |
+| `fframes` + NVENC + CUDA | 168.5s | **82.2s** | 2.1× |
+| `cpu` + x264 | 546.3s | **155.2s** | 3.5× |
+| `cpu` + x264 + CUDA decode | 519.2s | **148.9s** | 3.5× |
+| `skia` + x264 | 193.4s | **151.4s** | 1.3× |
+| `fframes` + x264 | 301.6s | **216.5s** | 1.4× |
+
+Software x264 sits on encoder physics (`medium` on noisy 1080p ≈ 46fps aggregate across 12 threads). `--preset fast` trades ~10% larger files for 1.2× (130s); `veryfast` reaches 69.5s at ~30% smaller files with a visible quality drop. The benchmark clip is noise-stressed - real-world content encodes 3-5× faster.
 
 Why it wins:
 
 - **Zero pixel transport on web**: the video frame stays on the GPU, captions composite in workers, and the encoder consumes GPU frames directly. tscaps snapshots a canvas per frame through a serial main-thread loop.
-- **The encoder is the only wall**: decode, caption raster, and muxing overlap fully behind the hardware encoder's pace (`encOut` diagnostics in the export profiler).
+- **The encoder is the only wall**: decode, caption raster, and muxing overlap fully behind the hardware encoder's pace (`encOut` diagnostics in the export profiler). The NVENC CLI paths land on the same ~29-31s floor.
 - **CLI band crop**: captions occupy a fraction of the frame, so only that vertical band is rasterized and piped (~2.7× less blur work and pipe bytes), with a sampled-bbox fallback to full-frame when captions spread.
 - **Per-SVG raster cache**: static frames inside one cue produce identical SVGs — a ~75% hit rate skips raster and GPU readback entirely.
+- **Tight filter regions + deduplicated shadow layers**: caption SVGs carry only the blur bleed they need (3σ + offset) and identical stacked shadow layers collapse into one blur behind an exact alpha-transfer curve — the same pixels for a fraction of the filter work (worth ~8× on CPU raster, 2× on the fframes pipeline).
 
 Export features on the web path: codec fallback chain (AVC → HEVC → AV1, hardware-accelerated), an explicit bitrate table (7/14/21/46 Mbps baselines at 720p/1080p/1440p/4K), `contentHint: 'text'`, and audio interleaved with the video drain (no separate audio phase).
 
@@ -110,8 +131,8 @@ cargo run -p rscaps-cli -- render --video in.mp4 --srt subs.srt \
 Engines and encode options:
 
 - `--engine skia` — **fastest headless path**: 12 GPU raster lanes, per-SVG raster cache, double-buffered pipe, and 3 parallel ffmpeg processes over a band-cropped caption transport, joined with `concat -c copy`. Pair with `--hw-encode` for hardware encode.
-- `--engine fframes` — full fframes pipeline (raster + encode + audio mux in Rust). Long videos are rendered in chunks (`frame_range` + `ffmpeg concat`), so there is no length cap. Canvas follows the real video size (portrait works).
-- `--engine cpu` (default) — classic overlay path: `svgr` raster → RGBA pipe → `ffmpeg` overlay.
+- `--engine fframes` — full fframes pipeline (raster + encode + audio mux in Rust). Long videos are rendered in pipelined chunks - chunk N+1 decodes on another thread while chunk N renders - then joined with `ffmpeg concat`, so there is no length cap. Canvas follows the real video size (portrait works).
+- `--engine cpu` - same slice architecture as `skia` with CPU (usvgr) raster lanes - the no-GPU fallback, ~29s for a 4-minute 1080p burn.
 - `--hw-encode` + `--hw-encoder h264_nvenc|h264_qsv|h264_vaapi|h264_videotoolbox|h264_amf` — GPU encode (falls back to `libx264` when the encoder is unavailable).
 - `--hwaccel <auto|cuda|d3d11va|vaapi|qsv>` — decode with an FFmpeg hardware accel.
 - `--crf`, `--preset`, `--ffmpeg-dir` — encoding controls (FFmpeg/ffprobe located via flag, `RSCAPS_FFMPEG_DIR`, or `PATH`).
