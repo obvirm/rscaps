@@ -57,6 +57,12 @@ export interface BurnInOptions {
   legacyCanvas?: boolean;
   /** @font-face CSS untuk inline ke SVG (dibutuhkan jalur legacy). */
   fontFaceCss?: string;
+  /** Layer kaca (selene): bila wanted, tiap frame di-gambar ke kanvas
+   * grab lalu JPEG-nya disuplai SEBELUM renderCaption. */
+  frameImage?: {
+    wanted: boolean;
+    supply: (jpeg: Uint8Array) => void;
+  };
 }
 
 const QUALITY: Record<ExportQuality, Quality> = {
@@ -306,6 +312,11 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
   const decodeCanvas = new OffscreenCanvas(width, height);
   const dctx = decodeCanvas.getContext("2d");
   if (!dctx) throw new Error("could not create 2D decode canvas context");
+  // Kanvas grab terpisah untuk layer kaca (JPEG per frame) — tak mengganggu
+  // kanvas decode/encode.
+  const grabCanvas = new OffscreenCanvas(width, height);
+  const grabCtx = grabCanvas.getContext("2d", { willReadFrequently: true });
+  if (!grabCtx) throw new Error("could not create 2d grab canvas context");
 
   type Inflight = {
     t: number;
@@ -474,6 +485,12 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
         const dur = sample.duration ?? 1 / opts.fps;
         const rotation = sample.rotation;
         const flip = sample.flip;
+
+        if (opts.frameImage?.wanted) {
+          sample.draw(grabCtx, 0, 0, width, height);
+          const grabBlob = await grabCanvas.convertToBlob({ type: "image/jpeg", quality: 0.75 });
+          opts.frameImage.supply(new Uint8Array(await grabBlob.arrayBuffer()));
+        }
 
         const capStart = performance.now();
         const cap = await opts.renderCaption(Math.max(0, Math.round(t * opts.fps)));

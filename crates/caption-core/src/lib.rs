@@ -3,7 +3,7 @@ use fframes::{
     Transform, Video,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 pub mod srt;
 pub mod templates;
@@ -357,6 +357,47 @@ impl Default for CaptionDocument {
 }
 
 static DOC: OnceLock<RwLock<CaptionDocument>> = OnceLock::new();
+
+/// Frame video saat ini (JPEG bytes, penuh ukuran video) — disetel host
+/// (JS studio/worker) sebelum `render_frame` saat template memakai layer
+/// kaca (selene). None = template merender plate tanpa frame.
+static FRAME_IMAGE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Setel frame video untuk layer kaca (JPEG penuh ukuran video). Dipanggil
+/// host per frame SEBELUM `render_frame`.
+pub fn set_frame_image(bytes: &[u8]) {
+    *FRAME_IMAGE.lock().unwrap_or_else(|p| p.into_inner()) = Some(bytes.to_vec());
+}
+
+/// Buang frame yang tersimpan (host memanggil saat tak dipakai lagi).
+pub fn clear_frame_image() {
+    *FRAME_IMAGE.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+/// Salinan frame terakhir (untuk emit template); None bila belum disetel.
+pub fn frame_image() -> Option<Vec<u8>> {
+    FRAME_IMAGE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// Base64 standar (alphabet + padding) — untuk `href="data:image/jpeg;base64,…"`
+/// di layer kaca. Kecil dan tanpa dependensi; input beberapa ratus KB per
+/// frame, ini bukan jalur kritis.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
 
 // BreakLinesOpts needs &'a str (tied to the frame context lifetime), so the
 // dynamic family/color strings are leaked once per document update instead of

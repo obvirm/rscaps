@@ -27,6 +27,19 @@ pub fn list_words_json() -> String {
     caption_core::list_words_json()
 }
 
+/// Setel frame video (JPEG penuh ukuran video) untuk layer kaca selene —
+/// panggil per frame SEBELUM `render_frame` saat template memakainya.
+#[wasm_bindgen]
+pub fn set_frame_image(bytes: &[u8]) {
+    caption_core::set_frame_image(bytes);
+}
+
+/// Buang frame tersimpan (template tak lagi memakai layer kaca).
+#[wasm_bindgen]
+pub fn clear_frame_image() {
+    caption_core::clear_frame_image();
+}
+
 /// Params JSON → CSS subset (panel Code settings).
 #[wasm_bindgen]
 pub fn params_to_css(params_json: &str) -> Result<String, JsValue> {

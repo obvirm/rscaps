@@ -661,6 +661,33 @@ class StudioState {
     return splitSvgLayers(raw);
   }
 
+  // �� Layer kaca (selene) — frame video ter-embed ke SVG �������������������
+
+  /** Template aktif memakai layer kaca frame video? */
+  get usesFrameImage(): boolean {
+    const t = (tpl: string | undefined) => tpl === "selene";
+    return (
+      t(this.doc?.template) || (this.doc?.sheets ?? []).some((s) => t(s.template))
+    );
+  }
+
+  /** Encode bitmap → JPEG → set_frame_image (panggil SEBELUM render frame). */
+  async supplyFrameImage(bmp: ImageBitmap): Promise<boolean> {
+    if (!this.wasm || !this.usesFrameImage) return false;
+    const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return false;
+    ctx.drawImage(bmp, 0, 0);
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.75 });
+    this.wasm.setFrameImage(new Uint8Array(await blob.arrayBuffer()));
+    return true;
+  }
+
+  clearFrameImage(): void {
+    if (!this.wasm || this.usesFrameImage) return;
+    this.wasm.clearFrameImage();
+  }
+
   async renderRaster(): Promise<void> {
     const t0 = performance.now();
     const canvas = await this.renderToCanvas(this.frame, 1920);
@@ -1499,6 +1526,10 @@ class StudioState {
         // A/B paritas: ?exportmode=legacy → raster canvas browser (jalur lama).
         legacyCanvas: new URLSearchParams(location.search).get("exportmode") === "legacy",
         fontFaceCss: this.fontFaceCss,
+        frameImage: {
+          wanted: this.usesFrameImage,
+          supply: (bytes) => this.wasm?.setFrameImage(bytes),
+        },
       });
       const ext = opts.format === "webm" ? "webm" : "mp4";
       if (import.meta.env.DEV && this.rfN > 0) {

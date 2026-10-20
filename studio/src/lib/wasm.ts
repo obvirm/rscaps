@@ -16,7 +16,10 @@ function bytesToBase64(bytes: Uint8Array): string {
 export interface LoadedBridge {
   bridge: WasmBridge;
   setDocumentJson: (json: string) => void;
-  /** Daftar kata dokumen aktif (JSON `[WordInfo, …]`) — element inspector. */
+  /** Frame video (JPEG penuh) untuk layer kaca selene — per frame. */
+  setFrameImage: (bytes: Uint8Array) => void;
+  clearFrameImage: () => void;
+  /** Daftar kata dokumen aktif (JSON `[WordInfo, .]`) - element inspector. */
   listWords: () => string;
   parseSubtitle: (text: string, format: string) => string;
   formatSubtitle: (cuesJson: string, format: string) => string;
@@ -40,6 +43,8 @@ export async function loadBridge(): Promise<LoadedBridge> {
     default: (opts?: { module_or_path?: unknown }) => Promise<unknown>;
     create_wasm_bridge: () => WasmBridge;
     set_document_json: (json: string) => void;
+    set_frame_image: (bytes: Uint8Array) => void;
+    clear_frame_image: () => void;
     list_words_json: () => string;
     parse_subtitle: (text: string, format: string) => string;
     format_subtitle: (cuesJson: string, format: string) => string;
@@ -77,6 +82,8 @@ export async function loadBridge(): Promise<LoadedBridge> {
   return {
     bridge,
     setDocumentJson: mod.set_document_json,
+    setFrameImage: mod.set_frame_image,
+    clearFrameImage: mod.clear_frame_image,
     listWords: mod.list_words_json,
     parseSubtitle: mod.parse_subtitle,
     formatSubtitle: mod.format_subtitle,

@@ -15,13 +15,15 @@
 //! the plate (`isolation: isolate`, `z-index: -1` layer), so the plate's
 //! shadow composites over the frame.
 //!
-//! Unported: `.tscaps-video-frame-layer` (the blurred, saturated video
-//! backdrop the plate is made of glass over) — the native render draws no
-//! video backdrop layer; `.emphasis/.accent/.entity` weight and
-//! `text-decoration` key off word tags and the decoration toggle, which
-//! the native `Cue` text does not carry; the `variants` colour palette is
-//! editor UI (every variant pairs `highlight-color` with `primary-color`,
-//! so `.word-being-narrated` never differs from `.word` — one fill).
+//! Ported (kaca): `.tscaps-video-frame-layer` — host menyetel JPEG frame
+//! video per frame via `set_frame_image` (studio preview & export), lalu
+//! plate menampilkan frame itu blur+saturate di bawah tint. Region filter
+//! blur dibatasi userSpaceOnUse seluas plate+bleed agar raster per-frame
+//! tetap murah. Tanpa frame (CLI native), plate jatuh ke body gelap.
+//!
+//! Unported: `.emphasis/.accent/.entity` weight (Tier 2 — perlu face
+//! tambahan + ukur per-kata) dan `text-decoration`; palet `variants`
+//! tetap editor UI (tiap varian memasangkan highlight dengan primary).
 //!
 //! Family note: the embedded Montserrat 600 carries the name-table family
 //! "Montserrat Thin" (fontsource packaging) — that is the string fontdb
@@ -44,6 +46,8 @@ const LINE_SPACING_EM: f32 = 0.1; // .line + .line margin-top: 0.1em
 const PAD_Y_EM: f32 = 0.45; // .segment padding-block: 0.45em
 const PAD_X_EM: f32 = 0.9; // .segment padding-inline: 0.9em
 const CORNER_RADIUS_EM: f32 = 2.0; // border-radius: 2.0em
+const GLASS_BLUR_CQH: f32 = 0.7; // --tscaps-blur-amount default (cqh)
+const SATURATION: f32 = 1.5; // --tscaps-saturation default
 const ANCHOR_Y_FRAC: f32 = 0.78; // alignment.verticalOffset (top)
 const ANCHOR_X_FRAC: f32 = 0.5; // alignment.horizontalOffset (center default)
 const MAX_CHARS: usize = 20; // boundary_score_limit_by_chars.maxChars
@@ -271,14 +275,34 @@ pub fn render<'a>(
     let word2_std = WORD_SHADOW2_BLUR_EM * fs / 2.0;
 
     // The plate: outer shadow (clipped away from the plate itself, as CSS
-    // casts it from an opaque border-box), the tint body, then the six
-    // hairlines clipped to the rounded silhouette.
+    // casts it from an opaque border-box), the glass video frame (bila
+    // host menyetelnya), the tint body, then the six hairlines clipped to
+    // the rounded silhouette.
     let hairlines = hairlines_svg(fs, plate_x, plate_y, plate_w, plate_h, &st);
     let tint_bottom = st.f32("tint-opacity", TINT_BOTTOM_ALPHA);
     let tint_top = tint_bottom * 1.6;
+    // Glass: blur-amount (cqh) + saturation dari kontrol; region filter
+    // dikunci ke plate+bleed (userSpaceOnUse) supaya blur tak menghitung
+    // seluruh frame tiap frame raster.
+    let blur_std = (st.f32("blur-amount", GLASS_BLUR_CQH) / 100.0 * video_h as f32) / 2.0;
+    let saturation = st.f32("saturation", SATURATION);
+    let bleed = blur_std * 3.0 + 4.0;
+    let glass_svg = match crate::frame_image() {
+        Some(bytes) => {
+            let data = crate::base64_encode(&bytes);
+            format!(
+                "<image href=\"data:image/jpeg;base64,{data}\" \
+                 x=\"0\" y=\"0\" width=\"{video_w}\" height=\"{video_h}\" \
+                 preserveAspectRatio=\"xMidYMid slice\" \
+                 clip-path=\"url(#selene-clip)\" filter=\"url(#selene-glass)\"/>"
+            )
+        }
+        None => String::new(),
+    };
     let plate_svg = format!(
         "<rect x=\"{plate_x}\" y=\"{plate_y}\" width=\"{plate_w}\" height=\"{plate_h}\" \
          rx=\"{radius}\" ry=\"{radius}\" fill=\"#000000\" filter=\"url(#selene-plate)\"/>\
+         {glass_svg}\
          <rect x=\"{plate_x}\" y=\"{plate_y}\" width=\"{plate_w}\" height=\"{plate_h}\" \
          rx=\"{radius}\" ry=\"{radius}\" fill=\"url(#selene-tint)\"/>\
          <g clip-path=\"url(#selene-clip)\">{hairlines}</g>"
@@ -341,6 +365,24 @@ pub fn render<'a>(
     }
     words_svg.push_str("</g>");
 
+    // Filter kaca hanya saat ada frame: region userSpaceOnUse = plate+bleed.
+    let glass_filter = if glass_svg.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<filter id=\"selene-glass\" filterUnits=\"userSpaceOnUse\" \
+             x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" \
+             color-interpolation-filters=\"sRGB\">\
+             <feGaussianBlur stdDeviation=\"{blur_std}\"/>\
+             <feColorMatrix type=\"saturate\" values=\"{saturation}\"/>\
+             </filter>",
+            plate_x - bleed,
+            plate_y - bleed,
+            plate_w + 2.0 * bleed,
+            plate_h + 2.0 * bleed
+        )
+    };
+
     let defs_svg = format!(
         "<filter id=\"selene-plate\" x=\"-40%\" y=\"-60%\" width=\"180%\" height=\"260%\" \
          color-interpolation-filters=\"sRGB\">\
@@ -359,11 +401,30 @@ pub fn render<'a>(
          <stop offset=\"0\" stop-color=\"#ffffff\" stop-opacity=\"{tint_top}\"/>\
          <stop offset=\"1\" stop-color=\"#ffffff\" stop-opacity=\"{tint_bottom}\"/>\
          </linearGradient>\
+         {glass_filter}\
          <clipPath id=\"selene-clip\">\
          <rect x=\"{plate_x}\" y=\"{plate_y}\" width=\"{plate_w}\" height=\"{plate_h}\" \
          rx=\"{radius}\" ry=\"{radius}\"/>\
          </clipPath>"
     );
+    // Filter kaca hanya saat frame tersedia (region kecil, userSpaceOnUse).
+    let defs_svg = if glass_svg.is_empty() {
+        defs_svg
+    } else {
+        format!(
+            "{defs_svg}\
+             <filter id=\"selene-glass\" filterUnits=\"userSpaceOnUse\" \
+             x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" \
+             color-interpolation-filters=\"sRGB\">\
+             <feGaussianBlur stdDeviation=\"{blur_std}\"/>\
+             <feColorMatrix type=\"saturate\" values=\"{saturation}\"/>\
+             </filter>",
+            plate_x - bleed,
+            plate_y - bleed,
+            plate_w + 2.0 * bleed,
+            plate_h + 2.0 * bleed
+        )
+    };
 
     let words_svg = layout::dedupe_text_attrs(&words_svg);
     fframes::svgr!(

@@ -53,7 +53,10 @@
       const w = store.videoWidth;
       const h = store.videoHeight;
       createImageBitmap(v)
-        .then((bmp) => {
+        .then(async (bmp) => {
+          // Layer kaca (selene): frame JPEG disetel SEBELUM render supaya
+          // SVG caption membawa frame video ter-blur ter-embed.
+          await store.supplyFrameImage(bmp);
           const layers = store.renderFrameSvgLayers(f);
           return burner.request({
             base: layers?.base ?? "",
