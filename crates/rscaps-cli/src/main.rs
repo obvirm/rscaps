@@ -323,7 +323,10 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
         font_source: Some(&font_source),
         abort_signal: None,
     };
-    let mut cache = svgr::SvgrCache::new(8);
+    // SvgrCache::none(): LRU/layer cache svgr 0.50.1 tidak sound (pixmap
+    // kapasitas-exact bisa meracuni PixmapPool → set_len over-capacity →
+    // korupsi heap). Lihat svgr-wasm/src/lib.rs untuk detail.
+    let mut cache = svgr::SvgrCache::none();
     let pool = svgr::PixmapPool::new();
     // Engine skia: backend + font-DB dibuat SEKALI, dipakai ulang tiap frame.
     let skia_raster = if args.engine == "skia" {

@@ -20,7 +20,11 @@ use wasm_bindgen::prelude::*;
 
 thread_local! {
     static FONTDB: RefCell<fontdb::Database> = RefCell::new(fontdb::Database::new());
-    static CACHE: RefCell<Option<svgr::SvgrCache>> = RefCell::new(None);
+    /// Pool pixmap per thread — reuse blok pow2 antar render. Dengan
+    /// `SvgrCache::none()` satu-satunya sumber entry pool adalah
+    /// `take_or_allocate` (kapasitas pow2 selalu ≥ ukuran virtual), jadi
+    /// invarian `set_len` terjaga — LRU svgr yang bisa menyeret pixmap
+    /// kapasitas-exact (korupsi heap) tidak dipakai.
     static POOL: RefCell<svgr::PixmapPool> = RefCell::new(svgr::PixmapPool::new());
 }
 
@@ -108,17 +112,11 @@ pub fn raster_svg_profile(svg: &str, width: u32, height: u32) -> String {
     let ts = tree.size();
     let transform = svgr::tiny_skia::Transform::identity();
     let _ = ts;
-    CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.is_none() {
-            *c = Some(svgr::SvgrCache::new(4));
-        }
-        let cache = c.as_mut().unwrap();
-        POOL.with(|p| {
-            let pool = p.borrow();
-            let ctx = svgr::Context::new_from_pixmap(&pixmap);
-            svgr::render(&tree, transform, &mut pixmap.as_mut(), cache, &pool, &ctx);
-        });
+    let mut cache = svgr::SvgrCache::none();
+    POOL.with(|p| {
+        let pool = p.borrow();
+        let ctx = svgr::Context::new_from_pixmap(&pixmap);
+        svgr::render(&tree, transform, &mut pixmap.as_mut(), &mut cache, &pool, &ctx);
     });
     let t3 = js_sys::Date::now();
     let data = pixmap.data();
@@ -233,24 +231,25 @@ fn render_svg_to_pixmap(svg: &str, width: u32, height: u32) -> Result<svgr::tiny
         svgr::tiny_skia::Transform::identity()
     };
 
-    CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.is_none() {
-            *c = Some(svgr::SvgrCache::new(4));
-        }
-        let cache = c.as_mut().unwrap();
-        POOL.with(|p| {
-            let pool = p.borrow();
-            let ctx = svgr::Context::new_from_pixmap(&pixmap);
-            svgr::render(
-                &tree,
-                transform,
-                &mut pixmap.as_mut(),
-                cache,
-                &pool,
-                &ctx,
-            );
-        });
+    // svgr 0.50.1: LRU/layer cache TIDAK sound — pixmap kapasitas-exact
+    // (Pixmap::new) bisa masuk pool lewat evict-release → `set_len` render
+    // berikutnya di atas kapasitas → korupsi heap dlmalloc (trap flaky
+    // "memory access out of bounds" ~10-20% load studio). `none()` mematikan
+    // semua cache → satu-satunya sumber pixmap pool adalah take_or_allocate
+    // (kapasitas pow2 selalu ≥ virtual) → invarian terjaga. Konten caption
+    // berubah tiap frame sehingga cache lintas frame nyaris tak pernah hit.
+    let mut cache = svgr::SvgrCache::none();
+    POOL.with(|p| {
+        let pool = p.borrow();
+        let ctx = svgr::Context::new_from_pixmap(&pixmap);
+        svgr::render(
+            &tree,
+            transform,
+            &mut pixmap.as_mut(),
+            &mut cache,
+            &pool,
+            &ctx,
+        );
     });
 
     Ok(pixmap)

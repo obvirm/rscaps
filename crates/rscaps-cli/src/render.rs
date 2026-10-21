@@ -561,7 +561,7 @@ fn compute_caption_band(
         LaneRaster::Skia(r) => LaneState::Skia(r.make_renderer()),
         LaneRaster::Cpu { fdb } => LaneState::Cpu {
             fdb,
-            cache: svgr::SvgrCache::new(4),
+            cache: svgr::SvgrCache::none(),
             pool: svgr::PixmapPool::new(),
         },
     };
@@ -731,7 +731,7 @@ fn run_skia_slice(p: SliceParams<'_>) -> Result<()> {
                             LaneRaster::Skia(r) => LaneState::Skia(r.make_renderer()),
                             LaneRaster::Cpu { fdb } => LaneState::Cpu {
                                 fdb,
-                                cache: svgr::SvgrCache::new(4),
+                                cache: svgr::SvgrCache::none(),
                                 pool: svgr::PixmapPool::new(),
                             },
                         };
