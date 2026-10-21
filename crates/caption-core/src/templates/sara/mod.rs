@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style, tagstyle};
 use crate::CaptionDocument;
 
 // ── spec constants (from sara's style.scss + template.json) ───────────────
@@ -39,7 +39,6 @@ const SHADE_BLUR_EM: f32 = 0.238;
 const SHADE_ALPHA: f32 = 0.5;
 const SHADOW_COLOR: &str = "#000000"; // --tscaps-shadow-color default
 const TAG_COLOR: &str = "#ffffff"; // --tscaps-tag-color default
-const TAG_FONT_SCALE: f32 = 1.4; // --tscaps-tag-font-scale default (shadow sizes divide by it)
 // -webkit-text-stroke: var(--tscaps-outline-thickness, 0em) $outline-color
 const OUTLINE_THICKNESS_EM: f32 = 0.0;
 const OUTLINE_COLOR: &str = "#000000"; // --tscaps-outline-color default
@@ -127,13 +126,21 @@ pub fn render<'a>(
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
-    let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
     let rtl = segment.direction.is_rtl();
 
-    let measured = stack::measure_words(
+    // Tag Tier-2 (tag-font-scale): kata ber-tag membesar — ukur dengan
+    // advance dasar × scale (face dasar tetap).
+    let tt = tagstyle::resolve(&st, "sara", FONT, ov.font_weight);
+    let types: Vec<Option<stack::WordType>> = segment
+        .words
+        .iter()
+        .map(|w| tagstyle::word_type("sara", &tt, w, FONT, ov.font_weight))
+        .collect();
+
+    let measured = stack::measure_words_typed(
         &segment.words,
         &script_stack,
         IM_FELL_TTF,
@@ -142,6 +149,7 @@ pub fn render<'a>(
         fs,
         ls_px,
         false,
+        &types,
     );
     let widths = measured.widths;
 
@@ -154,13 +162,20 @@ pub fn render<'a>(
     let lines = splitter.split(&split_widths);
 
     // Top-aligned block: the block's top edge sits at 0.62H; lines center
-    // horizontally.
+    // horizontally. Kata ber-scale membesarkan box line-nya (line-box CSS).
+    let word_scale = |i: usize| types.get(i).copied().flatten().map(|t| t.scale).unwrap_or(1.0);
+    let line_geoms: Vec<(f32, f32)> = lines
+        .iter()
+        .map(|&(s, e)| {
+            let scale = (s..e).map(word_scale).fold(1.0f32, f32::max);
+            let line_h = LINE_HEIGHT * fs * scale;
+            let ascent = asc_ratio * fs * scale;
+            let descent = desc_ratio * fs * scale;
+            (line_h, (line_h - (ascent + descent)) / 2.0 + ascent)
+        })
+        .collect();
     let block_top = ov.anchor_y * video_h as f32;
     let center_x = ov.anchor_x * video_w as f32;
-
-    let ascent = asc_ratio * fs;
-    let descent = desc_ratio * fs;
-    let half_leading = (line_h - (ascent + descent)) / 2.0;
 
     // Shadow geometry (px from em ratios).
     let bloom_std = BLOOM_BLUR_EM * fs / 2.0;
@@ -169,10 +184,17 @@ pub fn render<'a>(
     let shade_dy = SHADE_DY_EM * fs;
     let shade_std = SHADE_BLUR_EM * fs / 2.0;
     let tag_color = st.color("tag-color", TAG_COLOR);
-    // Tag shadow blur dibagi scale (scss `calc(x / var(--tag-font-scale))`);
-    // scale font-nya sendiri belum diport (lihat catatan Tier 2 di mod docs).
-    let tag_bloom_std = bloom_std / TAG_FONT_SCALE;
-    let tag_haze_std = haze_std / TAG_FONT_SCALE;
+    // Tag shadow blur dibagi scale (scss `calc(x / var(--tag-font-scale))`)
+    // supaya glow konstan saat kata membesar. Tscaps memakai scale kata
+    // masing-masing (text-shadow per kata); filter grup satu radius — pakai
+    // scale maksimum kata ber-tag.
+    let tag_scale_max = types
+        .iter()
+        .flatten()
+        .map(|t| t.scale)
+        .fold(1.0f32, f32::max);
+    let tag_bloom_std = bloom_std / tag_scale_max;
+    let tag_haze_std = haze_std / tag_scale_max;
     let stroke_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
 
     // Each word fades in on its own narration clock.
@@ -189,8 +211,8 @@ pub fn render<'a>(
     let mut base_svg = String::new();
     let mut tag_svg = String::new();
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
-        let line_top = block_top + line_idx as f32 * line_h;
-        let baseline = line_top + half_leading + ascent;
+        let line_top: f32 = line_geoms[..line_idx].iter().map(|(lh, _)| lh).sum();
+        let baseline = line_top + line_geoms[line_idx].1;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
@@ -200,6 +222,7 @@ pub fn render<'a>(
             .zip(&measured.families[start..end])
             .enumerate()
         {
+            let w_scale = word_scale(start + i);
             // Kata ber-override menahan fade sendiri — paritas tscaps
             // "animation custom menggantikan animasi template".
             let opacity = if ov.motion_static
@@ -214,10 +237,18 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
+            // Tag Tier-2 — sebelum {wo}; element inspector menang via
+            // dedupe_text_attrs. Kata script mengabaikan tipografi tag.
+            let tag_attrs = match types[start + i] {
+                Some(ref ty) if *family == FONT => {
+                    tagstyle::svg_attrs(ty, fs, FONT, ov.font_weight)
+                }
+                _ => String::new(),
+            };
             let text = layout::escape_xml(&ov.text_case.apply(&word.display));
             // Element inspector: override per-kata (attrs + transform).
             let wo_ctx = element_css::WordCtx {
-                base_fs: fs,
+                base_fs: fs * w_scale,
                 ls_px,
                 video_w: video_w as f32,
                 video_h: video_h as f32,
@@ -234,7 +265,7 @@ pub fn render<'a>(
             let tagged =
                 word.has_tag("emphasis") || word.has_tag("accent") || word.has_tag("entity");
             let word_svg = format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{tag_attrs} \
                  stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\" opacity=\"{opacity}\"{wo}{wo_transform}>{text}</text>",
                 fill = if tagged { tag_color.as_str() } else { ov.primary.as_str() },
@@ -255,7 +286,7 @@ pub fn render<'a>(
     // User rotation wraps the caption around the block centre.
     if ov.angle_deg.abs() > f32::EPSILON {
         let cx = center_x;
-        let cy = block_top + (lines.len() as f32 * line_h) / 2.0;
+        let cy = block_top + line_geoms.iter().map(|(lh, _)| lh).sum::<f32>() / 2.0;
         words_svg = format!(
             "<g transform=\"rotate({angle},{cx},{cy})\">{inner}</g>",
             angle = ov.angle_deg,

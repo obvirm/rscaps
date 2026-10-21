@@ -65,7 +65,7 @@ export async function loadBridge(): Promise<LoadedBridge> {
     bridge.ingest_font(bytes);
     if (src.family && src.weight) {
       faceCss +=
-        `@font-face{font-family:"${src.family}";font-style:normal;` +
+        `@font-face{font-family:"${src.family}";font-style:${src.style ?? "normal"};` +
         `font-weight:${src.weight};font-display:block;` +
         `src:url("data:font/ttf;base64,${bytesToBase64(bytes)}") format("truetype");}\n`;
     }

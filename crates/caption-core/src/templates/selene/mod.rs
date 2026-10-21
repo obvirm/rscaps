@@ -32,7 +32,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, element_css, layout, overrides, pipeline, stack, state, style};
+use super::{effects, element_css, layout, overrides, pipeline, stack, state, style, tagstyle};
 use crate::CaptionDocument;
 
 // ── spec constants (from selene's style.scss + template.json) ─────────────
@@ -227,7 +227,15 @@ pub fn render<'a>(
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
     let rtl = segment.direction.is_rtl();
 
-    let measured = stack::measure_words(
+    // Tag Tier-2 (tag-font-family + tag-bold): face hasil snap per kata.
+    let tt = tagstyle::resolve(&st, "selene", FONT, ov.font_weight);
+    let types: Vec<Option<stack::WordType>> = segment
+        .words
+        .iter()
+        .map(|w| tagstyle::word_type("selene", &tt, w, FONT, ov.font_weight))
+        .collect();
+
+    let measured = stack::measure_words_typed(
         &segment.words,
         &script_stack,
         MONTSERRAT_600_TTF,
@@ -236,6 +244,7 @@ pub fn render<'a>(
         fs,
         ls_px,
         false,
+        &types,
     );
     let widths = measured.widths;
 
@@ -342,6 +351,14 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{}\"", stack::svg_font_family(&family))
             };
+            // Tag Tier-2 — sebelum {wo}; element inspector menang via
+            // dedupe_text_attrs. Kata script mengabaikan tipografi tag.
+            let tag_attrs = match types[start + i] {
+                Some(ref ty) if *family == FONT => {
+                    tagstyle::svg_attrs(ty, fs, FONT, ov.font_weight)
+                }
+                _ => String::new(),
+            };
             // Element inspector: override per-kata (attrs + transform).
             let wo_ctx = element_css::WordCtx {
                 base_fs: fs,
@@ -359,7 +376,7 @@ pub fn render<'a>(
                 .map(|t| format!(" transform=\"{t}\""))
                 .unwrap_or_default();
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#selene-word)\"{fill_attr}{family_attr}{wo}{wo_transform}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#selene-word)\"{fill_attr}{family_attr}{tag_attrs}{wo}{wo_transform}>{text}</text>"
             ));
         }
     }

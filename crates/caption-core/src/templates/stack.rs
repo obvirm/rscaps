@@ -278,6 +278,16 @@ pub fn resolve_line_direction(text: &str, declared: Direction) -> Direction {
 
 // ── measure ────────────────────────────────────────────────────────────────
 
+/// Override tipografi per-kata dari tag (Tier 2 `tag-*`), dibangun oleh
+/// `tagstyle::word_type`. `family` kosong = latin dasar template.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WordType {
+    pub family: &'static str,
+    pub weight: u16,
+    pub italic: bool,
+    pub scale: f32,
+}
+
 /// Per-word widths (px, advance + letter-spacing, no margins) and the
 /// script family each word draws with.
 pub struct Measured {
@@ -357,6 +367,12 @@ pub fn script_fallback_width(text: &str, fs: f32) -> f32 {
 /// unitsPerEm (exact font units through fframes' integer math) scaled
 /// back to px, plus one letter-spacing per UTF-16 unit; words whose face
 /// is not loaded fall back to `utf16 * fs * 0.5` so plates still appear.
+///
+/// Tipografi tag (Tier 2): kata latin dengan `Some(WordType)` diukur
+/// dengan face hasil snap dari [`crate::templates::faces`] (bytes yang
+/// sama dimuat fontdb rasterizer); keluarga di luar tabel tetap memakai
+/// face dasar dengan `advance × scale` (advance linear terhadap fs).
+/// Kata script (arab/ibrani) mengabaikan tipografi tag.
 pub fn measure_words<'a>(
     words: &[TimedWord],
     stack: &Stack,
@@ -366,6 +382,22 @@ pub fn measure_words<'a>(
     fs: f32,
     ls_px: f32,
     uppercase: bool,
+) -> Measured {
+    measure_words_typed(
+        words, stack, latin_ttf, latin_weight, font_source, fs, ls_px, uppercase, &[],
+    )
+}
+
+pub fn measure_words_typed<'a>(
+    words: &[TimedWord],
+    stack: &Stack,
+    latin_ttf: &'static [u8],
+    latin_weight: u16,
+    font_source: Option<&'a dyn fframes::FontSource<'a>>,
+    fs: f32,
+    ls_px: f32,
+    uppercase: bool,
+    types: &[Option<WordType>],
 ) -> Measured {
     let latin_upem = fframes::ttf_parser::Face::parse(latin_ttf, 0)
         .expect("template font parses")
@@ -399,7 +431,8 @@ pub fn measure_words<'a>(
 
     let mut widths = Vec::with_capacity(words.len());
     let mut word_families = Vec::with_capacity(words.len());
-    for word in words {
+    for (word_i, word) in words.iter().enumerate() {
+        let ty = types.get(word_i).copied().flatten();
         let family = word_family(&word.text, stack);
         let slot = if family == stack.latin {
             0
@@ -416,7 +449,7 @@ pub fn measure_words<'a>(
         };
         let utf16 = display.encode_utf16().count() as f32;
         let fallback = script_fallback_width(&display, fs);
-        let advance = if slot != 0 {
+        let base_advance = if slot != 0 {
             shaped_advance(family, &display, fs).unwrap_or(fallback)
         } else {
             match faces[slot].as_deref() {
@@ -443,6 +476,36 @@ pub fn measure_words<'a>(
                 },
                 None => fallback,
             }
+        };
+        // Tier-2: kata latin ber-tag diukur dengan face snap-nya sendiri;
+        // keluarga di luar tabel FACES → face dasar dengan advance × scale.
+        let advance = match ty {
+            Some(t) if slot == 0 => {
+                let eff = if t.family.is_empty() { stack.latin } else { t.family };
+                let scale_px = fs * t.scale;
+                match crate::templates::faces::face_index(eff, t.weight, t.italic) {
+                    Some(idx) => {
+                        let fupem =
+                            crate::templates::faces::face_metrics(idx).map(|m| m.upem as f32);
+                        match fupem {
+                            Some(fupem) if fupem > 0.0 => {
+                                let mut acc = 0.0f32;
+                                for ch in display.chars() {
+                                    acc += match crate::templates::faces::char_advance_units(idx, ch)
+                                    {
+                                        Some(u) => u as f32 * scale_px / fupem,
+                                        None => fallback_char_advance(ch, scale_px),
+                                    };
+                                }
+                                acc
+                            }
+                            _ => base_advance * t.scale,
+                        }
+                    }
+                    None => base_advance * t.scale,
+                }
+            }
+            _ => base_advance,
         };
         widths.push(advance + utf16 * ls_px);
         word_families.push(family);

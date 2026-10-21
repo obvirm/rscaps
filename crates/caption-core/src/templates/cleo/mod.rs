@@ -11,7 +11,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style, tagstyle};
 use crate::CaptionDocument;
 
 // ── spec constants (from cleo's style.scss + template.json) ───────────────
@@ -152,7 +152,16 @@ pub fn render<'a>(
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
     let rtl = segment.direction.is_rtl();
 
-    let measured = stack::measure_words(
+    // Tag Tier-2 (tag-weight/tag-italic): override per-kata + ukur dengan
+    // face hasil snap.
+    let tt = tagstyle::resolve(&st, "cleo", FONT, ov.font_weight);
+    let types: Vec<Option<stack::WordType>> = segment
+        .words
+        .iter()
+        .map(|w| tagstyle::word_type("cleo", &tt, w, FONT, ov.font_weight))
+        .collect();
+
+    let measured = stack::measure_words_typed(
         &segment.words,
         &script_stack,
         LORA_TTF,
@@ -161,6 +170,7 @@ pub fn render<'a>(
         fs,
         ls_px,
         false,
+        &types,
     );
     let widths = measured.widths;
 
@@ -225,6 +235,14 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
+            // Tag Tier-2 (weight/italic): sebelum {wo} — element inspector
+            // menang via dedupe_text_attrs.
+            let tag_attrs = match types[start + word_off] {
+                Some(ref ty) if *family == FONT => {
+                    tagstyle::svg_attrs(ty, fs, FONT, ov.font_weight)
+                }
+                _ => String::new(),
+            };
             let text = layout::escape_xml(&word.display);
             // Tag `.quote` tscaps: kata dalam rentang kutip (SpanTagger)
             // seluruhnya warna quote.
@@ -251,7 +269,7 @@ pub fn render<'a>(
                 .map(|t| format!(" transform=\"{t}\""))
                 .unwrap_or_default();
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr} \
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{tag_attrs} \
                  stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\"{wo}{wo_transform}>{text}</text>",
             ));

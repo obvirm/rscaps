@@ -21,7 +21,7 @@
 
 use fframes::{FFramesContext, FontQuery, Svgr};
 
-use super::{effects, element_css, layout, overrides, pipeline, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, stack, style, tagstyle};
 use crate::CaptionDocument;
 
 // ── spec constants (from pico's style.scss + template.json) ───────────────
@@ -331,7 +331,16 @@ pub fn render<'a>(
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
     let rtl = segment.direction.is_rtl();
 
-    let measured = stack::measure_words(
+    // Tag Tier-2 (tag-bold): weight snap ke face JBM yang ada (900 → 800);
+    // advance monospace identik antar weight, ukur tetap presisi.
+    let tt = tagstyle::resolve(&st, "pico", FONT, ov.font_weight);
+    let types: Vec<Option<stack::WordType>> = segment
+        .words
+        .iter()
+        .map(|w| tagstyle::word_type("pico", &tt, w, FONT, ov.font_weight))
+        .collect();
+
+    let measured = stack::measure_words_typed(
         &segment.words,
         &script_stack,
         JETBRAINS_TTF,
@@ -340,6 +349,7 @@ pub fn render<'a>(
         fs,
         ls_px,
         false,
+        &types,
     );
     let widths = measured.widths;
 
@@ -493,6 +503,12 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
+            // Tag Tier-2 (weight) pada tiap huruf kata ber-tag — sebelum
+            // {wo}; element inspector menang via dedupe_text_attrs.
+            let tag_attrs = match types[start + j] {
+                Some(ref ty) if slot == 0 => tagstyle::svg_attrs(ty, fs, FONT, ov.font_weight),
+                _ => String::new(),
+            };
             let face = faces[slot].as_deref();
             let upem = upems[slot];
             let mut cursor = *x;
@@ -524,7 +540,7 @@ pub fn render<'a>(
                 if letter_visible(now_ms, word.start_ms, word.end_ms, i, count) {
                     let text = layout::escape_xml(&ch_str);
                     words_svg.push_str(&format!(
-                        "<text x=\"{cursor}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{wo}{wo_transform}>\
+                        "<text x=\"{cursor}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{tag_attrs}{wo}{wo_transform}>\
                          {text}</text>",
                         fill = ov.primary,
                     ));

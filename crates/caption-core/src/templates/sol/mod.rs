@@ -12,17 +12,16 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, faces, layout, overrides, pipeline, recipes, stack, style, tagstyle};
 use crate::CaptionDocument;
 
 // ── spec constants (from sol's style.scss + template.json) ────────────────
 const FONT: &str = "Montserrat"; // fontStack montserrat (scss: 'Montserrat Variable')
 const FONT_WEIGHT: u16 = 300; // typography.fontWeight: 300
 // `.line + .line` font-family: var(--tscaps-tag-font-family, 'Kalam') —
-// Kalam is neither embedded here nor registered in the studio's
-// @font-face table, so the accent line borrows the handwriting face that
-// is: Caveat 700 (studio/main.js).
-const TAG_FONT: &str = "Caveat"; // tag-font-family control default: "kalam"
+// Kalam kini ter-embed (faces::FACES) + terdaftar di @font-face studio;
+// Caveat 700 tetap fallback untuk id keluarga di luar tabel.
+const TAG_FONT: &str = "Caveat"; // fallback bila kontrol menunjuk keluarga tanpa face
 const TAG_FONT_WEIGHT: u16 = 700; // tag-font-weight control default
 const FONT_SIZE_CQH: f32 = 0.04; // font-size: 4.0cqh
 const LETTER_SPACING_EM: f32 = -0.04; // letter-spacing: -0.04em
@@ -122,20 +121,11 @@ fn font_metrics() -> (f32, f32, f32) {
     *METRICS.get_or_init(|| face_metrics(MONTSERRAT_300_TTF))
 }
 
-/// `(ascent, descent, upem)` for the handwritten accent face.
-fn tag_metrics() -> (f32, f32, f32) {
-    static METRICS: std::sync::OnceLock<(f32, f32, f32)> = std::sync::OnceLock::new();
-    *METRICS.get_or_init(|| face_metrics(CAVEAT_700_TTF))
-}
-
 /// Baseline metrics for whichever family dominates the segment (main
-/// register: Montserrat; accent: Caveat — both go through the stack for
-/// script fallback).
+/// register: Montserrat; script faces go through the stack).
 fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     if dominant == FONT {
         font_metrics()
-    } else if dominant == TAG_FONT {
-        tag_metrics()
     } else {
         stack::script_metrics(dominant).expect("script face")
     }
@@ -259,11 +249,34 @@ pub fn render<'a>(
     let margin = ov.word_spacing_em * fs;
 
     let main_stack = stack::Stack::for_latin(FONT);
-    let tag_stack = stack::Stack::for_latin(TAG_FONT);
+    // Accent line face dari kontrol tag-font-family/tag-font-weight
+    // (default template.json: kalam/700); keluarga tanpa face → fallback
+    // Caveat 700 (substitusi lama).
+    let tt = tagstyle::resolve(&st, "sol", FONT, ov.font_weight);
+    let (tag_family, tag_weight, tag_ttf) = {
+        let req_family = tt.family;
+        let req_weight = tt.weight;
+        match faces::snap(req_family, req_weight, false) {
+            Some((w, false)) if faces::face_index(req_family, w, false).is_some() => {
+                let ttf = faces::FACES[faces::face_index(req_family, w, false).unwrap()].ttf;
+                (req_family, w, ttf)
+            }
+            _ => (TAG_FONT, TAG_FONT_WEIGHT, CAVEAT_700_TTF),
+        }
+    };
+    let tag_stack = stack::Stack::for_latin(tag_family);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &main_stack));
-    let (tag_asc_ratio, tag_desc_ratio, _) =
-        line_metrics(stack::dominant_family(&segment.words, &tag_stack));
+    // Accent line: metrics dari face terpilih; line script-dominan tetap
+    // memakai metrics script stack.
+    let (tag_asc_ratio, tag_desc_ratio, _) = {
+        let dom = stack::dominant_family(&segment.words, &tag_stack);
+        if dom == tag_family {
+            face_metrics(tag_ttf)
+        } else {
+            stack::script_metrics(dom).expect("script face")
+        }
+    };
     let rtl = segment.direction.is_rtl();
 
     // The splitter measures at the segment's typography — the accent
@@ -352,12 +365,12 @@ pub fn render<'a>(
         let is_tag = line_idx > 0;
         let (latin_ttf, latin_weight, asc_ratio, desc_ratio, family, weight, fill, line_stack) = if is_tag {
             (
-                CAVEAT_700_TTF,
-                TAG_FONT_WEIGHT,
+                tag_ttf,
+                tag_weight,
                 tag_asc_ratio,
                 tag_desc_ratio,
-                TAG_FONT,
-                TAG_FONT_WEIGHT,
+                tag_family,
+                tag_weight,
                 highlight.as_str(),
                 &tag_stack,
             )
@@ -575,7 +588,7 @@ mod tests {
         assert!(asc > 0.5 && asc < 1.5, "ascent {asc}");
         assert!(desc > 0.01 && desc < 1.0, "descent {desc}");
         assert!(upem >= 16.0, "upem {upem}");
-        let (t_asc, t_desc, t_upem) = tag_metrics();
+        let (t_asc, t_desc, t_upem) = face_metrics(CAVEAT_700_TTF);
         assert!(t_asc > 0.3 && t_asc < 2.0, "tag ascent {t_asc}");
         assert!(t_desc > 0.01 && t_desc < 1.5, "tag descent {t_desc}");
         assert!(t_upem >= 16.0, "tag upem {t_upem}");

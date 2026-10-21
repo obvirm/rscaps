@@ -9,7 +9,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style, tagstyle};
 use crate::CaptionDocument;
 
 // ── spec constants (from enzo's style.scss + template.json) ───────────────
@@ -118,13 +118,21 @@ pub fn render<'a>(
     let fs = overrides::resolve_font_size(&doc.params, DEFAULTS, video_h as f32);
     let ls_px = ov.letter_spacing_em * fs;
     let margin = ov.word_spacing_em * fs;
-    let line_h = LINE_HEIGHT * fs;
     let script_stack = stack::Stack::for_latin(FONT);
     let (asc_ratio, desc_ratio, _) =
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
     let rtl = segment.direction.is_rtl();
 
-    let measured = stack::measure_words(
+    // Tag Tier-2: face switch (EB Garamond) + weight + italic + scale —
+    // ukur dengan face hasil snap per kata.
+    let tt = tagstyle::resolve(&st, "enzo", FONT, ov.font_weight);
+    let types: Vec<Option<stack::WordType>> = segment
+        .words
+        .iter()
+        .map(|w| tagstyle::word_type("enzo", &tt, w, FONT, ov.font_weight))
+        .collect();
+
+    let measured = stack::measure_words_typed(
         &segment.words,
         &script_stack,
         INTER_TTF,
@@ -133,6 +141,7 @@ pub fn render<'a>(
         fs,
         ls_px,
         false,
+        &types,
     );
     let widths = measured.widths;
 
@@ -145,14 +154,24 @@ pub fn render<'a>(
     let lines = splitter.split(&split_widths);
 
     // Bottom-aligned block: the block's bottom edge sits at 0.72H; lines
-    // center horizontally. lineSpacing is 0, so lines stack at line_h.
-    let block_h = lines.len() as f32 * line_h;
+    // center horizontally. Kata ber-scale membesarkan box line-nya
+    // (algoritma line-box CSS: baseline = max ascent box + half-leading),
+    // jadi line_h/ascent/descent per-line mengikuti scale maksimum line.
+    let word_scale = |i: usize| types.get(i).copied().flatten().map(|t| t.scale).unwrap_or(1.0);
+    let line_geoms: Vec<(f32, f32, f32)> = lines
+        .iter()
+        .map(|&(s, e)| {
+            let scale = (s..e).map(word_scale).fold(1.0f32, f32::max);
+            let line_h = LINE_HEIGHT * fs * scale;
+            let ascent = asc_ratio * fs * scale;
+            let descent = desc_ratio * fs * scale;
+            let half_leading = (line_h - (ascent + descent)) / 2.0;
+            (line_h, half_leading + ascent, scale)
+        })
+        .collect();
+    let block_h: f32 = line_geoms.iter().map(|(lh, _, _)| lh).sum();
     let block_top = ov.anchor_y * video_h as f32 - block_h;
     let center_x = ov.anchor_x * video_w as f32;
-
-    let ascent = asc_ratio * fs;
-    let descent = desc_ratio * fs;
-    let half_leading = (line_h - (ascent + descent)) / 2.0;
 
     // Shadow geometry (px from em ratios): the shade floats *above* the
     // glyphs - dy is negative on purpose.
@@ -161,12 +180,18 @@ pub fn render<'a>(
     let stroke_px = st.f32("outline-thickness", OUTLINE_THICKNESS_EM) * fs;
     let tag_color = st.color("tag-color", TAG_COLOR);
     // Tag shadow (scss `.emphasis,.accent,.entity`): glow ketat warna tag +
-    // dua lapis shade warna shadow-color. Ukuran font-scale/font-family
-    // tag-nya Tier 2 (lihat catatan di atas).
-    let tag_glow_std = 0.087 * fs / 2.0;
-    let tag_haze_std = 0.368 * fs / 2.0;
-    let tag_shade_dy = -0.4 * fs;
-    let tag_shade_std = 0.8 * fs / 2.0;
+    // dua lapis shade warna shadow-color. Tscaps memakai text-shadow em
+    // (relatif ukuran kata); filter grup satu radius — pakai scale maksimum
+    // kata ber-tag supaya kata besar tidak kehilangan glow.
+    let tag_scale_max = types
+        .iter()
+        .flatten()
+        .map(|t| t.scale)
+        .fold(1.0f32, f32::max);
+    let tag_glow_std = 0.087 * fs * tag_scale_max / 2.0;
+    let tag_haze_std = 0.368 * fs * tag_scale_max / 2.0;
+    let tag_shade_dy = -0.4 * fs * tag_scale_max;
+    let tag_shade_std = 0.8 * fs * tag_scale_max / 2.0;
 
     // Each word fades in on its own narration clock.
     let fade = recipes::FadeIn::with(0.0, ov.duration_or(FADE_DURATION_S));
@@ -179,8 +204,9 @@ pub fn render<'a>(
     let mut base_svg = String::new();
     let mut tag_svg = String::new();
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
-        let line_top = block_top + line_idx as f32 * line_h;
-        let baseline = line_top + half_leading + ascent;
+        let line_top: f32 = line_geoms[..line_idx].iter().map(|(lh, _, _)| lh).sum();
+        let (_, baseline_off, _) = line_geoms[line_idx];
+        let baseline = line_top + baseline_off;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
@@ -190,6 +216,7 @@ pub fn render<'a>(
             .zip(&measured.families[start..end])
             .enumerate()
         {
+            let w_scale = word_scale(start + word_off);
             // Element inspector: kata ber-override menahan fade-in
             // per-katanya sendiri — override yang mengatur.
             let has_ov = element_css::has_override(&doc.params, word.index);
@@ -203,9 +230,17 @@ pub fn render<'a>(
             } else {
                 format!(" font-family=\"{family}\"")
             };
+            // Tag Tier-2 — sebelum {wo}; element inspector menang via
+            // dedupe_text_attrs. Kata script mengabaikan tipografi tag.
+            let tag_attrs = match types[start + word_off] {
+                Some(ref ty) if *family == FONT => {
+                    tagstyle::svg_attrs(ty, fs, FONT, ov.font_weight)
+                }
+                _ => String::new(),
+            };
             let text = layout::escape_xml(&word.display);
             let wo_ctx = element_css::WordCtx {
-                base_fs: fs,
+                base_fs: fs * w_scale,
                 ls_px,
                 video_w: video_w as f32,
                 video_h: video_h as f32,
@@ -226,7 +261,7 @@ pub fn render<'a>(
             let tagged =
                 word.has_tag("emphasis") || word.has_tag("accent") || word.has_tag("entity");
             let word_svg = format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr} \
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{primary}\"{family_attr}{tag_attrs} \
                  stroke=\"{outline_color}\" stroke-width=\"{stroke_px}\" \
                  paint-order=\"stroke\" opacity=\"{opacity}\"{wo}{wo_transform}>{text}</text>",
                 primary = if tagged { tag_color.as_str() } else { ov.primary.as_str() },

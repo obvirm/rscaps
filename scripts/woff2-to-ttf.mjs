@@ -44,6 +44,28 @@ const JOBS = [
   ["@fontsource/vt323", "vt323-latin-400-normal"],
   ["@fontsource/im-fell-english", "im-fell-english-latin-400-normal"],
   ["@fontsource/lobster", "lobster-latin-400-normal"],
+  // Tag Tier-2 faces (tag-weight/italic/font-family/font-scale): static
+  // runs for every family that carries a tag typography control, so
+  // face snapping picks a real weight both rasterizers load.
+  ["@fontsource/lora", "lora-latin-400-normal"],
+  ["@fontsource/lora", "lora-latin-600-normal"],
+  ["@fontsource/lora", "lora-latin-700-normal"],
+  ["@fontsource/lora", "lora-latin-500-italic"],
+  ["@fontsource/lora", "lora-latin-700-italic"],
+  ["@fontsource/inter", "inter-latin-500-normal"],
+  ["@fontsource/inter", "inter-latin-800-normal"],
+  ["@fontsource/montserrat", "montserrat-latin-400-normal"],
+  ["@fontsource/montserrat", "montserrat-latin-500-normal"],
+  ["@fontsource/montserrat", "montserrat-latin-800-normal"],
+  ["@fontsource/montserrat", "montserrat-latin-900-normal"],
+  ["@fontsource/montserrat", "montserrat-latin-600-italic"],
+  ["@fontsource/jetbrains-mono", "jetbrains-mono-latin-800-normal"],
+  ["@fontsource/kalam", "kalam-latin-400-normal"],
+  ["@fontsource/kalam", "kalam-latin-700-normal"],
+  // EB Garamond (enzo tag-font-family) is not in node_modules (pnpm add is
+  // blocked by the workspace config); its woff2 is vendored in fonts-src.
+  { src: "scripts/fonts-src/eb-garamond-latin-400-normal.woff2", base: "eb-garamond-latin-400-normal" },
+  { src: "scripts/fonts-src/eb-garamond-latin-400-italic.woff2", base: "eb-garamond-latin-400-italic" },
   // Script-stack faces (tscaps FontStackCatalog): arabic = Cairo (poppins,
   // gabarito, comfortaa, nunito stacks) / Vazirmatn (inter, montserrat, ...)
   // / Lalezar (anton, bungee, ...) / Amiri (playfair-display, lora, ...);
@@ -65,7 +87,8 @@ for (const job of JOBS) {
   const [src, base] = Array.isArray(job)
     ? [join(nm, job[0], "files", `${job[1]}.woff2`), job[1]]
     : [job.src, job.base];
-  const ttf = await decompress(new Uint8Array(await readFile(src)));
+  const srcPath = src.match(/^[A-Za-z]:[\\/]/) ? src : join(pkgRoot, src);
+  const ttf = await decompress(new Uint8Array(await readFile(srcPath)));
   for (const outDir of outs) {
     const dest = join(outDir, `${base}.ttf`);
     if (!existsSync(dest)) {

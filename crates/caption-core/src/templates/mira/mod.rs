@@ -21,7 +21,7 @@
 
 use fframes::{FFramesContext, Svgr};
 
-use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, style};
+use super::{effects, element_css, faces, layout, overrides, pipeline, recipes, stack, style, tagstyle};
 use crate::CaptionDocument;
 
 // ── spec constants (from mira's style.scss + template.json) ───────────────
@@ -170,7 +170,36 @@ pub fn render<'a>(
         line_metrics(stack::dominant_family(&segment.words, &script_stack));
     let rtl = segment.direction.is_rtl();
 
-    let measured = stack::measure_words(
+    // Tag Tier-2 (tag-weight) + quote-italic: override per-kata dengan face
+    // hasil snap (kata quote+emphasis disnap gabungan — urutan matching CSS:
+    // gaya dulu, lalu weight).
+    let tt = tagstyle::resolve(&st, "mira", FONT, ov.font_weight);
+    let quote_italic = st.bool("quote-italic", true);
+    let types: Vec<Option<stack::WordType>> = segment
+        .words
+        .iter()
+        .map(|w| {
+            let lifted = tagstyle::word_type("mira", &tt, w, FONT, ov.font_weight);
+            if w.has_tag("quote") && quote_italic {
+                let base = match &lifted {
+                    Some(t) => (t.family, t.weight),
+                    None => ("", ov.font_weight),
+                };
+                let fam = if base.0.is_empty() { FONT } else { base.0 };
+                if let Some((weight, true)) = faces::snap(fam, base.1, true) {
+                    return Some(stack::WordType {
+                        family: fam,
+                        weight,
+                        italic: true,
+                        scale: lifted.as_ref().map(|t| t.scale).unwrap_or(1.0),
+                    });
+                }
+            }
+            lifted
+        })
+        .collect();
+
+    let measured = stack::measure_words_typed(
         &segment.words,
         &script_stack,
         MONTSERRAT_600_TTF,
@@ -179,6 +208,7 @@ pub fn render<'a>(
         fs,
         ls_px,
         false,
+        &types,
     );
     let widths = measured.widths;
 
@@ -253,7 +283,16 @@ pub fn render<'a>(
             } else {
                 ov.primary.clone()
             };
-            let italic_attr = if is_quote && st.bool("quote-italic", true) {
+            // Tag Tier-2 (weight + italic face) — sebelum {wo}; element
+            // inspector menang via dedupe_text_attrs. Fallback synth italic
+            // bila face snap tak tersedia.
+            let tag_attrs = match types[start + word_off] {
+                Some(ref ty) if *family == FONT => {
+                    tagstyle::svg_attrs(ty, fs, FONT, ov.font_weight)
+                }
+                _ => String::new(),
+            };
+            let italic_attr = if tag_attrs.is_empty() && is_quote && quote_italic {
                 " font-style=\"italic\""
             } else {
                 ""
@@ -276,7 +315,7 @@ pub fn render<'a>(
                 .map(|t| format!(" transform=\"{t}\""))
                 .unwrap_or_default();
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{italic_attr}\
+                "<text x=\"{x}\" y=\"{baseline}\" fill=\"{fill}\"{family_attr}{tag_attrs}{italic_attr}\
                  {wo}{wo_transform}>{text}</text>",
             ));
         }
