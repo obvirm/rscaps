@@ -13,6 +13,8 @@ let wasmReady: Promise<SvgrWasm> | null = null;
 interface SvgrWasm {
   load_font: (data: Uint8Array) => void;
   font_count: () => number;
+  register_image: (href: string, rgba: Uint8Array, width: number, height: number) => void;
+  unregister_image: (href: string) => void;
   burn_frame: (
     baseRgba: Uint8Array,
     svg: string,
@@ -34,6 +36,8 @@ export function initSvgrWasm(): Promise<SvgrWasm> {
         default: (opts?: { module_or_path?: unknown }) => Promise<unknown>;
         load_font: (data: Uint8Array) => void;
         font_count: () => number;
+        register_image: (href: string, rgba: Uint8Array, width: number, height: number) => void;
+        unregister_image: (href: string) => void;
         burn_frame: (
           baseRgba: Uint8Array,
           svg: string,
@@ -80,7 +84,36 @@ export async function burnFrameWasm(
   height: number,
 ): Promise<Uint8Array> {
   const wasm = await initSvgrWasm();
+  // Registry gambar jalur inline (main thread): kaca selene + stroke iris.
+  await ensureInlineImages(svg, baseRgba, width, height);
   return wasm.burn_frame(baseRgba, svg, blendSvg, width, height);
+}
+
+// Registry gambar main-thread (jalur inline) — cermin burnWorker.
+let inlineGlassKey = "";
+const inlineStaticKeys = new Set<string>();
+
+async function ensureInlineImages(
+  svg: string,
+  baseRgba: Uint8Array,
+  width: number,
+  height: number,
+): Promise<void> {
+  if (!svg.includes("data:image/")) return;
+  const glass = svg.match(/href="(data:image\/jpeg;base64,[^"]+)"/);
+  if (glass && glass[1] !== inlineGlassKey) {
+    if (inlineGlassKey) await unregisterImageWasm(inlineGlassKey);
+    await registerImageWasm(glass[1], baseRgba, width, height);
+    inlineGlassKey = glass[1];
+  }
+  const stroke = svg.match(/href="(data:image\/png;base64,[^"]+)"/);
+  if (stroke && !inlineStaticKeys.has(stroke[1])) {
+    const decoded = await decodeDataUrlRgba(stroke[1]);
+    if (decoded) {
+      await registerImageWasm(stroke[1], decoded.rgba, decoded.w, decoded.h);
+      inlineStaticKeys.add(stroke[1]);
+    }
+  }
 }
 
 /**
@@ -96,4 +129,42 @@ export async function rasterSvgWasm(
 ): Promise<Uint8Array> {
   const wasm = await initSvgrWasm();
   return wasm.raster_svg(svg, width, height);
+}
+
+/**
+ * Daftarkan piksel RGBA untuk `<image href>` — usvgr TIDAK men-decode data
+ * URL; kunci harus PERSIS string href di SVG. Kaca selene: kunci berganti
+ * tiap frame → pemanggil wajib unregister kunci lama (lihat burnWorker).
+ */
+export async function registerImageWasm(
+  href: string,
+  rgba: Uint8Array,
+  width: number,
+  height: number,
+): Promise<void> {
+  const wasm = await initSvgrWasm();
+  wasm.register_image(href, rgba, width, height);
+}
+
+export async function unregisterImageWasm(href: string): Promise<void> {
+  const wasm = await initSvgrWasm();
+  wasm.unregister_image(href);
+}
+
+/** Decode data URL gambar → RGBA (untuk gambar statis seperti stroke iris). */
+export async function decodeDataUrlRgba(
+  href: string,
+): Promise<{ rgba: Uint8Array; w: number; h: number } | null> {
+  try {
+    const blob = await (await fetch(href)).blob();
+    const bmp = await createImageBitmap(blob);
+    const c = new OffscreenCanvas(bmp.width, bmp.height);
+    const cctx = c.getContext("2d");
+    if (!cctx) return null;
+    cctx.drawImage(bmp, 0, 0);
+    const d = cctx.getImageData(0, 0, bmp.width, bmp.height);
+    return { rgba: new Uint8Array(d.data.buffer), w: bmp.width, h: bmp.height };
+  } catch {
+    return null;
+  }
 }

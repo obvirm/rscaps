@@ -13,6 +13,8 @@
 //! supaya layout teks tidak dihitung ulang tiap frame.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use svgr::usvgr::fontdb;
 use wasm_bindgen::prelude::*;
 
@@ -20,6 +22,33 @@ thread_local! {
     static FONTDB: RefCell<fontdb::Database> = RefCell::new(fontdb::Database::new());
     static CACHE: RefCell<Option<svgr::SvgrCache>> = RefCell::new(None);
     static POOL: RefCell<svgr::PixmapPool> = RefCell::new(svgr::PixmapPool::new());
+}
+
+/// Registry gambar untuk `<image href>`: usvgr TIDAK men-decode data URL —
+/// host mendaftarkan piksel RGBA ter-decode dengan kunci PERSIS string href
+/// di SVG (data URL penuh). Kunci kaca selene berganti tiap frame → host
+/// me-unregister kunci lama agar memori tetap terikat.
+fn image_registry() -> &'static Mutex<HashMap<String, Arc<svgr::usvgr::PreloadedImageData>>> {
+    static IMAGES: OnceLock<Mutex<HashMap<String, Arc<svgr::usvgr::PreloadedImageData>>>> =
+        OnceLock::new();
+    IMAGES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Daftarkan gambar (RGBA, sudah straight/unpremultiplied) di bawah `href`.
+/// Kunci harus sama persis dengan atribut href di SVG.
+#[wasm_bindgen]
+pub fn register_image(href: &str, rgba: &[u8], width: u32, height: u32) {
+    let data = svgr::usvgr::PreloadedImageData::new(href.to_string(), width, height, rgba);
+    image_registry()
+        .lock()
+        .expect("image registry")
+        .insert(href.to_string(), Arc::new(data));
+}
+
+/// Hapus satu gambar terdaftar (kunci kaca frame sebelumnya).
+#[wasm_bindgen]
+pub fn unregister_image(href: &str) {
+    image_registry().lock().expect("image registry").remove(href);
 }
 
 /// Load satu font (bytes TTF/OTF/TTC) ke fontdb global.
@@ -63,7 +92,9 @@ pub fn raster_svg(svg: &str, width: u32, height: u32) -> Result<Vec<u8>, JsValue
 #[wasm_bindgen]
 pub fn raster_svg_profile(svg: &str, width: u32, height: u32) -> String {
     let t0 = js_sys::Date::now();
-    let opt = svgr::usvgr::Options::default();
+    let images = image_registry().lock().expect("image registry");
+    let mut opt = svgr::usvgr::Options::default();
+    opt.image_data = Some(&images);
     let tree = match FONTDB.with(|db| svgr::usvgr::Tree::from_str(svg, &opt, &db.borrow())) {
         Ok(t) => t,
         Err(e) => return format!("parse-error: {e}"),
@@ -169,7 +200,9 @@ pub fn burn_frame(
 // ── internal: raster SVG → Pixmap ──────────────────────────────────────────
 
 fn render_svg_to_pixmap(svg: &str, width: u32, height: u32) -> Result<svgr::tiny_skia::Pixmap, String> {
-    let opt = svgr::usvgr::Options::default();
+    let images = image_registry().lock().expect("image registry");
+    let mut opt = svgr::usvgr::Options::default();
+    opt.image_data = Some(&images);
     // Parse dengan BORROW, bukan clone fontdb — clone memindahkan seluruh
     // data font (10-30MB) tiap raster ≈ 5-7ms. `svgr::render` tidak menerima
     // fontdb (font sudah di-resolve Tree saat parse), jadi borrow cukup dan

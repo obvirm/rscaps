@@ -6,7 +6,7 @@
 // (source-over untuk base, difference untuk blend) → VideoFrame(canvas)
 // ditransfer balik ke encoder. Tanpa getImageData / tanpa buffer 8.3MB
 // GPU→CPU→GPU per frame.
-import { rasterSvgWasm } from "./svgrwasm";
+import { rasterSvgWasm, registerImageWasm, unregisterImageWasm, decodeDataUrlRgba } from "./svgrwasm";
 
 interface BurnRequest {
   idx: number;
@@ -80,12 +80,51 @@ function svgHasPaint(svg: string): boolean {
 }
 const layerCache = new Map<string, ImageBitmap>();
 
+// Registry gambar worker-side: kaca selene (kunci jpeg berganti per frame —
+// piksel mentah frame diambil dari kanvas komposit) + gambar statis seperti
+// stroke iris (decode sekali per kunci, tak pernah di-unregister).
+let lastGlassKey = "";
+const staticKeys = new Set<string>();
+
+async function ensureSvgImages(
+  svg: string,
+  ctx: OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number,
+): Promise<void> {
+  if (!svg.includes("data:image/")) return;
+  // Kaca selene: piksel mentah frame (sudah di kanvas) di bawah kunci
+  // data URL jpeg-nya; blur/saturate dikerjakan filter usvgr (region kecil).
+  const glass = svg.match(/href="(data:image\/jpeg;base64,[^"]+)"/);
+  if (glass && glass[1] !== lastGlassKey) {
+    if (lastGlassKey) unregisterImageWasm(lastGlassKey);
+    const data = ctx.getImageData(0, 0, width, height);
+    await registerImageWasm(glass[1], new Uint8Array(data.data.buffer), width, height);
+    lastGlassKey = glass[1];
+  }
+  // Statis (stroke iris): decode sekali, kunci data URL png.
+  const stroke = svg.match(/href="(data:image\/png;base64,[^"]+)"/);
+  if (stroke && !staticKeys.has(stroke[1])) {
+    const decoded = await decodeDataUrlRgba(stroke[1]);
+    if (decoded) {
+      await registerImageWasm(stroke[1], decoded.rgba, decoded.w, decoded.h);
+      staticKeys.add(stroke[1]);
+    }
+  }
+}
+
 // Profiler worker (dev): rata-rata ms per komponen, log tiap 600 frame.
 const wp = { raster: 0, mkBmp: 0, draw: 0, vf: 0, n: 0, cacheHit: 0, cacheMiss: 0 };
 
-async function layerBitmap(svg: string, width: number, height: number): Promise<ImageBitmap | null> {
+async function layerBitmap(
+  svg: string,
+  width: number,
+  height: number,
+  ctx: OffscreenCanvasRenderingContext2D,
+): Promise<ImageBitmap | null> {
   if (!svg || svg.trim().length === 0) return null;
   if (!svgHasPaint(svg)) return null; // layer kosong: tak perlu raster
+  await ensureSvgImages(svg, ctx, width, height);
   const cached = layerCache.get(svg);
   if (cached) {
     wp.cacheHit++;
@@ -159,12 +198,12 @@ self.onmessage = async (e: MessageEvent<BurnRequest>) => {
       const d1 = performance.now();
       wp.draw += d1 - d0;
 
-      const base = await layerBitmap(svg, width, height);
+      const base = await layerBitmap(svg, width, height, ctx);
       if (base) {
         ctx.globalCompositeOperation = "source-over";
         ctx.drawImage(base, 0, 0);
       }
-      const blendBmp = await layerBitmap(blend, width, height);
+      const blendBmp = await layerBitmap(blend, width, height, ctx);
       if (blendBmp) {
         ctx.globalCompositeOperation = "difference";
         ctx.drawImage(blendBmp, 0, 0);
@@ -191,12 +230,12 @@ self.onmessage = async (e: MessageEvent<BurnRequest>) => {
       ctx.drawImage(bitmap, 0, 0, width, height);
       bitmap.close();
 
-      const base = await layerBitmap(svg, width, height);
+      const base = await layerBitmap(svg, width, height, ctx);
       if (base) {
         ctx.globalCompositeOperation = "source-over";
         ctx.drawImage(base, 0, 0);
       }
-      const blendBmp = await layerBitmap(blend, width, height);
+      const blendBmp = await layerBitmap(blend, width, height, ctx);
       if (blendBmp) {
         ctx.globalCompositeOperation = "difference";
         ctx.drawImage(blendBmp, 0, 0);
