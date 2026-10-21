@@ -6,6 +6,8 @@ import {
   Mp4OutputFormat,
   WebMOutputFormat,
   BufferTarget,
+  StreamTarget,
+  type StreamTargetChunk,
   CanvasSource,
   VideoSampleSource,
   VideoSample,
@@ -63,6 +65,12 @@ export interface BurnInOptions {
     wanted: boolean;
     supply: (jpeg: Uint8Array) => void;
   };
+  /** Streaming: tulis mux langsung ke WritableStream (mis.
+   * FileSystemWritableFileStream dari showSaveFilePicker) — file besar
+   * tidak ditahan di RAM 2× (BufferTarget + fastStart "in-memory").
+   * Bila diisi, nilai kembalian adalah Blob KOSONG (sentinel) — file
+   * sudah ditulis ke tujuan; pemanggil tak perlu downloadBlob. */
+  streamTo?: WritableStream<StreamTargetChunk> | null;
 }
 
 const QUALITY: Record<ExportQuality, Quality> = {
@@ -70,6 +78,24 @@ const QUALITY: Record<ExportQuality, Quality> = {
   medium: new Quality("medium"),
   high: new Quality("high"),
 };
+
+/** Bungkus `FileSystemWritableFileStream` (File System Access API) menjadi
+ * `WritableStream<StreamTargetChunk>` untuk `StreamTarget`. mediabunny
+ * mengunci (getWriter) stream yang diberikan dan menutupnya saat
+ * `output.finalize()` — wrapper menjaga FSA writable TETAP tidak terkunci:
+ * sukses → writer.close() → close() wrapper → file persist; gagal →
+ * `abort()` bisa dipanggil langsung ke FSA (partial dibuang, lock lepas). */
+export function wrapFileSystemWritable(fw: {
+  write: (p: unknown) => Promise<void>;
+  close: () => Promise<void>;
+  abort?: (r?: unknown) => Promise<void>;
+}): WritableStream<StreamTargetChunk> {
+  return new WritableStream<StreamTargetChunk>({
+    write: (chunk) => fw.write(chunk),
+    close: () => fw.close(),
+    abort: (reason) => fw.abort?.(reason) ?? Promise.resolve(),
+  });
+}
 
 // Bitrate video eksplisit (menggantikan preset QUALITY mediabunny yang
 // terlalu pelit: high = 6.1 Mbps @1080p). Tabel dasar mengikuti rekomendasi
@@ -166,9 +192,16 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
   const audioCodecs: AudioCodec[] = opts.format === "webm" ? ["opus"] : ["aac"];
   const aCodec = aTrack ? await getFirstEncodableAudioCodec(audioCodecs) : null;
 
-  const target = new BufferTarget();
+  const streaming = opts.streamTo != null;
+  // Streaming: mux menulis langsung ke WritableStream (backpressure
+  // mengalir ke encoder) — RAM konstan. Fallback: BufferTarget (RAM ≈ 2×
+  // ukuran file: buffer + penyusunan moov "in-memory").
+  const bufTarget = streaming ? null : new BufferTarget();
+  const target = bufTarget ?? new StreamTarget(opts.streamTo!, { chunked: true });
   const format =
-    opts.format === "webm" ? new WebMOutputFormat() : new Mp4OutputFormat({ fastStart: "in-memory" });
+    opts.format === "webm"
+      ? new WebMOutputFormat()
+      : new Mp4OutputFormat({ fastStart: streaming ? false : "in-memory" });
   const output = new Output({ format, target });
 
   const canvas = new OffscreenCanvas(width, height);
@@ -620,7 +653,13 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
   console.log("[exportstage] before finalize");
   await output.finalize();
   console.log("[exportstage] after finalize");
-  const buffer = target.buffer;
+  if (!bufTarget) {
+    // Jalur streaming: data sudah tertulis ke WritableStream selama encode.
+    return new Blob([], {
+      type: opts.format === "webm" ? "video/webm" : "video/mp4",
+    });
+  }
+  const buffer = bufTarget.buffer;
   if (!buffer || buffer.byteLength === 0) throw new Error("export produced no data");
   console.log("[exportstage] blob build", buffer.byteLength);
   return new Blob([buffer], {

@@ -1,7 +1,7 @@
 import { loadBridge, type LoadedBridge } from "./wasm";
 import { splitSvgLayers } from "./svgLayers";
 import { transcribeBlob, type TranscribeStage } from "./transcribe";
-import { burnInExport, computeOutputSize, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
+import { burnInExport, computeOutputSize, wrapFileSystemWritable, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
 import {
   formatTime,
   newProjectId,
@@ -1473,11 +1473,56 @@ class StudioState {
   ): Promise<void> {
     if (this.exporting) return;
     this.exporting = true;
+    // Tujuan file: Chromium → tulis streaming langsung ke disk
+    // (showSaveFilePicker + StreamTarget; file besar tak menggandakan RAM).
+    // Picker dipanggil SEBELUM await berat (bootWasm/decode) supaya user
+    // activation masih hidup; gagal/batal → fallback BufferTarget + download.
+    let writable: Parameters<typeof burnInExport>[0]["streamTo"] = null;
+    let fsFile: { abort?: (r?: unknown) => Promise<void> } | null = null;
     try {
       await this.bootWasm();
       if (!this.wasm) throw new Error("wasm not ready");
       const project = await getProject(projectId);
       if (!project) throw new Error("project not found");
+
+      const picker = (window as unknown as {
+        showSaveFilePicker?: (o: {
+          suggestedName?: string;
+          types?: { description?: string; accept: Record<string, string[]> }[];
+        }) => Promise<{
+          createWritable: () => Promise<{
+            write: (p: unknown) => Promise<void>;
+            close: () => Promise<void>;
+            abort?: (r?: unknown) => Promise<void>;
+          }>;
+        }>;
+      }).showSaveFilePicker;
+      if (typeof picker === "function") {
+        const ext = opts.format === "webm" ? "webm" : "mp4";
+        try {
+          const handle = await picker.call(window, {
+            suggestedName: `${project.name || "export"}.${ext}`,
+            types: [
+              {
+                description: opts.format === "webm" ? "WebM video" : "MP4 video",
+                accept: { [opts.format === "webm" ? "video/webm" : "video/mp4"]: [`.${ext}`] },
+              },
+            ],
+          });
+          const fw = await handle.createWritable();
+          fsFile = fw;
+          // Wrapper: mediabunny mengunci wrapper-nya dan menutup file saat
+          // finalize; FSA asli tetap bebas untuk abort saat gagal.
+          writable = wrapFileSystemWritable(fw);
+        } catch (pickErr) {
+          // Batal (AbortError) → batalkan export; gagal lain → fallback RAM.
+          if ((pickErr as DOMException)?.name === "AbortError") {
+            this.exporting = false;
+            return;
+          }
+          writable = null;
+        }
+      }
 
       // When exporting the project open in the editor, prefer the in-memory
       // video blob (already loaded on screen) over a fresh IndexedDB read, and
@@ -1530,6 +1575,7 @@ class StudioState {
           wanted: this.usesFrameImage,
           supply: (bytes) => this.wasm?.setFrameImage(bytes),
         },
+        streamTo: writable,
       });
       const ext = opts.format === "webm" ? "webm" : "mp4";
       if (import.meta.env.DEV && this.rfN > 0) {
@@ -1537,13 +1583,22 @@ class StudioState {
           `[exportprof] render_frame=${(this.rfAcc / this.rfN).toFixed(3)}ms x${this.rfN}`,
         );
       }
-      console.log("[exportstage] downloadBlob start");
-      this.downloadBlob(out, `${project.name || "export"}.${ext}`);
-      console.log("[exportstage] downloadBlob end");
-      this.setStatus(`exported ${project.name}.${ext}`);
+      if (writable) {
+        // Jalur streaming: StreamTarget menulis ke file selama encode dan
+        // MENUTUP writer-nya saat output.finalize() — tidak ada close lagi
+        // di sini (close manual = "Cannot close a locked stream").
+        this.setStatus(`exported ${project.name || "export"}.${ext} (streamed to disk)`);
+      } else {
+        console.log("[exportstage] downloadBlob start");
+        this.downloadBlob(out, `${project.name || "export"}.${ext}`);
+        console.log("[exportstage] downloadBlob end");
+        this.setStatus(`exported ${project.name}.${ext}`);
+      }
     } catch (err) {
       console.error(err);
       this.setStatus(String(err), true);
+      // Gagal di tengah streaming: buang partial + lepas lock file tujuan.
+      fsFile?.abort?.(err)?.catch?.(() => {});
     } finally {
       this.exporting = false;
     }
