@@ -199,6 +199,21 @@ impl<const W: usize, const H: usize> Video for CompositeVideo<W, H> {
 
     fn render_frame<'a>(&'a self, frame: Frame, ctx: &FFramesContext<'a, '_>) -> Svgr<'a> {
         let idx = frame.index;
+        // Diagnostik (env-gated): RSCAPS_NO_CAPTION=1 melompati caption —
+        // isolasi biaya parse+raster caption vs video-image di profil.
+        if std::env::var("RSCAPS_NO_CAPTION").as_deref() == Ok("1") {
+            let w = W;
+            let h = H;
+            if let Some(img) = self.frames.get(idx.saturating_sub(self.frame_offset)) {
+                return Svgr::from(format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><image href="{}" x="0" y="0" width="{w}" height="{h}" preserveAspectRatio="xMidYMid meet"/></svg>"#,
+                    img.id
+                ));
+            }
+            return Svgr::from(format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"/>"#
+            ));
+        }
         let caption = self.caption.render_frame(frame, ctx);
         let caption_str = caption.to_string();
         let w = W;
@@ -566,7 +581,10 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
         let media = FframesMedia {
             images: images_of(&frames),
             fonts: fonts.clone(),
-            audio: audio_map.clone(),
+            // Potongan VIDEO-ONLY: audio di-mux SEKALI di akhir — satu
+            // encode AAC = satu priming di awal file, tanpa drift
+            // akumulatif ~23ms di tiap batas concat.
+            audio: HashMap::new(),
         };
         let seg_path = tmp_dir.join(format!("seg_{start}.mp4"));
         let render_opts = RenderOptions {
@@ -585,7 +603,8 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             src_h,
             frames,
             start,
-            audio_name.clone(),
+            // Nama audio kosong → CompositeVideo::audio() = AudioMap::none().
+            String::new(),
             duration_frames,
             &render_opts,
             &seg_path,
@@ -597,12 +616,48 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
         segments.push(seg_path);
     }
 
-    concat_segments(&ffmpeg, &segments, opts.out)?;
+    // Concat potongan video-only; bila sumber punya audio (dan decode
+    // berhasil), mux audio SEKALI dari wav ekstraksi — video -c copy.
+    let mux_from_wav = if audio_name.is_empty() {
+        None
+    } else {
+        Some(tmp_dir.join("audio.wav"))
+    };
+    let concat_out = match &mux_from_wav {
+        Some(_) => tmp_dir.join("concat.mp4"),
+        None => opts.out.to_path_buf(),
+    };
+    concat_segments(&ffmpeg, &segments, &concat_out)?;
+    if let Some(wav) = &mux_from_wav {
+        eprintln!("[fframes] mux audio sekali (satu encode AAC) → {}", opts.out.display());
+        mux_audio_once(&ffmpeg, &concat_out, wav, opts.out)?;
+    }
     eprintln!(
         "[fframes] selesai → {} ({} potongan)",
         opts.out.display(),
         segments.len()
     );
+    Ok(())
+}
+
+/// Mux audio SEKALI ke video hasil concat: satu encode AAC = satu priming
+/// di awal file (perilaku normal), tanpa drift akumulatif di tiap batas
+/// segmen concat. Video disalin apa adanya (`-c:v copy`).
+fn mux_audio_once(ffmpeg: &Path, video: &Path, wav: &Path, out: &Path) -> Result<()> {
+    let status = Command::new(ffmpeg)
+        .args(["-y", "-hide_banner", "-loglevel", "error"])
+        .arg("-i")
+        .arg(video)
+        .arg("-i")
+        .arg(wav)
+        .args([
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+        ])
+        .arg(out)
+        .status()
+        .with_context(|| format!("jalankan {}", ffmpeg.display()))?;
+    ensure!(status.success(), "ffmpeg mux audio exit non-zero");
     Ok(())
 }
 

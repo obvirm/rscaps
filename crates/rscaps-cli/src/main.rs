@@ -86,7 +86,7 @@ enum Cmd {
         /// Folder font tambahan selain font sistem (default: studio/tplfonts/ttf kalau ada)
         #[arg(long)]
         fonts: Option<PathBuf>,
-        /// Mesin raster: cpu (usvgr) | skia (GPU, butuh --features gpu-skia) | fframes (pipeline, menyusul)
+        /// Mesin raster: cpu (usvgr) | skia (GPU, butuh --features gpu-skia); fframes tak didukung di `frames` — pakai `render`
         #[arg(long, default_value = "cpu")]
         engine: String,
     },
