@@ -392,28 +392,46 @@ pub fn measure_words_typed<'a>(
     words: &[TimedWord],
     stack: &Stack,
     latin_ttf: &'static [u8],
-    latin_weight: u16,
+    // Weight latin kini tersirat dari bytes statis (`latin_ttf`) — file yang
+    // disertakan template sudah pada weight template. Parameter dipertahankan
+    // demi kompatibilitas pemanggil.
+    _latin_weight: u16,
     font_source: Option<&'a dyn fframes::FontSource<'a>>,
     fs: f32,
     ls_px: f32,
     uppercase: bool,
     types: &[Option<WordType>],
 ) -> Measured {
-    let latin_upem = fframes::ttf_parser::Face::parse(latin_ttf, 0)
-        .expect("template font parses")
-        .units_per_em();
-    // Slot 0 = latin, 1 = arabic, 2 = hebrew.
-    let script_upems = [
-        0u16,
-        script_metrics(stack.arabic).unwrap().2 as u16,
-        script_metrics(stack.hebrew).unwrap().2 as u16,
-    ];
-    let upems = [latin_upem, script_upems[1], script_upems[2]];
+    // Slot 0 (latin) diukur dari BYTES STATIS template — file yang sama
+    // disertakan template, identik di semua host. Resolver host punya semantik
+    // weight-fallback berbeda: WasmFontSource (wasm) = HashMap exact-match
+    // (miss → coba nama stack berikutnya), sedangkan CliFontSource /
+    // RendererFontSource (native) = fontdb query (nearest-weight diam-diam).
+    // Kasus nyata: poppins-900 ID1-nya "Poppins Black" → "Poppins"@900 di
+    // fontdb jatuh ke 700 (advance beda ~2.5%/kata) sementara wasm menemukan
+    // file yang benar lewat nama stack "Poppins Black". Bytes statis
+    // menghilangkan seluruh kelas divergensi itu.
+    let latin_face = fframes::ttf_parser::Face::parse(latin_ttf, 0)
+        .expect("template font parses");
+    let latin_upem = latin_face.units_per_em();
+    // Advance monospace (per 'm') bila face monospace, meniru
+    // FontFace::font_variant di jalur font_source.
+    let latin_mono_units = if latin_face.is_monospaced() {
+        latin_face
+            .glyph_index('m')
+            .and_then(|g| latin_face.tables().hmtx.and_then(|h| h.advance(g)))
+    } else {
+        None
+    };
+    // Slot 1 = arabic, 2 = hebrew (shaping harfbuzz + face host).
     let families = [stack.latin, stack.arabic, stack.hebrew];
     let mut faces: [Option<Box<dyn fframes::FontFace<'a> + 'a>>; 3] = [None, None, None];
     if let Some(source) = font_source {
         for (i, family) in families.into_iter().enumerate() {
-            let weight = if i == 0 { latin_weight } else { native_weight(family) };
+            if i == 0 {
+                continue; // latin: dari bytes statis, bukan resolver host.
+            }
+            let weight = native_weight(family);
             let probe = fframes::FontQuery {
                 family,
                 size: 1,
@@ -421,7 +439,7 @@ pub fn measure_words_typed<'a>(
                 ..Default::default()
             };
             // Coba semua nama dalam font-stack: name-table fontsource kadang
-            // hanya mengenal alternate ("Poppins Black", "Montserrat Thin", …).
+            // hanya mengenal alternate ("Montserrat Thin", …).
             // Tanpa ini resolve gagal → fallback 0.5em/char → kata tumpang
             // tindih saat dirender dengan lebar asli.
             faces[i] = font_stack_names(family)
@@ -441,7 +459,6 @@ pub fn measure_words_typed<'a>(
         } else {
             2
         };
-        let upem = upems[slot] as usize;
         let display: String = if uppercase {
             word.display.to_uppercase()
         } else {
@@ -452,30 +469,22 @@ pub fn measure_words_typed<'a>(
         let base_advance = if slot != 0 {
             shaped_advance(family, &display, fs).unwrap_or(fallback)
         } else {
-            match faces[slot].as_deref() {
-                Some(face) => match face.font_variant(upem) {
-                    Some(variant) => {
-                        // Per karakter: resolve face → unit asli; glif tak
-                        // dimiliki face (CJK/Thai dsb) → perkiraan sistem.
-                        let mut acc = 0.0f32;
-                        for ch in display.chars() {
-                            let units = match variant {
-                                fframes::FontVariant::Monospaced(mono) => Some(mono),
-                                fframes::FontVariant::Variable => {
-                                    face.resolve_char_width(upem, ch)
-                                }
-                            };
-                            acc += match units {
-                                Some(u) => u as f32 * fs / upem as f32,
-                                None => fallback_char_advance(ch, fs),
-                            };
-                        }
-                        acc
-                    }
-                    None => fallback,
-                },
-                None => fallback,
+            // Per karakter dari bytes statis template: unit hmtx asli;
+            // glif tak dimiliki face (CJK/Thai dsb) → perkiraan sistem.
+            let mut acc = 0.0f32;
+            for ch in display.chars() {
+                let units = match latin_mono_units {
+                    Some(mono) => Some(mono),
+                    None => latin_face
+                        .glyph_index(ch)
+                        .and_then(|g| latin_face.tables().hmtx.and_then(|h| h.advance(g))),
+                };
+                acc += match units {
+                    Some(u) => u as f32 * fs / latin_upem as f32,
+                    None => fallback_char_advance(ch, fs),
+                };
             }
+            acc
         };
         // Tier-2: kata latin ber-tag diukur dengan face snap-nya sendiri;
         // keluarga di luar tabel FACES → face dasar dengan advance × scale.
@@ -669,9 +678,11 @@ mod tests {
             .iter()
             .map(|t| word(t))
             .collect();
-        // font_source None -> latin falls back to utf16 * fs * 0.5; the
-        // Arabic word ignores font_source and shapes with embedded Cairo
-        // (cursive joining — narrower than the per-char isolated sum).
+        // Latin TIDAK lagi bergantung font_source: slot 0 diukur dari bytes
+        // statis template (deterministik lintas host — wasm HashMap exact vs
+        // fontdb nearest-weight tidak lagi berpengaruh). Kata Arab mengabaikan
+        // font_source dan menata dengan Cairo tertanam (cursive joining —
+        // lebih sempit dari jumlah per-karakter terisolasi).
         let m = measure_words(
             &words,
             &stack,
@@ -682,11 +693,17 @@ mod tests {
             0.0,
             false,
         );
-        assert_eq!(
-            m.families,
-            vec!["Poppins", "Poppins", FONT_CAIRO]
-        );
-        assert!((m.widths[0] - 7.0 * 40.0 * 0.5).abs() < 1e-3);
+        let face = fframes::ttf_parser::Face::parse(TEST_POPPINS_TTF, 0).unwrap();
+        let expected: f32 = "Welcome"
+            .chars()
+            .map(|ch| {
+                face.glyph_index(ch)
+                    .and_then(|g| face.tables().hmtx.and_then(|h| h.advance(g)))
+                    .map(|u| u as f32 * 40.0 / face.units_per_em() as f32)
+                    .unwrap_or_else(|| fallback_char_advance(ch, 40.0))
+            })
+            .sum();
+        assert!((m.widths[0] - expected).abs() < 1e-3);
         let isolated_sum = 5.0 * 40.0 * 0.5; // old per-char fallback
         assert!(m.widths[2] > 0.0 && m.widths[2] < isolated_sum);
         assert_eq!(m.widths[2], shaped_advance(FONT_CAIRO, "مرحبا", 40.0).unwrap());
