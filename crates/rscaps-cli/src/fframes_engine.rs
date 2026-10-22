@@ -920,8 +920,13 @@ pub(crate) fn concat_segments(ffmpeg: &Path, segments: &[PathBuf], out: &Path) -
         .join("concat.txt");
     let mut body = String::new();
     for seg in segments {
+        // Entri list WAJIB absolut: concat demuxer me-resolve path relatif
+        // terhadap LOKASI FILE LIST (bukan CWD) — entri relatif membuat
+        // `--out out/x.mp4` mencari `out/out/...`.
+        let abs = std::path::absolute(seg)
+            .with_context(|| format!("absolute path untuk {}", seg.display()))?;
         // Path concat demuxer pakai '/' (hindari escape backslash Windows).
-        body.push_str(&format!("file '{}'\n", seg.to_string_lossy().replace('\\', "/")));
+        body.push_str(&format!("file '{}'\n", abs.to_string_lossy().replace('\\', "/")));
     }
     std::fs::write(&list, body).with_context(|| format!("tulis {}", list.display()))?;
 

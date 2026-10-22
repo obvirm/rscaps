@@ -11,7 +11,6 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail, ensure};
-use rayon::prelude::*;
 
 use crate::doc;
 use crate::fonts::CliFontSource;
@@ -259,7 +258,9 @@ pub fn render_video(
     }
 
     // Engine skia: backend Vulkan/CPU + font-DB fframes dibuat SEKALI di sini
-    // (bukan per frame) — lihat SkiaRasterizer.
+    // (bukan per frame) - lihat SkiaRasterizer. Hanya saat feature gpu-skia;
+    // di luar feature, engine skia bail di pemilihan lane raster.
+    #[cfg(feature = "gpu-skia")]
     let skia_raster = if opts.engine == "skia" {
         Some(SkiaRasterizer::new(
             probe.width,
@@ -425,7 +426,6 @@ pub fn render_video(
                         fps_f64,
                         out: seg_path,
                         progress_ref,
-                        hwaccel: opts.hwaccel,
                         band_y,
                         band_h,
                     })?;
@@ -632,7 +632,6 @@ struct SliceParams<'a> {
     fps_f64: f64,
     out: PathBuf,
     progress_ref: &'a std::sync::atomic::AtomicU32,
-    hwaccel: Option<&'a str>,
     /// Band crop: baris atas + tinggi pita (band_h == tinggi frame = full).
     band_y: u32,
     band_h: u32,
@@ -843,9 +842,7 @@ fn run_skia_slice(p: SliceParams<'_>) -> Result<()> {
                     break;
                 }
             }
-            let new_total = s1 - s0;
-            let newly = new_total - written;
-            written = new_total;
+            let newly = (s1 - s0) - written;
             p.progress_ref
                 .fetch_add(newly, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1071,10 +1068,6 @@ impl SkiaRasterizer {
 
 #[cfg(not(feature = "gpu-skia"))]
 impl SkiaRendererOwned<'_> {
-    pub fn render_frame_rgba(&mut self, _svg: &str, _width: u32, _height: u32) -> Result<Vec<u8>> {
-        unreachable!("SkiaRendererOwned hanya bisa dibuat saat feature gpu-skia aktif")
-    }
-
     pub fn render_frame_png(&mut self, _svg: &str, _width: u32, _height: u32) -> Result<Vec<u8>> {
         unreachable!("SkiaRendererOwned hanya bisa dibuat saat feature gpu-skia aktif")
     }
