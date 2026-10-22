@@ -1,6 +1,7 @@
 import { loadBridge, type LoadedBridge } from "./wasm";
 import { splitSvgLayers } from "./svgLayers";
 import { transcribeBlob, type TranscribeStage } from "./transcribe";
+import { saveFileNative } from "./tauri";
 import { burnInExport, computeOutputSize, wrapFileSystemWritable, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
 import {
   formatTime,
@@ -1622,7 +1623,17 @@ class StudioState {
     }
   }
 
-  private downloadBlob(blob: Blob, filename: string): void {
+  private async downloadBlob(blob: Blob, filename: string): Promise<void> {
+    // Shell Tauri: dialog Save native + tulis chunked — bukan <a download>.
+    const ext = filename.split(".").pop() ?? "";
+    const mime = blob.type || "application/octet-stream";
+    const saved = await saveFileNative(
+      new Uint8Array(await blob.arrayBuffer()),
+      filename,
+      mime.startsWith("video/") ? `${mime} video` : undefined,
+      ext ? [ext] : undefined,
+    );
+    if (saved !== null) return;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = filename;

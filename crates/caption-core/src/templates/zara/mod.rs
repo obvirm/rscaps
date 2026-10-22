@@ -98,11 +98,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` — the uppercased form is what gets
-/// measured *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
-}
 
 // ── render ────────────────────────────────────────────────────────────────
 
@@ -351,8 +346,8 @@ mod tests {
 
     #[test]
     fn uppercase_is_measured_and_emitted() {
-        assert_eq!(uppercase("already"), "ALREADY");
-        assert_eq!(uppercase("MiXeD 42"), "MIXED 42");
+        assert_eq!("already".to_uppercase(), "ALREADY");
+        assert_eq!("MiXeD 42".to_uppercase(), "MIXED 42");
         // The stroke and split geometry the ghost stack is built from.
         assert_eq!(STROKE_EM, 0.01);
         assert_eq!(SPLIT_X_EM, 0.05);

@@ -98,11 +98,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` — the uppercased form is what gets
-/// measured *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
-}
 
 // ── keyframe ports ────────────────────────────────────────────────────────
 
@@ -412,6 +407,6 @@ mod tests {
             max_width: 1920.0 * MAX_WIDTH_RATIO,
         };
         assert_eq!(splitter.split(&[400.0, 400.0, 400.0]).len(), 1);
-        assert_eq!(uppercase("pill"), "PILL");
+        assert_eq!("pill".to_uppercase(), "PILL");
     }
 }

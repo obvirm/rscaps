@@ -89,7 +89,9 @@ export async function burnFrameWasm(
   return wasm.burn_frame(baseRgba, svg, blendSvg, width, height);
 }
 
-// Registry gambar main-thread (jalur inline) — cermin burnWorker.
+// Registry gambar main-thread (jalur inline) — cermin burnWorker. Kaca
+// selene ditandai param `rscaps-glass`; gambar statis lain (stroke iris,
+// upload user) decode-once.
 let inlineGlassKey = "";
 const inlineStaticKeys = new Set<string>();
 
@@ -100,18 +102,19 @@ async function ensureInlineImages(
   height: number,
 ): Promise<void> {
   if (!svg.includes("data:image/")) return;
-  const glass = svg.match(/href="(data:image\/jpeg;base64,[^"]+)"/);
+  const glass = svg.match(/href="(data:image\/jpeg;rscaps-glass;base64,[^"]+)"/);
   if (glass && glass[1] !== inlineGlassKey) {
     if (inlineGlassKey) await unregisterImageWasm(inlineGlassKey);
     await registerImageWasm(glass[1], baseRgba, width, height);
     inlineGlassKey = glass[1];
   }
-  const stroke = svg.match(/href="(data:image\/png;base64,[^"]+)"/);
-  if (stroke && !inlineStaticKeys.has(stroke[1])) {
-    const decoded = await decodeDataUrlRgba(stroke[1]);
+  for (const m of svg.matchAll(/href="(data:image\/[a-z0-9.+-]+;base64,[^"]+)"/g)) {
+    const href = m[1];
+    if (href === inlineGlassKey || inlineStaticKeys.has(href)) continue;
+    const decoded = await decodeDataUrlRgba(href);
     if (decoded) {
-      await registerImageWasm(stroke[1], decoded.rgba, decoded.w, decoded.h);
-      inlineStaticKeys.add(stroke[1]);
+      await registerImageWasm(href, decoded.rgba, decoded.w, decoded.h);
+      inlineStaticKeys.add(href);
     }
   }
 }

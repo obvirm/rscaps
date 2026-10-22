@@ -105,11 +105,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` — the uppercased form is what gets
-/// measured *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
-}
 
 // ── outline filter ────────────────────────────────────────────────────────
 
@@ -465,6 +460,6 @@ mod tests {
         assert!((pop.eval(-1.0) - 1.0).abs() < 1e-6);
         assert!((pop.eval(POP_DURATION_S * 0.4) - 1.1).abs() < 1e-5);
         assert!((pop.eval(POP_DURATION_S) - 1.0).abs() < 1e-6);
-        assert_eq!(uppercase("hype moment"), "HYPE MOMENT");
+        assert_eq!("hype moment".to_uppercase(), "HYPE MOMENT");
     }
 }

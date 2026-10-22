@@ -92,11 +92,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` — the uppercased form is what gets
-/// measured *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
-}
 
 // ── render ────────────────────────────────────────────────────────────────
 
@@ -390,7 +385,7 @@ mod tests {
 
     #[test]
     fn hugo_uppercases_for_measure_and_emit() {
-        assert_eq!(uppercase("make it big"), "MAKE IT BIG");
+        assert_eq!("make it big".to_uppercase(), "MAKE IT BIG");
         assert_eq!(LINE_SPACING_EM, 0.0);
         assert_eq!(OUTLINE_THICKNESS_EM, 0.0);
     }

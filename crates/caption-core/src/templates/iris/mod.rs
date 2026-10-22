@@ -111,11 +111,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` is *not* set in iris's scss — the words
-/// pass through unchanged.
-fn normalize(text: &str) -> String {
-    text.to_string()
-}
 
 // ── stroke mask + brush outline ───────────────────────────────────────────
 
@@ -139,9 +134,15 @@ fn stroke_box(
     )
 }
 
-/// The `.segment::before` watercolour stroke MASK: the bundled PNG as an
-/// alpha-typed `<mask>` stretched over the bleed box (CSS
-/// `mask-size: 100% 100%`). Hanya `<mask>` — tempatnya DI DALAM `<defs>`.
+/// The `.segment::before` watercolour stroke MASK: the bundled PNG (atau
+/// upload user via kontrol `mask` — data URL apa pun yang bisa di-decode
+/// browser; SVG `<mask>` bertipe alpha, jadi alpha channel gambar yang
+/// menentukan) stretched over the bleed box (CSS `mask-size: 100% 100%`).
+/// Hanya `<mask>` — tempatnya DI DALAM `<defs>`.
+///
+/// Native CLI: data URL upload tidak dimasukkan registry gambar (hanya
+/// frame video) → mask kosong → highlight tak tergambar; stroke bawaan
+/// tetap bekerja. Fallback terdokumentasi, selaras kaca selene.
 fn stroke_defs(
     block_left: f32,
     block_top: f32,
@@ -151,10 +152,16 @@ fn stroke_defs(
     st: &style::Style,
 ) -> String {
     let (x, y, w, h) = stroke_box(block_left, block_top, block_w, block_h, fs, st);
+    let custom = st.str("mask", "");
+    let href = if custom.starts_with("data:image/") {
+        custom
+    } else {
+        format!("data:image/png;base64,{MARKER_STROKE_B64}")
+    };
     format!(
         "<mask id=\"iris-stroke\" mask-type=\"alpha\" x=\"{x}\" y=\"{y}\" width=\"{w}\" \
          height=\"{h}\" maskUnits=\"userSpaceOnUse\">\
-         <image href=\"data:image/png;base64,{MARKER_STROKE_B64}\" x=\"{x}\" y=\"{y}\" \
+         <image href=\"{href}\" x=\"{x}\" y=\"{y}\" \
          width=\"{w}\" height=\"{h}\" preserveAspectRatio=\"none\"/>\
          </mask>"
     )
@@ -505,6 +512,6 @@ mod tests {
             assert!(chars <= MAX_CHARS + 4, "chunk too long: {chars}");
         }
         assert_eq!(MAX_LINES, 1, "iris is always one line");
-        assert_eq!(normalize("Mixed Case"), "Mixed Case");
+        assert_eq!("Mixed Case".to_string(), "Mixed Case");
     }
 }

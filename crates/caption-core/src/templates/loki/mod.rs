@@ -121,11 +121,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` — the uppercased form is what gets
-/// measured *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
-}
 
 // ── beast-outline filter ──────────────────────────────────────────────────
 
@@ -502,6 +497,6 @@ mod tests {
             assert!(chars <= MAX_CHARS + 8, "chunk too long: {chars}");
         }
         assert_eq!(MAX_LINES, 2);
-        assert_eq!(uppercase("beast mode"), "BEAST MODE");
+        assert_eq!("beast mode".to_uppercase(), "BEAST MODE");
     }
 }

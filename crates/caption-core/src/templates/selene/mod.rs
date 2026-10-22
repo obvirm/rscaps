@@ -61,8 +61,7 @@ const PRIMARY: &str = "#ffffff"; // primary-color / highlight-color default
 const PLATE_DY_EM: f32 = 0.15;
 const PLATE_BLUR_EM: f32 = 0.5;
 const PLATE_SHADOW_ALPHA: f32 = 0.28;
-// ::after tint: rgba(255,255,255, tint-opacity * 1.6) at 0% → tint at 100%
-const TINT_TOP_ALPHA: f32 = 0.192; // 0.12 × 1.6
+// ::after tint gradient: 0% = tint-opacity * 1.6 (dihitung di emit)
 const TINT_BOTTOM_ALPHA: f32 = 0.12; // --tscaps-tint-opacity default
 // inset box-shadow bands: 0.04em each, emitted last-listed first (CSS
 // paint order — the first-listed inset lands on top of the rest).
@@ -299,8 +298,12 @@ pub fn render<'a>(
     let glass_svg = match crate::frame_image() {
         Some(bytes) => {
             let data = crate::base64_encode(&bytes);
+            // Param `rscaps-glass` = penanda khusus kaca (registry host +
+            // pemisah dari upload gambar user di kontrol `image`); param
+            // tambahan pada data URL valid per RFC 2397 dan diabaikan
+            // decoder browser.
             format!(
-                "<image href=\"data:image/jpeg;base64,{data}\" \
+                "<image href=\"data:image/jpeg;rscaps-glass;base64,{data}\" \
                  x=\"0\" y=\"0\" width=\"{video_w}\" height=\"{video_h}\" \
                  preserveAspectRatio=\"xMidYMid slice\" \
                  clip-path=\"url(#selene-clip)\" filter=\"url(#selene-glass)\"/>"
@@ -530,7 +533,8 @@ mod tests {
 
     #[test]
     fn tint_gradient_runs_from_the_control_default_times_one_point_six() {
-        assert!((TINT_BOTTOM_ALPHA * 1.6 - TINT_TOP_ALPHA).abs() < 1e-6);
+        // 0% = tint-opacity × 1.6 — dihitung di emit (bukan konstanta).
+        assert!((TINT_BOTTOM_ALPHA * 1.6 - 0.192).abs() < 1e-6);
         assert!((TINT_BOTTOM_ALPHA - 0.12).abs() < 1e-6);
     }
 

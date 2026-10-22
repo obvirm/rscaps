@@ -117,11 +117,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` — the uppercased form is what gets measured
-/// *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
-}
 
 // ── pulse-word-in ─────────────────────────────────────────────────────────
 
@@ -517,7 +512,7 @@ mod tests {
                 > pulse_progress(1250.0, line_start, ANIM_DURATION_S)
         );
         // Uppercasing is applied before measuring and before emitting.
-        assert_eq!(uppercase("Hello there"), "HELLO THERE");
-        assert_eq!(uppercase("élan"), "ÉLAN");
+        assert_eq!("Hello there".to_uppercase(), "HELLO THERE");
+        assert_eq!("élan".to_uppercase(), "ÉLAN");
     }
 }

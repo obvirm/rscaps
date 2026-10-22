@@ -98,11 +98,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` — the uppercased form is what gets
-/// measured *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
-}
 
 /// `scale-in($element: 'segment', $from: 0.94, $peak: 1.03,
 /// $from-opacity: 0)` — duration and easing are the mixin defaults.
@@ -393,7 +388,7 @@ mod tests {
             "no overshoot: {sampled_peak}"
         );
         // text-transform: uppercase on measure and emit alike.
-        assert_eq!(uppercase("Hello There"), "HELLO THERE");
+        assert_eq!("Hello There".to_uppercase(), "HELLO THERE");
         assert_eq!(LINE_SPACING_EM, -0.09);
     }
 }

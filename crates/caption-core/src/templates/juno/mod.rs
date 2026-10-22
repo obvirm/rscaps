@@ -92,11 +92,6 @@ fn line_metrics(dominant: &str) -> (f32, f32, f32) {
     }
 }
 
-/// `text-transform: uppercase` — the uppercased form is what gets
-/// measured *and* emitted.
-fn uppercase(text: &str) -> String {
-    text.to_uppercase()
-}
 
 // ── render ────────────────────────────────────────────────────────────────
 
@@ -341,6 +336,6 @@ mod tests {
         assert!(being && !not_yet && !already);
         assert_eq!(HIGHLIGHT, "#ffdd00");
         assert_eq!(SHADOW_OFFSETS_EM.len(), 6);
-        assert_eq!(uppercase("loud words"), "LOUD WORDS");
+        assert_eq!("loud words".to_uppercase(), "LOUD WORDS");
     }
 }
