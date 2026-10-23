@@ -212,7 +212,9 @@ pub fn render<'a>(
     let mut tag_svg = String::new();
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top: f32 = line_geoms[..line_idx].iter().map(|(lh, _)| lh).sum();
-        let baseline = line_top + line_geoms[line_idx].1;
+        // BLOK: top-anchored di block_top (alignment.verticalOffset) —
+        // baseline = block_top + akumulasi line + offset baseline line.
+        let baseline = block_top + line_top + line_geoms[line_idx].1;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);

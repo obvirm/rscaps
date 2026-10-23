@@ -360,10 +360,12 @@ pub fn render<'a>(
         weight = ov.font_weight,
     );
     for (i, &(start, end)) in lines.iter().enumerate() {
-        let line_top = cursor_top;
+        // ADVANCE dulu, baru ambil line_top — kalau dibalik, baris 2
+        // menumpuk baris 1 (kata kolom menimpa hint line, luca).
         if i > 0 {
             cursor_top += line_heights[i - 1] + line_spacing;
         }
+        let line_top = cursor_top;
 
         if i == 0 {
             // `.line:first-child` carries the entrance; its words are
@@ -459,9 +461,24 @@ pub fn render<'a>(
                     .map(|t| format!(" transform=\"{t}\""))
                     .unwrap_or_default();
                 let escaped = layout::escape_xml(text);
+                // Anchor ber-script memakai wajah skrip stack (anton stack →
+                // Lalezar) — sama dengan composite @font-face tscaps (katalog
+                // fontstack). Bila tetap Anton, usvgr fallback ke Arial
+                // (urutan fontdb) dan glifnya meluber menimpa kolom kata
+                // kecil (lebar raster > lebar layout Lalezar).
+                let anchor_family = if stack::word_family(text, &anton_stack) == anton_stack.latin {
+                    big_font.clone()
+                } else {
+                    stack::svg_font_family(anton_stack.arabic)
+                };
+                let anchor_family_attr = if anchor_family == big_font {
+                    format!("font-family=\"{big_font}\"")
+                } else {
+                    format!("font-family=\"{anchor_family}\"")
+                };
                 words_svg.push_str(&format!(
                     "<text x=\"{content_left}\" y=\"{big_baseline}\" fill=\"{blend}\" \
-                     font-family=\"{big_font}\" font-weight=\"{ANTON_FONT_WEIGHT}\" \
+                     {anchor_family_attr} font-weight=\"{ANTON_FONT_WEIGHT}\" \
                      font-size=\"{fs_big}\" letter-spacing=\"{ls_px}\"{opacity_attr} \
                      style=\"mix-blend-mode: difference\"{wo}{wo_transform}>{escaped}</text>"
                 ));

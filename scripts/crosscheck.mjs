@@ -233,16 +233,16 @@ async function seekTscaps(page, sec = SEEK_SEC) {
     setter.call(slider, String(sec));
     slider.dispatchEvent(new Event("input", { bubbles: true }));
     slider.dispatchEvent(new Event("change", { bubbles: true }));
-    return { ok: true, min: slider.min, max: slider.max, value: slider.value };
+    // currentTime AKTUAL video (player bisa mendarat sedikit di bawah nilai
+    // slider, mis. 1.2 -> 1.199) — jadi acuan frame yang sama di rscaps.
+    const vid = document.querySelector("video");
+    return { ok: true, actual: vid ? vid.currentTime : null, value: slider.value };
   }, sec);
   await sleep(600);
   if (!info.ok) console.log("[seekA miss]", JSON.stringify(info));
   else if (!seekLogged) {
     seekLogged = true;
-    const timeText = await page
-      .evaluate(() => document.body.innerText.match(/\d+:\d+\.\d+ \/ \d+:\d+\.\d+/)?.[0] || "")
-      .catch(() => "");
-    console.log("[seekA]", JSON.stringify(info), "display:", timeText);
+    console.log("[seekA]", JSON.stringify(info));
   }
   return info;
 }
@@ -303,9 +303,12 @@ try {
       for (const sec of TIMES) {
         const suffix = TIMES.length > 1 ? `@${sec}` : "";
         await pageA.bringToFront();
-        await seekTscaps(pageA, sec);
+        const seek = await seekTscaps(pageA, sec);
         await shotTscaps(pageA, `${OUT}/${t.id}${suffix}__tscaps.png`);
         await pageB.bringToFront();
+        // Pemetaan frame teruji: slider 1.2 -> tscaps melapor 1.199 tapi state
+        // kontennya = t 1.2 -> rscaps frame 12 = round(1.2*fps). JANGAN pakai
+        // floor(actual) — tscaps tampil 0.099s lebih awal (frame 11).
         await seekRscaps(pageB, sec);
         await shotRscaps(pageB, `${OUT}/${t.id}${suffix}__rscaps.png`);
       }

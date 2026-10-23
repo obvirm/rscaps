@@ -206,7 +206,9 @@ pub fn render<'a>(
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
         let line_top: f32 = line_geoms[..line_idx].iter().map(|(lh, _, _)| lh).sum();
         let (_, baseline_off, _) = line_geoms[line_idx];
-        let baseline = line_top + baseline_off;
+        // BLOK: baris pertama boleh tak mulai di y=0 — baseline = block_top
+        // (token tepi bawah di anchor) + akumulasi line + offset baseline.
+        let baseline = block_top + line_top + baseline_off;
         let line_w: f32 = widths[start..end].iter().map(|w| w + 2.0 * margin).sum();
         let line_left = center_x - line_w / 2.0;
         let xs = layout::word_x_positions(&widths[start..end], margin, line_left, line_w, rtl);
