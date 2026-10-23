@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 mod doc;
 mod fframes_engine;
 mod fonts;
+mod images;
 mod render;
 mod server;
 
@@ -271,6 +272,7 @@ struct CmdFramesArgs<'a> {
 
 fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
     let t0 = Instant::now();
+    crate::fonts::init_font_debug_logger();
     let format = args.format.to_lowercase();
     if format != "svg" && format != "png" {
         bail!("format harus svg atau png (didapat: {})", args.format);
@@ -292,20 +294,18 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
     std::fs::create_dir_all(args.out)
         .with_context(|| format!("buat folder {}", args.out.display()))?;
 
-    // ── Font: sekali untuk UKURAN kata (measure_words) + raster text→path ─
+    // ── Font: satu sumber dengan studio web (fontManifest.json) — urutan
+    // file identik = fallback glif usvgr identik (paritas non-latin). ─────
     let mut font_source = CliFontSource::new();
+    font_source.load_manifest(Path::new(fonts::MANIFEST_RELPATH));
     if std::env::var("RSCAPS_LOAD_SYSTEM_FONTS").as_deref() == Ok("1") {
         font_source.load_system();
-    } else {
-        font_source.load_windows_core();
     }
-    for dir in doc::candidate_font_dirs(args.fonts) {
+    if let Some(dir) = args.fonts {
         if dir.is_dir() {
-            font_source.load_dir(&dir);
-            eprintln!("fonts: {}", dir.display());
+            font_source.load_dir(dir);
         }
     }
-    let svg_opt = svgr::usvgr::Options::default();
     // ── Konteks render (engine membaca ukuran dari sini) ───────────────────
     let ctx = FFramesContext {
         time_base: TimeBase {
@@ -377,7 +377,11 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
                         .with_context(|| format!("tulis {}", args.out.join(format!("{name}.png")).display()))?;
                 } else {
                     let t_r = std::time::Instant::now();
-                    let pixmap = render_png(&s, width, height, &svg_opt, font_source.database(), &mut cache, &pool, args.engine)
+                    // Gambar data: URL (mask iris, upload user) — decode-once
+                    // lalu ikut ke Options.image_data (kontrak svgr-wasm).
+                    crate::images::ensure_svg_images(&s);
+                    let images = crate::images::snapshot();
+                    let pixmap = render_png(&s, width, height, &images, font_source.database(), &mut cache, &pool, args.engine)
                         .with_context(|| format!("raster {name}"))?;
                     let render_us = t_r.elapsed().as_micros();
                     let bytes = pixmap
@@ -415,7 +419,7 @@ fn render_png(
     svg: &str,
     width: u32,
     height: u32,
-    opt: &svgr::usvgr::Options,
+    images: &std::collections::HashMap<String, std::sync::Arc<svgr::usvgr::PreloadedImageData>>,
     fontdb: &svgr::usvgr::fontdb::Database,
     cache: &mut svgr::SvgrCache,
     pool: &svgr::PixmapPool,
@@ -425,7 +429,11 @@ fn render_png(
         "fframes" => anyhow::bail!("engine fframes hanya untuk `render` (burn-in), bukan `frames` - pakai --engine cpu atau skia"),
         _ => {}
     }
-    let tree = svgr::usvgr::Tree::from_str(svg, opt, fontdb)
+    let opt = svgr::usvgr::Options {
+        image_data: Some(images),
+        ..Default::default()
+    };
+    let tree = svgr::usvgr::Tree::from_str(svg, &opt, fontdb)
         .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
     let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
         .ok_or_else(|| anyhow::anyhow!("gagal alokasi pixmap {width}×{height}"))?;

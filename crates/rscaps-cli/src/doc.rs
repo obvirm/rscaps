@@ -80,13 +80,3 @@ pub fn build_document(
     }
     Ok(doc)
 }
-
-pub fn candidate_font_dirs(extra: Option<&Path>) -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(dir) = extra {
-        dirs.push(dir.to_path_buf());
-    }
-    dirs.push(std::path::PathBuf::from("studio/tplfonts/ttf"));
-    dirs.push(std::path::PathBuf::from("tplfonts/ttf"));
-    dirs
-}

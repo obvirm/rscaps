@@ -48,20 +48,25 @@ export function initSvgrWasm(): Promise<SvgrWasm> {
         raster_svg: (svg: string, width: number, height: number) => Uint8Array;
       };
       await mod.default();
-      // Load font paralel - font identik dengan caption-bridge supaya
-      // ukuran teks WASM-raster = ukuran teks caption-core (paritas).
-      await Promise.all(
+      // Load font: FETCH paralel (kecepatan) tapi load_font BERURUTAN sesuai
+      // fontManifest — urutan fontdb menentukan pemilihan fallback glif usvgr
+      // (face PERTAMA yang mencakup karakter), jadi preview/export web harus
+      // urutannya sama dengan CLI (fonts.rs load_manifest).
+      const datas = await Promise.all(
         FONT_PATHS.map(async (path) => {
           try {
             const res = await fetch(path);
-            if (!res.ok) return;
-            const bytes = new Uint8Array(await res.arrayBuffer());
-            mod.load_font(bytes);
+            if (!res.ok) return null;
+            return new Uint8Array(await res.arrayBuffer());
           } catch {
             // Font gagal dimuat - lanjut (font sistem mungkin menggantikan).
+            return null;
           }
         }),
       );
+      for (const bytes of datas) {
+        if (bytes) mod.load_font(bytes);
+      }
       return mod as unknown as SvgrWasm;
     })();
   }

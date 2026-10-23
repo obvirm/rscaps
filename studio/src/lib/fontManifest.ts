@@ -1,9 +1,10 @@
-// Single source of the caption font manifest for the studio.
+// Single source of the caption font manifest for the studio AND the CLI
+// (rscaps-cli/src/fonts.rs membaca fontManifest.json yang sama - urutan file
+// identik = fallback glif usvgr identik di kedua jalur).
 //
-// Every consumer (caption-bridge ingest + @font-face, svgr-wasm fontdb, the
-// Typography/Element panels) MUST read this list instead of keeping its own
-// copy — a second list is a guarantee of drift (preview/export would then
-// raster with different fonts).
+// Data hidup di fontManifest.json (array mentah) - file ini hanya membungkus
+// dengan tipe + derivasi (FONT_FAMILIES/FONT_PATHS/FONT_LOADS). Menambah
+// font = edit fontManifest.json saja.
 
 export interface FontSource {
   path: string;
@@ -13,65 +14,11 @@ export interface FontSource {
   style?: "italic";
 }
 
+import rawSources from "./fontManifest.json";
+
 /** Fonts used twice: ingested into wasm (layout/measure) and declared as
  * @font-face (browser paints them). Both sides must see the exact same file. */
-export const FONT_SOURCES: FontSource[] = [
-  { path: "/fonts/ariblk.ttf" },
-  { path: "/fonts/arial.ttf" },
-  { path: "/tplfonts/ttf/poppins-latin-400-normal.ttf", family: "Poppins", weight: 400 },
-  { path: "/tplfonts/ttf/poppins-latin-700-normal.ttf", family: "Poppins", weight: 700 },
-  { path: "/tplfonts/ttf/cairo-arabic-700-normal.ttf", family: "Cairo", weight: 700 },
-  { path: "/tplfonts/ttf/assistant-hebrew-700-normal.ttf", family: "Assistant", weight: 700 },
-  { path: "/tplfonts/ttf/vazirmatn-arabic-700-normal.ttf", family: "Vazirmatn", weight: 700 },
-  { path: "/tplfonts/ttf/heebo-hebrew-700-normal.ttf", family: "Heebo", weight: 700 },
-  { path: "/tplfonts/ttf/lalezar-arabic-400-normal.ttf", family: "Lalezar", weight: 400 },
-  { path: "/tplfonts/ttf/amiri-arabic-700-normal.ttf", family: "Amiri", weight: 700 },
-  { path: "/tplfonts/ttf/bebas-neue-latin-400-normal.ttf", family: "Bebas Neue", weight: 400 },
-  { path: "/tplfonts/ttf/inter-latin-400-normal.ttf", family: "Inter", weight: 400 },
-  { path: "/tplfonts/ttf/inter-latin-500-normal.ttf", family: "Inter", weight: 500 },
-  { path: "/tplfonts/ttf/inter-latin-600-normal.ttf", family: "Inter", weight: 600 },
-  { path: "/tplfonts/ttf/inter-latin-700-normal.ttf", family: "Inter", weight: 700 },
-  { path: "/tplfonts/ttf/inter-latin-800-normal.ttf", family: "Inter", weight: 800 },
-  { path: "/tplfonts/ttf/inter-latin-900-normal.ttf", family: "Inter", weight: 900 },
-  { path: "/tplfonts/ttf/anton-latin-400-normal.ttf", family: "Anton", weight: 400 },
-  { path: "/tplfonts/ttf/bungee-latin-400-normal.ttf", family: "Bungee", weight: 400 },
-  { path: "/tplfonts/ttf/poppins-latin-400-normal.ttf", family: "Poppins", weight: 400 },
-  { path: "/tplfonts/ttf/poppins-latin-700-normal.ttf", family: "Poppins", weight: 700 },
-  { path: "/tplfonts/ttf/poppins-latin-900-normal.ttf", family: "Poppins", weight: 900 },
-  { path: "/tplfonts/ttf/playfair-display-latin-700-normal.ttf", family: "Playfair Display", weight: 700 },
-  { path: "/tplfonts/ttf/playfair-display-latin-800-normal.ttf", family: "Playfair Display", weight: 800 },
-  { path: "/tplfonts/ttf/lora-latin-400-normal.ttf", family: "Lora", weight: 400 },
-  { path: "/tplfonts/ttf/lora-latin-500-normal.ttf", family: "Lora", weight: 500 },
-  { path: "/tplfonts/ttf/lora-latin-600-normal.ttf", family: "Lora", weight: 600 },
-  { path: "/tplfonts/ttf/lora-latin-700-normal.ttf", family: "Lora", weight: 700 },
-  { path: "/tplfonts/ttf/lora-latin-500-italic.ttf", family: "Lora", weight: 500, style: "italic" },
-  { path: "/tplfonts/ttf/lora-latin-700-italic.ttf", family: "Lora", weight: 700, style: "italic" },
-  { path: "/tplfonts/ttf/gabarito-latin-600-normal.ttf", family: "Gabarito", weight: 600 },
-  { path: "/tplfonts/ttf/gabarito-latin-900-normal.ttf", family: "Gabarito", weight: 900 },
-  { path: "/tplfonts/ttf/bricolage-grotesque-latin-800-normal.ttf", family: "Bricolage Grotesque", weight: 800 },
-  { path: "/tplfonts/ttf/jetbrains-mono-latin-400-normal.ttf", family: "JetBrains Mono", weight: 400 },
-  { path: "/tplfonts/ttf/jetbrains-mono-latin-800-normal.ttf", family: "JetBrains Mono", weight: 800 },
-  { path: "/tplfonts/ttf/caveat-latin-600-normal.ttf", family: "Caveat", weight: 600 },
-  { path: "/tplfonts/ttf/caveat-latin-700-normal.ttf", family: "Caveat", weight: 700 },
-  { path: "/tplfonts/ttf/montserrat-latin-300-normal.ttf", family: "Montserrat", weight: 300 },
-  { path: "/tplfonts/ttf/montserrat-latin-400-normal.ttf", family: "Montserrat", weight: 400 },
-  { path: "/tplfonts/ttf/montserrat-latin-500-normal.ttf", family: "Montserrat", weight: 500 },
-  { path: "/tplfonts/ttf/montserrat-latin-600-normal.ttf", family: "Montserrat", weight: 600 },
-  { path: "/tplfonts/ttf/montserrat-latin-700-normal.ttf", family: "Montserrat", weight: 700 },
-  { path: "/tplfonts/ttf/montserrat-latin-800-normal.ttf", family: "Montserrat", weight: 800 },
-  { path: "/tplfonts/ttf/montserrat-latin-900-normal.ttf", family: "Montserrat", weight: 900 },
-  { path: "/tplfonts/ttf/montserrat-latin-600-italic.ttf", family: "Montserrat", weight: 600, style: "italic" },
-  { path: "/tplfonts/ttf/eb-garamond-latin-400-normal.ttf", family: "EB Garamond", weight: 400 },
-  { path: "/tplfonts/ttf/eb-garamond-latin-400-italic.ttf", family: "EB Garamond", weight: 400, style: "italic" },
-  { path: "/tplfonts/ttf/kalam-latin-400-normal.ttf", family: "Kalam", weight: 400 },
-  { path: "/tplfonts/ttf/kalam-latin-700-normal.ttf", family: "Kalam", weight: 700 },
-  { path: "/tplfonts/ttf/manrope-latin-500-normal.ttf", family: "Manrope", weight: 500 },
-  { path: "/tplfonts/ttf/righteous-latin-400-normal.ttf", family: "Righteous", weight: 400 },
-  { path: "/tplfonts/ttf/vt323-latin-400-normal.ttf", family: "VT323", weight: 400 },
-  { path: "/tplfonts/ttf/komika-axis-latin-400-normal.ttf", family: "Komika Axis", weight: 400 },
-  { path: "/tplfonts/ttf/im-fell-english-latin-400-normal.ttf", family: "IM Fell English", weight: 400 },
-  { path: "/tplfonts/ttf/lobster-latin-400-normal.ttf", family: "Lobster", weight: 400 },
-];
+export const FONT_SOURCES: FontSource[] = rawSources as FontSource[];
 
 /** Unique caption font families, for the Typography/Element panels. */
 export const FONT_FAMILIES: string[] = [

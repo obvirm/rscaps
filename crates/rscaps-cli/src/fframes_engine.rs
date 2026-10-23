@@ -19,7 +19,8 @@ use fframes::media::PreloadedAudioData;
 use fframes::usvgr::PreloadedImageData;
 use fframes::{
     AudioData, AudioMap, AudioTimestamp, AudioTrack, Color, Duration, EncoderOptions,
-    FFramesContext, Frame, MediaProvider, RawFontData, RenderOptions, Svgr, Video, render,
+    FFramesContext, FFramesMode, Frame, MediaProvider, RawFontData, RenderOptions, Svgr,
+    TimeBase, Video, VideoSize, render,
 };
 use caption_core::{CaptionDocument, CaptionVideo};
 
@@ -174,6 +175,10 @@ pub struct CompositeVideo<const W: usize, const H: usize> {
     /// pertama yang ber-root. `None` = frame pertama kosong (gap di awal) →
     /// tak di-cache, dicari ulang tiap frame.
     svg_prefix: std::sync::OnceLock<Option<String>>,
+    /// Template memakai kaca (marker `rscaps-glass` terdeteksi probe) —
+    /// href kaca ditulis ulang ke frame video terdaftar per frame (setara
+    /// web: burnWorker men-suplai piksel frame hidup di bawah kunci itu).
+    glass: bool,
 }
 
 impl<const W: usize, const H: usize> Video for CompositeVideo<W, H> {
@@ -237,6 +242,16 @@ impl<const W: usize, const H: usize> Video for CompositeVideo<W, H> {
             ));
         };
 
+        // Kaca selene: href data URL (dummy dari probe) → kunci frame video
+        // terdaftar (`frame_N`). Elemen tetap sama (filter blur + saturate,
+        // clip-path) — hanya sumber pikselnya yang mengikuti frame ini,
+        // persis kontrak web (piksel frame hidup di bawah kunci kaca).
+        let caption_str = if self.glass {
+            rewrite_glass_href(&caption_str, &img.id)
+        } else {
+            caption_str
+        };
+
         // "meet" = letterbox (aspect ratio terjaga). Frame sumber ukuran asli;
         // kanvas W×H sesuai video nyata (portrait/landscape benar).
         let image_elem = format!(
@@ -272,7 +287,52 @@ impl<const W: usize, const H: usize> Video for CompositeVideo<W, H> {
                 _ => return caption,
             },
         };
+        dump_composite_svg(idx, &out);
         Svgr::from(out)
+    }
+}
+
+/// Tulis ulang href kaca selene (`data:image/jpeg;rscaps-glass;base64,…`)
+/// menjadi kunci frame video terdaftar (`frame_N`). Konten data URL kaca
+/// tidak pernah di-render di CLI — usvgr me-resolve lewat kunci ini.
+fn rewrite_glass_href(caption: &str, frame_key: &str) -> String {
+    const MARKER: &str = "data:image/jpeg;rscaps-glass;base64,";
+    if !caption.contains(MARKER) {
+        return caption.to_string();
+    }
+    let mut out = String::with_capacity(caption.len());
+    let mut rest = caption;
+    while let Some(pos) = rest.find(MARKER) {
+        // Awal atribut href=" tepat sebelum marker.
+        let href_start = rest[..pos]
+            .rfind("href=\"")
+            .map(|p| p + "href=\"".len())
+            .unwrap_or(pos);
+        out.push_str(&rest[..href_start]);
+        out.push_str(frame_key);
+        // Lompati isi data URL sampai penutup atribut.
+        let tail = &rest[pos..];
+        let end = tail.find('"').unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Diagnostik parity (env-gated `RSCAPS_DUMP_SVG_DIR`): tulis SVG komposit
+/// final (frame video + caption, sesuai yang di-raster backend) per frame —
+/// dipakai harness `parity_export_all.mjs` untuk membandingkan komposit
+/// CLI vs web tanpa noise encoder.
+fn dump_composite_svg(idx: usize, svg: &str) {
+    static DUMP_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let dir = DUMP_DIR.get_or_init(|| {
+        std::env::var("RSCAPS_DUMP_SVG_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|p| std::fs::create_dir_all(p).is_ok())
+    });
+    if let Some(dir) = dir {
+        let _ = std::fs::write(dir.join(format!("svg_{idx:06}.svg")), svg);
     }
 }
 
@@ -424,13 +484,35 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     let target_fps = CaptionVideo::FPS as u32;
 
     // Font.
+    // Font: urutan manifest = urutan web (fontManifest.json satu sumber) —
+    // fallback glif usvgr menentukan paritas non-latin (Arab/Ibrani/dll.).
     let mut fonts: Vec<RawFontData> = Vec::new();
-    for dir in doc::candidate_font_dirs(opts.fonts) {
-        if dir.is_dir() {
-            collect_font_files(&dir, &mut fonts)?;
-        }
+    for file in crate::fonts::manifest_font_files(
+        Path::new(crate::fonts::MANIFEST_RELPATH),
+        opts.fonts,
+    ) {
+        let bytes =
+            std::fs::read(&file).with_context(|| format!("baca font {}", file.display()))?;
+        let name = file
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "font.ttf".to_string());
+        fonts.push(RawFontData {
+            file_name: name,
+            data: Arc::new(bytes),
+        });
     }
-    eprintln!("[fframes] {} file font dimuat", fonts.len());
+    eprintln!("[fframes] {} file font dimuat (fontManifest.json)", fonts.len());
+
+    // Probe caption (sekali sebelum render): (a) kumpulkan gambar `data:`
+    // statis dari SVG caption (mask stroke iris / upload user) untuk
+    // registry MediaProvider; (b) deteksi template kaca (`rscaps-glass`) —
+    // frame video lalu dipakai sebagai kaca (rewrite href ke `frame_N`),
+    // setara web yang men-suplai piksel frame hidup (D4 parity).
+    let (probe_images, glass) = probe_caption_images(src_w, src_h);
+    if glass {
+        eprintln!("[fframes] kaca terdeteksi — frame video dipakai sebagai kaca (href rewrite)");
+    }
 
     // Audio + tmp dir (auto-cleanup via Drop).
     let tmp_dir = std::env::temp_dir().join(format!("rscaps-fframes-{}", std::process::id()));
@@ -505,8 +587,12 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
         let frames = decode_frames_rgba(
             &ffmpeg, opts.video, probe.width, probe.height, target_fps, opts.hwaccel, 0.0, 0,
         )?;
+        let mut media_images = images_of(&frames);
+        for (key, img) in &probe_images {
+            media_images.insert(key.clone(), Arc::clone(img));
+        }
         let media = FframesMedia {
-            images: images_of(&frames),
+            images: media_images,
             fonts: fonts.clone(),
             audio: audio_map.clone(),
         };
@@ -525,7 +611,7 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             opts.out.display()
         );
         return dispatch_render(
-            src_w, src_h, frames, 0, audio_name, duration_frames, &render_opts, opts.out,
+            src_w, src_h, frames, 0, audio_name, duration_frames, &render_opts, opts.out, glass,
         );
     }
 
@@ -578,8 +664,12 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             next_start = end2;
             seg_idx += 1;
         }
+        let mut media_images = images_of(&frames);
+        for (key, img) in &probe_images {
+            media_images.insert(key.clone(), Arc::clone(img));
+        }
         let media = FframesMedia {
-            images: images_of(&frames),
+            images: media_images,
             fonts: fonts.clone(),
             // Potongan VIDEO-ONLY: audio di-mux SEKALI di akhir — satu
             // encode AAC = satu priming di awal file, tanpa drift
@@ -608,6 +698,7 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             duration_frames,
             &render_opts,
             &seg_path,
+            glass,
         )?;
         eprintln!(
             "[fframes] profil potongan: render={render_ms}ms ({count} frame)",
@@ -615,7 +706,6 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
         );
         segments.push(seg_path);
     }
-
     // Concat potongan video-only; bila sumber punya audio (dan decode
     // berhasil), mux audio SEKALI dari wav ekstraksi — video -c copy.
     let mux_from_wav = if audio_name.is_empty() {
@@ -672,6 +762,7 @@ fn dispatch_render(
     duration_frames: usize,
     render_opts: &RenderOptions<'_, '_>,
     out: &Path,
+    glass: bool,
 ) -> Result<()> {
     // Pasangan umum: landscape, portrait, square, 4:3, 3:2.
     macro_rules! try_size {
@@ -684,6 +775,7 @@ fn dispatch_render(
                     duration_frames,
                     render_opts,
                     out,
+                    glass,
                 );
             }
         };
@@ -738,6 +830,7 @@ fn dispatch_render(
         duration_frames,
         render_opts,
         out,
+        glass,
     )
 }
 
@@ -749,6 +842,7 @@ fn render_sized<const W: usize, const H: usize>(
     duration_frames: usize,
     render_opts: &RenderOptions<'_, '_>,
     out: &Path,
+    glass: bool,
 ) -> Result<()> {
     let video = CompositeVideo::<W, H> {
         caption: CaptionVideo,
@@ -757,6 +851,7 @@ fn render_sized<const W: usize, const H: usize>(
         audio_name,
         duration_frames,
         svg_prefix: std::sync::OnceLock::new(),
+        glass,
     };
     run_backend(&video, render_opts, out)
 }
@@ -771,6 +866,7 @@ fn render_sized_generic(
     duration_frames: usize,
     render_opts: &RenderOptions<'_, '_>,
     out: &Path,
+    glass: bool,
 ) -> Result<()> {
     // Delegate ke pasangan umum terdekat; aspect sudah dijaga "meet".
     macro_rules! try_size {
@@ -783,6 +879,7 @@ fn render_sized_generic(
                     duration_frames,
                     render_opts,
                     out,
+                    glass,
                 );
             }
         };
@@ -822,6 +919,7 @@ fn render_sized_generic(
         duration_frames,
         render_opts,
         out,
+        glass,
     )
 }
 
@@ -905,6 +1003,72 @@ fn images_of(frames: &[Arc<PreloadedImageData>]) -> HashMap<String, Arc<Preloade
     frames.iter().map(|f| (f.id.clone(), f.clone())).collect()
 }
 
+/// Probe caption di luar pipeline render (dokumen global sudah disetel
+/// `doc::build_document`): render beberapa frame sampai ada SVG ber-root,
+/// lalu (a) daftarkan semua gambar `data:` statis yang ditemukan (mask
+/// stroke iris bawaan/upload user — href konstan sepanjang dokumen, jadi
+/// probe 1 frame berisi cue cukup); (b) deteksi marker kaca `rscaps-glass`
+/// — bila ada, frame video 1×1 dummy dibiarkan terpasang supaya template
+/// memancarkan elemen kaca dan href-nya ditulis ulang per frame.
+///
+/// Return (gambar statis, template memakai kaca).
+fn probe_caption_images(w: usize, h: usize) -> (HashMap<String, Arc<PreloadedImageData>>, bool) {
+    // JPEG 1×1: cukup memicu pancaran kaca; kontennya tak pernah di-render
+    // (href ditulis ulang ke frame video). Bukan kaca → dibuang lagi.
+    caption_core::set_frame_image(&glass_probe_jpeg());
+
+    let ctx = FFramesContext {
+        time_base: TimeBase { fps: 30, sample_rate: 48000 },
+        current_video_size: VideoSize { width: w, height: h },
+        duration_in_frames: caption_core::document()
+            .read()
+            .map(|d| d.duration_frames as usize)
+            .unwrap_or(0),
+        mode: FFramesMode::Renderer,
+        scenes: None,
+        media_source: None,
+        font_source: None,
+        abort_signal: None,
+    };
+
+    let video = CaptionVideo;
+    let mut images: HashMap<String, Arc<PreloadedImageData>> = HashMap::new();
+    let mut has_glass = false;
+    // Sampel 3 titik (awal/tengah/akhir) — menjangkau cue pertama walau
+    // dokumen diawali gap, dan cue terakhir walau cue pertama sudah lewat.
+    let last = ctx.duration_in_frames.saturating_sub(1);
+    for f in [0usize, ctx.duration_in_frames / 2, last] {
+        let frame = Frame::new(f, f, 30);
+        let svg = video.render_frame(frame, &ctx).value;
+        if !svg.contains("<svg") {
+            continue;
+        }
+        crate::images::ensure_svg_images(&svg);
+        has_glass |= svg.contains("rscaps-glass");
+    }
+    images.extend(crate::images::snapshot());
+    if !has_glass {
+        // Higienitas: template non-kaca tak boleh mewarisi frame dummy.
+        caption_core::clear_frame_image();
+    }
+    eprintln!(
+        "[fframes] probe: {} gambar statis terdaftar, kaca={}",
+        images.len(),
+        if has_glass { "ya" } else { "tidak" }
+    );
+    (images, has_glass)
+}
+
+/// JPEG 1×1 pemantik kaca (lihat `probe_caption_images`).
+fn glass_probe_jpeg() -> Vec<u8> {
+    let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([16, 16, 16, 255]));
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 75)
+        .encode_image(&img)
+        .expect("jpeg probe 1x1");
+    out
+}
+
 /// Gabungkan segmen mp4 hasil chunked render → satu file (`-c copy`; semua
 /// segmen punya codec/parameter sama karena encoder yang sama).
 pub(crate) fn concat_segments(ffmpeg: &Path, segments: &[PathBuf], out: &Path) -> Result<()> {
@@ -938,31 +1102,6 @@ pub(crate) fn concat_segments(ffmpeg: &Path, segments: &[PathBuf], out: &Path) -
         .status()
         .with_context(|| format!("jalankan {}", ffmpeg.display()))?;
     ensure!(status.success(), "ffmpeg concat exit non-zero");
-    Ok(())
-}
-
-fn collect_font_files(dir: &Path, out: &mut Vec<RawFontData>) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("baca {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        if !matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
-            continue;
-        }
-        let bytes =
-            std::fs::read(&path).with_context(|| format!("baca font {}", path.display()))?;
-        let name = path
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| "font.ttf".to_string());
-        out.push(RawFontData {
-            file_name: name,
-            data: Arc::new(bytes),
-        });
-    }
     Ok(())
 }
 

@@ -218,18 +218,18 @@ pub fn render_video(
     )?;
 
     let mut font_source = CliFontSource::new();
-    // Paritas dengan studio web: HANYA font template (tplfonts) + Arial/Arial
-    // Black sistem. Fontdb penuh Windows (ratusan file) membuat text layout
-    // usvgr ~10x lebih lambat (178ms vs ~14ms per frame @1080p). Escape
-    // hatch utk teks eksotis: env RSCAPS_LOAD_SYSTEM_FONTS=1.
+    // Paritas dengan studio web: HANYA font dari fontManifest.json (satu
+    // sumber dengan fontManifest.ts — urutan file identik = fallback glif
+    // usvgr identik di kedua jalur). Fontdb penuh Windows (ratusan file)
+    // membuat text layout usvgr ~10x lebih lambat (178ms vs ~14ms per frame
+    // @1080p). Escape hatch utk teks eksotis: env RSCAPS_LOAD_SYSTEM_FONTS=1.
+    font_source.load_manifest(Path::new(crate::fonts::MANIFEST_RELPATH));
     if std::env::var("RSCAPS_LOAD_SYSTEM_FONTS").as_deref() == Ok("1") {
         font_source.load_system();
-    } else {
-        font_source.load_windows_core();
     }
-    for dir in doc::candidate_font_dirs(opts.fonts) {
+    if let Some(dir) = opts.fonts {
         if dir.is_dir() {
-            font_source.load_dir(&dir);
+            font_source.load_dir(dir);
         }
     }
 
@@ -465,7 +465,14 @@ fn cpu_frame_rgba(
     cache: &mut svgr::SvgrCache,
     pool: &svgr::PixmapPool,
 ) -> Result<Vec<u8>> {
-    let opt = svgr::usvgr::Options::default();
+    // Gambar data: URL (mask iris, upload user) — decode-once lalu ikut ke
+    // Options.image_data; kaca selene dilewati (ditangani host fframes).
+    crate::images::ensure_svg_images(svg);
+    let images = crate::images::snapshot();
+    let opt = svgr::usvgr::Options {
+        image_data: Some(&images),
+        ..Default::default()
+    };
     let t0 = std::time::Instant::now();
     let tree = svgr::usvgr::Tree::from_str(svg, &opt, fontdb)
         .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
