@@ -1,11 +1,13 @@
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { defineConfig } from "vite";
-import { readFile, stat } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { cpSync, existsSync, mkdirSync, readFile, statSync } from "node:fs";
+import { readFile as readFileAsync, stat } from "node:fs/promises";
+import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
 
 const root = fileURLToPath(new URL("./studio/", import.meta.url));
+const repo = fileURLToPath(new URL("./", import.meta.url));
 const pkgRoot = fileURLToPath(new URL("./crates/caption-bridge/pkg/", import.meta.url));
 const svgrPkgRoot = fileURLToPath(new URL("./crates/svgr-wasm/pkg/", import.meta.url));
 const whisperPkgRoot = fileURLToPath(new URL("./crates/whisper-spike/pkg/", import.meta.url));
@@ -70,7 +72,52 @@ function staticDirs(): Plugin {
         }
       });
     },
+    // `vite build`: salin aset runtime yang di-fetch via path same-origin ke
+    // dist/ — tanpa ini paket Tauri (frontendDist) kehilangan engine WASM,
+    // template font, dan font sistem. Model whisper DIKECUALIKAN (1,2 GB;
+    // fitur transkripsi tetap siap di app dev/browser).
+    closeBundle() {
+      const dist = join(root, "dist");
+      const copyInto = (src: string, destSub: string) => {
+        if (!existsSync(src)) return;
+        cpSync(src, join(dist, destSub), { recursive: true });
+      };
+      copyInto(pkgRoot, "pkg");
+      copyInto(svgrPkgRoot, "svgrpkg");
+      copyInto(whisperPkgRoot, "wpkg");
+      copyAssetFonts(dist);
+    },
   };
+}
+
+// Font via fontManifest.json (SATU SUMBER dengan svgrwasm.ts/fonts.rs): URL
+// /fonts/X -> file sistem Windows, /tplfonts/X -> repo. Dedupe path, file
+// hilang diberitakan (tidak mematikan build) supaya paket tetap jalan.
+async function copyAssetFonts(dist: string): Promise<void> {
+  const manifestPath = join(root, "src/lib/fontManifest.json");
+  if (!existsSync(manifestPath)) {
+    console.warn("[build] fontManifest.json tidak ada — font tidak disalin");
+    return;
+  }
+  interface Entry { path: string }
+  const entries: Entry[] = JSON.parse(await readFileAsync(manifestPath, "utf8"));
+  const seen = new Set<string>();
+  for (const e of entries) {
+    const url = e.path;
+    if (!url.startsWith("/fonts/") && !url.startsWith("/tplfonts/")) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    const src = url.startsWith("/fonts/")
+      ? join(fontRoot, url.replace(/^\/fonts\//, ""))
+      : join(tplFontsRoot, url.replace(/^\/tplfonts\//, ""));
+    const dest = join(dist, url.replace(/^\//, ""));
+    if (!existsSync(src)) {
+      console.warn(`[build] font hilang: ${src}`);
+      continue;
+    }
+    mkdirSync(dirname(dest), { recursive: true });
+    cpSync(src, dest);
+  }
 }
 
 export default defineConfig({
