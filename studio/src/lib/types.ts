@@ -117,6 +117,8 @@ export interface CaptionDocument {
   sheets?: Sheet[];
   /** Tag manual per kata (key = index kata global dari listWords). */
   word_tags?: Record<string, string[]>;
+  /** Rentang behind-actor (ms) dari segmentasi orang (template pastor). */
+  behind_ranges?: Array<[number, number]>;
 }
 
 /** Tag yang bisa ditempel manual pada kata (urutan tscaps WORD_TAG_NAMES).

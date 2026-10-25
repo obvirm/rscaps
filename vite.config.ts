@@ -61,7 +61,9 @@ function staticDirs(): Plugin {
         try {
           const info = await stat(filePath);
           if (info.isDirectory()) return next();
-          const body = await readFile(filePath);
+          // fs/promises — `readFile` (sinkron, callback-API) dari node:fs
+          // mengaburkan nama ini bila dipakai di sini (regresi f9ac92d).
+          const body = await readFileAsync(filePath);
           res.writeHead(200, {
             "content-type": MIME[extname(filePath)] ?? "application/octet-stream",
             "cache-control": "no-store",

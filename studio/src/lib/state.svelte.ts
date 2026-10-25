@@ -2,6 +2,7 @@ import { loadBridge, type LoadedBridge } from "./wasm";
 import { splitSvgLayers } from "./svgLayers";
 import { transcribeBlob, type TranscribeStage } from "./transcribe";
 import { saveFileNative } from "./tauri";
+import { PersonMaskClient } from "./personMask";
 import { burnInExport, computeOutputSize, wrapFileSystemWritable, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
 import {
   formatTime,
@@ -579,11 +580,15 @@ class StudioState {
     this.wasm.setDocumentJson(this.docText);
     const meta = await this.wasm.bridge.prepare(this.fps);
     this.durationFrames = meta.durationInFrames;
-    this.setStatus(`prepared · ${this.durationFrames} frames · ${meta.fps} fps`);
+    this.setStatus(`prepared  ${this.durationFrames} frames  ${meta.fps} fps`);
     this.renderAt(Math.min(this.frame, Math.max(this.durationFrames - 1, 0)));
     if (document.fonts && document.fonts.ready) {
       document.fonts.ready.then(() => this.renderAt(this.frame));
     }
+    // Template behind-actor (pastor): jalankan analisis masker orang di
+    // latar belakang bila belum ada (sekali per proyek; selesai →
+    // behind_ranges masuk doc dan overlay digambar ulang).
+    void this.ensurePersonMasks();
   }
 
   private async renderToCanvas(frame: number, width: number): Promise<HTMLCanvasElement | null> {
@@ -666,7 +671,11 @@ class StudioState {
 
   /** Template aktif memakai layer kaca frame video? */
   get usesFrameImage(): boolean {
-    const t = (tpl: string | undefined) => tpl === "selene";
+    // selene: selalu; pastor: hanya saat behind_ranges ada (cutout butuh
+    // frame — tanpa analisis masker frame tak pernah di-embed engine).
+    const t = (tpl: string | undefined) =>
+      tpl === "selene" ||
+      (tpl === "pastor" && (this.doc?.behind_ranges?.length ?? 0) > 0);
     return (
       t(this.doc?.template) || (this.doc?.sheets ?? []).some((s) => t(s.template))
     );
@@ -687,6 +696,95 @@ class StudioState {
   clearFrameImage(): void {
     if (!this.wasm || this.usesFrameImage) return;
     this.wasm.clearFrameImage();
+  }
+
+  /** Frame JPEG dibutuhkan pada waktu t? (selene: selalu; pastor: rentang behind) */
+  frameImageNeeded(tSec: number): boolean {
+    if (this.doc?.template === "selene" || (this.doc?.sheets ?? []).some((s) => s.template === "selene")) {
+      return true;
+    }
+    const ranges = this.doc?.behind_ranges ?? [];
+    return ranges.some(([s, e]) => tSec * 1000 >= s && tSec * 1000 < e);
+  }
+
+  // ── Person segmentation (pastor behind-actor) ───────────────────────────
+
+  private personMaskClient = new PersonMaskClient();
+  /** "idle" → "running" → "done" | "error". */
+  personMaskState = $state<"idle" | "running" | "done" | "error">("idle");
+  personMaskProgress = $state(0);
+  /** PNG ter-encode per sampel masker (index = urutan analisis). */
+  private personMaskPngs: Uint8Array[] = [];
+
+  /** Template aktif memakai behind-actor (butuh masker orang)? */
+  get usesPersonMask(): boolean {
+    const t = (tpl: string | undefined) => tpl === "pastor";
+    return (
+      t(this.doc?.template) || (this.doc?.sheets ?? []).some((s) => t(s.template))
+    );
+  }
+
+  /**
+   * Masker PNG ter-encode untuk waktu `t` (nearest dalam toleransi) —
+   * disetel ke bridge SEBELUM render_frame; di luar rentang aktif → clear.
+   */
+  supplyPersonMask(tSec: number): void {
+    if (!this.wasm) return;
+    const ranges = this.doc?.behind_ranges ?? [];
+    if (!ranges.some(([s, e]) => tSec * 1000 >= s && tSec * 1000 < e)) {
+      this.wasm.clearPersonMask();
+      return;
+    }
+    const idx = this.personMaskClient.nearestIndex(tSec);
+    const png = idx >= 0 ? this.personMaskPngs[idx] : undefined;
+    if (png) this.wasm.setPersonMaskPng(png);
+    else this.wasm.clearPersonMask();
+  }
+
+  /**
+   * Analisis segmentasi orang (sekali per proyek, latar belakang): sampel
+   * video di maskFps → masker → behind_ranges per cue → updateDoc.
+   */
+  async ensurePersonMasks(): Promise<void> {
+    if (
+      !this.wasm ||
+      !this.usesPersonMask ||
+      this.personMaskState === "running" ||
+      this.personMaskClient.entries.length > 0 ||
+      !this.videoUrl
+    ) {
+      return;
+    }
+    this.personMaskState = "running";
+    this.personMaskProgress = 0;
+    try {
+      const duration = Math.max(0.1, this.durationFrames / this.fps);
+      await this.personMaskClient.analyze(this.videoUrl, duration);
+      // Encode PNG putih + alpha=confidence per sampel (sekali per sampel).
+      this.personMaskPngs = [];
+      for (const m of this.personMaskClient.entries) {
+        const c = new OffscreenCanvas(m.width, m.height);
+        const ctx = c.getContext("2d")!;
+        const img = ctx.createImageData(m.width, m.height);
+        for (let i = 0; i < m.alpha.length; i++) {
+          img.data[i * 4] = 255;
+          img.data[i * 4 + 1] = 255;
+          img.data[i * 4 + 2] = 255;
+          img.data[i * 4 + 3] = m.alpha[i]!;
+        }
+        ctx.putImageData(img, 0, 0);
+        const blob = await c.convertToBlob({ type: "image/png" });
+        this.personMaskPngs.push(new Uint8Array(await blob.arrayBuffer()));
+      }
+      const ranges = this.personMaskClient.behindRanges(this.doc?.cues ?? []);
+      this.updateDoc((doc) => {
+        doc.behind_ranges = ranges;
+      });
+      this.personMaskState = "done";
+      this.applyDocument();
+    } catch {
+      this.personMaskState = "error";
+    }
   }
 
   async renderRaster(): Promise<void> {
@@ -1573,8 +1671,12 @@ class StudioState {
         legacyCanvas: new URLSearchParams(location.search).get("exportmode") === "legacy",
         fontFaceCss: this.fontFaceCss,
         frameImage: {
-          wanted: this.usesFrameImage,
+          wanted: (t) => this.usesFrameImage && this.frameImageNeeded(t),
           supply: (bytes) => this.wasm?.setFrameImage(bytes),
+        },
+        personMask: {
+          wanted: (t) => (this.doc?.behind_ranges?.length ?? 0) > 0,
+          supply: (t) => this.supplyPersonMask(t),
         },
         streamTo: writable,
       });

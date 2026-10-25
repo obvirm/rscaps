@@ -59,11 +59,19 @@ export interface BurnInOptions {
   legacyCanvas?: boolean;
   /** @font-face CSS untuk inline ke SVG (dibutuhkan jalur legacy). */
   fontFaceCss?: string;
-  /** Layer kaca (selene): bila wanted, tiap frame di-gambar ke kanvas
-   * grab lalu JPEG-nya disuplai SEBELUM renderCaption. */
+  /** Layer kaca (selene) & cutout pastor: bila wanted(t) untuk frame itu,
+   * frame di-gambar ke kanvas grab lalu JPEG-nya disuplai SEBELUM
+   * renderCaption. wanted dipanggil per frame (t detik) — pastor butuh
+   * hanya pada rentang behind. */
   frameImage?: {
-    wanted: boolean;
+    wanted: boolean | ((t: number) => boolean);
     supply: (jpeg: Uint8Array) => void;
+  };
+  /** Masker orang behind-actor (pastor): bila wanted(t), pemanggil suplai
+   * PNG masker untuk t SEBELUM renderCaption (dipasangkan dengan frame). */
+  personMask?: {
+    wanted: (t: number) => boolean;
+    supply: (t: number) => void;
   };
   /** Streaming: tulis mux langsung ke WritableStream (mis.
    * FileSystemWritableFileStream dari showSaveFilePicker) — file besar
@@ -519,10 +527,18 @@ export async function burnInExport(opts: BurnInOptions): Promise<Blob> {
         const rotation = sample.rotation;
         const flip = sample.flip;
 
-        if (opts.frameImage?.wanted) {
+        const frameImageWanted =
+          typeof opts.frameImage?.wanted === "function"
+            ? opts.frameImage.wanted(t)
+            : (opts.frameImage?.wanted ?? false);
+        if (opts.frameImage && frameImageWanted) {
           sample.draw(grabCtx, 0, 0, width, height);
           const grabBlob = await grabCanvas.convertToBlob({ type: "image/jpeg", quality: 0.75 });
           opts.frameImage.supply(new Uint8Array(await grabBlob.arrayBuffer()));
+        }
+        if (opts.personMask && opts.personMask.wanted(t)) {
+          // Pemanggil memegang cache PNG per sampel — suplai untuk t ini.
+          opts.personMask.supply(t);
         }
 
         const capStart = performance.now();

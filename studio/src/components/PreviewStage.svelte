@@ -57,6 +57,8 @@
           // Layer kaca (selene): frame JPEG disetel SEBELUM render supaya
           // SVG caption membawa frame video ter-blur ter-embed.
           await store.supplyFrameImage(bmp);
+          // Occlusion behind-actor (pastor): masker orang per frame.
+          store.supplyPersonMask(v.currentTime);
           const layers = store.renderFrameSvgLayers(f);
           return burner.request({
             base: layers?.base ?? "",

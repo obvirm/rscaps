@@ -103,9 +103,9 @@ async function ensureSvgImages(
     await registerImageWasm(glass[1], new Uint8Array(data.data.buffer), width, height);
     lastGlassKey = glass[1];
   }
-  // Statis (stroke iris, upload user): decode sekali, kunci data URL apa pun
-  // yang BUKAN kaca.
-  for (const m of svg.matchAll(/href="(data:image\/[a-z0-9.+-]+;base64,[^"]+)"/g)) {
+  // Statis (stroke iris, upload user, masker pastor `;rscaps-pmask`):
+  // decode sekali, kunci data URL apa pun yang BUKAN kaca.
+  for (const m of svg.matchAll(/href="(data:image\/[a-z0-9.+-]+(?:;[a-z0-9-]+)*;base64,[^"]+)"/g)) {
     const href = m[1];
     if (href === lastGlassKey || staticKeys.has(href)) continue;
     const decoded = await decodeDataUrlRgba(href);

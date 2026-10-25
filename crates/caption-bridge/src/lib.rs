@@ -34,6 +34,20 @@ pub fn set_frame_image(bytes: &[u8]) {
     caption_core::set_frame_image(bytes);
 }
 
+/// Setel masker orang (PNG putih + alpha=confidence) untuk occlusion
+/// text-behind-actor (pastor) — panggil per frame/sampel SEBELUM
+/// `render_frame` saat frame di dalam rentang aktif.
+#[wasm_bindgen]
+pub fn set_person_mask_png(bytes: &[u8]) {
+    caption_core::set_person_mask_png(bytes);
+}
+
+/// Buang masker orang tersimpan (frame di luar rentang aktif).
+#[wasm_bindgen]
+pub fn clear_person_mask() {
+    caption_core::clear_person_mask();
+}
+
 /// Buang frame tersimpan (template tak lagi memakai layer kaca).
 #[wasm_bindgen]
 pub fn clear_frame_image() {

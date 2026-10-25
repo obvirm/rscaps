@@ -3,18 +3,18 @@
 //! Visual spec source of truth: `E:\project\tscaps\templates\pastor\{style.scss,template.json}`.
 //! Two typographic registers.
 //!
-//! Quiet (what renders under [`BEHIND_ACTOR`] = `false`): Manrope 500 at
-//! 3.6cqh in `#e6d647`, 0.13em word margins, no line gap, one line
-//! top-anchored at 0.75H and centred at 0.5W, wearing the template's
-//! `soft-drop-shadow(0.06, 0.35)` — `text-shadow` reads its third length
-//! as a radius, so the filter carries `dy 0.06em`, `σ 0.175em`, opaque
-//! black. Clause-boundary segments (5–13 chars) with `gap_free` +
+//! Quiet (what renders when the segment is NOT behind-actor active):
+//! Manrope 500 at 3.6cqh in `#e6d647`, 0.13em word margins, no line gap,
+//! one line top-anchored at 0.75H and centred at 0.5W, wearing the
+//! template's `soft-drop-shadow(0.06, 0.35)` — `text-shadow` reads its
+//! third length as a radius, so the filter carries `dy 0.06em`, `σ 0.175em`,
+//! opaque black. Clause-boundary segments (5–13 chars) with `gap_free` +
 //! `remove_punctuation`; no entrance animation.
 //!
-//! Behind the actor ([`BEHIND_ACTOR`] = `true`): Anton 400 uppercase at
-//! line-height 0.95, the block's top edge pinned at 0.08H (the scss
-//! undoes the quiet anchor and re-lays the box at `behind-y`), every line
-//! sized from its own measured width at one em —
+//! Behind the actor (segment inside a [`CaptionDocument::behind_ranges`]
+//! window): Anton 400 uppercase at line-height 0.95, the block's top edge
+//! pinned at 0.08H (the scss undoes the quiet anchor and re-lays the box
+//! at `behind-y`), every line sized from its own measured width at one em —
 //! `clamp(4cqh, behind-fill × 100cqw / line-width-em, 30cqh)` — and a
 //! line-level rise-in (0.18em, 0.34s, `cubic-bezier(0.22, 1, 0.36, 1)`)
 //! keyed off when the line starts being narrated. The scss stacks the
@@ -22,11 +22,15 @@
 //! chain is emitted twice to stay faithful (they only part company under
 //! a translucent shadow-colour control, which the port does not carry).
 //!
-//! Unported: the `behind-actor-active` *switch* — tscaps drives it from a
-//! per-segment behind-actor flag the native `Cue` does not carry, so
-//! [`BEHIND_ACTOR`] is the const toggle the render reads. The
-//! `behind-font-family` / `behind-y` / `behind-fill` / shadow / colour
-//! controls keep their defaults.
+//! Occlusion (the point of the register): when the host supplies the
+//! person mask (`person_mask_png()`, PNG putih + alpha=confidence) and the
+//! current video frame (`frame_image()`), the segment's SVG appends the
+//! actor cutout ABOVE the caption — frame pixels AND-ed with the mask via
+//! an SVG `<mask>` — so the speaker occludes the text exactly like
+//! tscaps' `ActorMaskTopLayerSource` painted above the caption raster.
+//! Host without a mask (CLI native, gallery pre-analysis) renders the
+//! quiet register: tscaps refuses to move the caption without the
+//! occlusion that justifies the move, and so does this port.
 //!
 //! Family note: the embedded Manrope 500 reports the name-table family
 //! "Manrope ExtraLight" (fontsource packaging) — that is the string fontdb
@@ -40,8 +44,6 @@ use super::{effects, element_css, layout, overrides, pipeline, recipes, stack, s
 use crate::CaptionDocument;
 
 // ── spec constants (from pastor's style.scss + template.json) ─────────────
-/// `false` renders the quiet register; `true` the behind-actor one.
-const BEHIND_ACTOR: bool = false;
 const FONT: &str = "Manrope"; // fontStack manrope (browser @font-face)
 const FONT_WEIGHT: u16 = 500; // typography.fontWeight: 500
 const FONT_SIZE_CQH: f32 = 0.036; // font-size: 3.6cqh
@@ -91,7 +93,7 @@ const DEFAULTS: overrides::TemplateDefaults = overrides::TemplateDefaults {
     font_weight: FONT_WEIGHT,
     primary: PRIMARY,
     highlight: "",
-    force_uppercase: BEHIND_ACTOR, // the behind register uppercases
+    force_uppercase: false, // register-dependent: dihitung runtime (behind)
     min_lines: MIN_LINES,
     max_lines: MAX_LINES,
     max_width_ratio: MAX_WIDTH_RATIO,
@@ -167,10 +169,13 @@ fn behind_font_size(line_w_em: f32, video_w: f32, video_h: f32, st: &style::Styl
 }
 
 /// The `soft-drop-shadow(0.06, 0.35)` chain: `copies` identical opaque
-/// black shadows, each fed by the previous one's result.
+/// black shadows, each fed by the previous one's result. The FIRST input
+/// is `SourceGraphic` — feDropShadow merges its shadow UNDER the input,
+/// so SourceAlpha (siluet hitam) akan memakan warna glif (bug lama:
+/// teks pastor jatuh hitam, kuning #e6d647 tak pernah kembali).
 fn word_shadow_filter(copies: usize, dy: f32, std: f32) -> String {
     let mut out = String::new();
-    let mut input = String::from("SourceAlpha");
+    let mut input = String::from("SourceGraphic");
     for i in 0..copies {
         let result = format!("s{i}");
         out.push_str(&format!(
@@ -183,6 +188,22 @@ fn word_shadow_filter(copies: usize, dy: f32, std: f32) -> String {
 }
 
 // ── render ────────────────────────────────────────────────────────────────
+
+/// Segment inside one `behind_ranges` window — tscaps gating: the WHOLE
+/// segment time range must fit, so the register never flips mid-segment.
+fn behind_actor_active(
+    doc: &CaptionDocument,
+    segment: &pipeline::WindowedSegment,
+) -> bool {
+    if doc.behind_ranges.is_empty() {
+        return false;
+    }
+    let start = segment.start_ms;
+    let end = segment.end_ms;
+    doc.behind_ranges
+        .iter()
+        .any(|&(rs, re)| (rs as f32) <= start && end <= (re as f32))
+}
 
 pub fn render<'a>(
     doc: &CaptionDocument,
@@ -205,17 +226,20 @@ pub fn render<'a>(
     let st = style::Style::of(&doc.params, "pastor");
 
     // The register picks the face, the case, the metrics and the anchor.
-    // `behind-font-family` overrides the family the behind register emits;
-    // the stack/metrics stay on the embedded `BEHIND_FONT` (only that face
-    // has metrics available), so the control changes the SVG's font-family
-    // without breaking measurement.
-    let (svg_font, font_weight) = if BEHIND_ACTOR {
+    // A segment goes behind the actor only when its WHOLE time range sits
+    // inside one `behind_ranges` window (tscaps gating: no mid-segment
+    // register flips); `behind-font-family` overrides the family the
+    // behind register emits — the stack/metrics stay on the embedded
+    // `BEHIND_FONT` (only that face has metrics available), so the control
+    // changes the SVG's font-family without breaking measurement.
+    let behind = behind_actor_active(doc, segment);
+    let (svg_font, font_weight) = if behind {
         (BEHIND_FONT, BEHIND_FONT_WEIGHT)
     } else {
         (FONT, ov.font_weight)
     };
     let script_stack = stack::Stack::for_latin(svg_font);
-    let (asc_ratio, desc_ratio, _) = if BEHIND_ACTOR {
+    let (asc_ratio, desc_ratio, _) = if behind {
         behind_metrics()
     } else {
         line_metrics(svg_font, stack::dominant_family(&segment.words, &script_stack))
@@ -226,7 +250,14 @@ pub fn render<'a>(
     let display: Vec<String> = segment
         .words
         .iter()
-        .map(|w| ov.text_case.apply(&w.display))
+        .map(|w| {
+            let t = ov.text_case.apply(&w.display);
+            if behind {
+                t.to_uppercase()
+            } else {
+                t
+            }
+        })
         .collect();
 
     // Measure at one em so the behind clamp can divide a target width by
@@ -235,7 +266,7 @@ pub fn render<'a>(
     let measured = stack::measure_words(
         &segment.words,
         &script_stack,
-        if BEHIND_ACTOR {
+        if behind {
             ANTON_400_TTF
         } else {
             MANROPE_500_TTF
@@ -244,11 +275,11 @@ pub fn render<'a>(
         ctx.font_source,
         1.0,
         ov.letter_spacing_em,
-        BEHIND_ACTOR,
+        behind,
     );
     let unit_widths: Vec<f32> = measured.widths;
 
-    let fs = if BEHIND_ACTOR {
+    let fs = if behind {
         let line_w_em: f32 = unit_widths
             .iter()
             .map(|w| w + 2.0 * ov.word_spacing_em)
@@ -259,7 +290,7 @@ pub fn render<'a>(
     };
     let margin = ov.word_spacing_em * fs;
     let ls_px = ov.letter_spacing_em * fs;
-    let line_h = if BEHIND_ACTOR {
+    let line_h = if behind {
         BEHIND_LINE_HEIGHT * fs
     } else {
         LINE_HEIGHT * fs
@@ -277,7 +308,7 @@ pub fn render<'a>(
 
     // Quiet: top edge on the 0.75H anchor. Behind: the scss re-anchors the
     // box so its top edge lands on `behind-y` however tall it grew.
-    let block_top = if BEHIND_ACTOR {
+    let block_top = if behind {
         st.f32("behind-y", BEHIND_Y_FRAC) * video_h as f32
     } else {
         ov.anchor_y * video_h as f32
@@ -291,7 +322,7 @@ pub fn render<'a>(
     // soft-drop-shadow(0.06, 0.35): blur is a radius in `text-shadow`.
     let shadow_dy = SHADOW_DY_EM * fs;
     let shadow_std = SHADOW_BLUR_EM * fs / 2.0;
-    let shadow_copies = if BEHIND_ACTOR {
+    let shadow_copies = if behind {
         BEHIND_SHADOW_COPIES
     } else {
         QUIET_SHADOW_COPIES
@@ -302,11 +333,18 @@ pub fn render<'a>(
         word_shadow_filter(shadow_copies, shadow_dy, shadow_std)
     );
 
-    let family = if BEHIND_ACTOR { svg_font } else { ov.font_family.as_str() };
-    // The behind register's family can be overridden by the
-    // `behind-font-family` control; measurement stays on the embedded face.
-    let family = if BEHIND_ACTOR {
-        st.str("behind-font-family", family)
+    let family = if behind { svg_font } else { ov.font_family.as_str() };
+    // The behind register's family comes from the `behind-font-family`
+    // control (font slug id, mis. "anton" → "Anton"); measurement stays on
+    // the embedded face.
+    let family = if behind {
+        let id = st.str("behind-font-family", family);
+        let resolved = super::faces::family_from_font_id(&id);
+        if resolved.is_empty() {
+            family.to_string()
+        } else {
+            resolved.to_string()
+        }
     } else {
         family.to_string()
     };
@@ -326,7 +364,7 @@ pub fn render<'a>(
         // Behind: the line rises in as its own narration starts (the
         // delay `--on-line-being-narrated-starts` resolves to); quiet
         // lines just are.
-        let (opacity, dy_em) = if BEHIND_ACTOR && !ov.motion_static {
+        let (opacity, dy_em) = if behind && !ov.motion_static {
             let span = state::LineSpan::of_words(&segment.words[start..end]);
             recipes::RiseIn::custom(
                 ov.distance_or(RISE_DISTANCE_EM),
@@ -394,6 +432,29 @@ pub fn render<'a>(
     }
 
     let words_svg = layout::dedupe_text_attrs(&words_svg);
+
+    // Occlusion (the register's whole point): the actor cutout ABOVE the
+    // caption — frame pixels (glass mechanism, sama dengan selene) AND-ed
+    // dengan masker orang (PNG putih + alpha=confidence) lewat SVG <mask>
+    // luminance. Tanpa masker host (CLI native, galeri pra-analisis) tak
+    // ada lapisan: register behind tetap (aturan tscaps — class statis,
+    // occlusion drop per-frame), occlusion muncul kembali saat masker ada.
+    let mut occlusion_svg = String::new();
+    if behind {
+        if let (Some(mask), Some(frame)) = (crate::person_mask_png(), crate::frame_image()) {
+            let mask_data = crate::base64_encode(&mask);
+            let frame_data = crate::base64_encode(&frame);
+            occlusion_svg = format!(
+                "<mask id=\"pastor-person\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" \
+                 width=\"{video_w}\" height=\"{video_h}\">\
+                 <image href=\"data:image/png;rscaps-pmask;base64,{mask_data}\" x=\"0\" y=\"0\" \
+                 width=\"{video_w}\" height=\"{video_h}\" preserveAspectRatio=\"none\"/></mask>\
+                 <image href=\"data:image/jpeg;rscaps-glass;base64,{frame_data}\" x=\"0\" y=\"0\" \
+                 width=\"{video_w}\" height=\"{video_h}\" preserveAspectRatio=\"none\" \
+                 mask=\"url(#pastor-person)\"/>"
+            );
+        }
+    }
     fframes::svgr!(
         <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -405,6 +466,7 @@ pub fn render<'a>(
                 {defs_svg}
             </defs>
             {words_svg}
+            {occlusion_svg}
         </svg>
     )
 }
@@ -534,5 +596,93 @@ mod tests {
         assert_eq!(quiet.matches("feDropShadow").count(), 1);
         assert_eq!(behind.matches("feDropShadow").count(), 2);
         assert!(quiet.contains("stdDeviation=\"17.5\""), "{quiet}");
+    }
+
+    fn doc_with_ranges(ranges: &[(u32, u32)]) -> CaptionDocument {
+        CaptionDocument {
+            duration_frames: 3000,
+            template: "pastor".into(),
+            behind_ranges: ranges.to_vec(),
+            cues: vec![
+                crate::Cue { start_ms: 0, end_ms: 1500, text: "First cue here.".into(), sheet: None },
+                crate::Cue { start_ms: 1500, end_ms: 3000, text: "Second cue text.".into(), sheet: None },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn render_pastor(doc: &CaptionDocument, frame: u64) -> String {
+        let ctx = fframes::FFramesContext {
+            time_base: fframes::TimeBase { fps: 30, sample_rate: 48000 },
+            current_video_size: fframes::VideoSize { width: 320, height: 240 },
+            duration_in_frames: 90,
+            mode: fframes::FFramesMode::Renderer,
+            scenes: None,
+            media_source: None,
+            font_source: None,
+            abort_signal: None,
+        };
+        // Dokumen di-render lewat global DOC (render_frame membaca
+        // `document()`); setel langsung, lalu render.
+        crate::set_document_json(&serde_json::to_string(doc).expect("doc json"))
+            .expect("doc valid");
+        use fframes::Video;
+        crate::CaptionVideo
+            .render_frame(fframes::Frame::new(frame as usize, frame as usize, 30), &ctx)
+            .value
+    }
+
+    #[test]
+    fn behind_ranges_switch_the_register_per_segment() {
+        // Rentang menutupi cue pertama penuh; cue kedua tetap quiet.
+        let doc = doc_with_ranges(&[(0, 1500)]);
+        let behind_svg = render_pastor(&doc, 15); // t=0.5s — cue 1
+        let quiet_svg = render_pastor(&doc, 60); // t=2.0s — cue 2
+        assert!(behind_svg.contains("Anton"), "behind register pakai Anton");
+        assert!(quiet_svg.contains("Manrope"), "quiet register pakai Manrope");
+        assert!(!quiet_svg.contains("Anton"), "{quiet_svg}");
+    }
+
+    #[test]
+    fn a_segment_straddling_a_window_boundary_stays_quiet() {
+        // Rentang terpotong di tengah cue kedua — tscaps menolak flip
+        // register mid-segment, jadi seluruh cue kedua tak aktif.
+        let doc = doc_with_ranges(&[(0, 1500), (1600, 2400)]);
+        let svg = render_pastor(&doc, 60); // t=2.0s di dalam (1600,2400) tapi cue 1500..3000 tidak lolos
+        assert!(svg.contains("Manrope"), "{svg}");
+        assert!(!svg.contains("Anton"), "{svg}");
+    }
+
+    #[test]
+    fn occlusion_gating_end_to_end() {
+        // Statics global (PERSON_MASK/FRAME_IMAGE) — semua kombinasi dalam
+        // SATU test agar paralelisme test tidak saling menabrak.
+        crate::clear_person_mask();
+        crate::clear_frame_image();
+        let doc = doc_with_ranges(&[(0, 3000)]);
+
+        // 1) Mask + frame ada → occlusion penuh.
+        crate::set_person_mask_png(b"mask-bytes");
+        crate::set_frame_image(b"frame-bytes");
+        let svg = render_pastor(&doc, 15);
+        assert!(svg.contains("<mask id=\"pastor-person\""), "{svg}");
+        assert!(svg.contains("data:image/png;rscaps-pmask;base64,"), "{svg}");
+        assert!(svg.contains("data:image/jpeg;rscaps-glass;base64,"), "{svg}");
+
+        // 2) Mask hilang → tak ada lapisan occlusion (register tetap behind).
+        crate::clear_person_mask();
+        let svg = render_pastor(&doc, 15);
+        assert!(!svg.contains("<mask id=\"pastor-person\""), "{svg}");
+        assert!(svg.contains("Anton"), "{svg}");
+
+        // 3) Tanpa behind_ranges sama sekali → quiet, occlusion pun tidak.
+        crate::set_person_mask_png(b"mask-bytes");
+        let doc = doc_with_ranges(&[]);
+        let svg = render_pastor(&doc, 15);
+        assert!(!svg.contains("<mask id=\"pastor-person\""), "{svg}");
+        assert!(svg.contains("Manrope"), "{svg}");
+
+        crate::clear_person_mask();
+        crate::clear_frame_image();
     }
 }

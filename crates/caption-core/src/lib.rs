@@ -331,6 +331,13 @@ pub struct CaptionDocument {
     /// render. JSON object: { "12": ["emphasis"], ... }.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub word_tags: std::collections::BTreeMap<u32, Vec<String>>,
+    /// Rentang waktu (ms, `[start, end)`) saat efek text-behind-actor aktif
+    /// (template pastor) — dihitung host dari hasil segmentasi orang.
+    /// Segmen template masuk register behind hanya bila [start, end]-nya
+    /// SELURUHNYA di dalam satu rentang (aturan tscaps: register tak boleh
+    /// berbalik di tengah segmen).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub behind_ranges: Vec<(u32, u32)>,
     /// Base index kata per cue (paralel dengan `cues`) — diisi render_frame
     /// untuk doc sementara per-sheet agar index kata tetap global. Tidak
     /// diserialisasi; kosong = hitung kumulatif dari nol.
@@ -351,6 +358,7 @@ impl Default for CaptionDocument {
             template: String::new(),
             sheets: Vec::new(),
             word_tags: std::collections::BTreeMap::new(),
+            behind_ranges: Vec::new(),
             word_index_bases: Vec::new(),
         }
     }
@@ -362,6 +370,29 @@ static DOC: OnceLock<RwLock<CaptionDocument>> = OnceLock::new();
 /// (JS studio/worker) sebelum `render_frame` saat template memakai layer
 /// kaca (selene). None = template merender plate tanpa frame.
 static FRAME_IMAGE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Masker orang (PNG alpha kecil, putih=person) untuk occlusion
+/// text-behind-actor (pastor). Host menyetel per frame/per sampel masker
+/// SEBELUM `render_frame`; None = tak ada occlusion (register quiet).
+static PERSON_MASK: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Setel masker orang (PNG, putih + alpha=confidence) SEBELUM `render_frame`.
+pub fn set_person_mask_png(bytes: &[u8]) {
+    *PERSON_MASK.lock().unwrap_or_else(|p| p.into_inner()) = Some(bytes.to_vec());
+}
+
+/// Buang masker tersimpan (host memanggil saat frame di luar rentang aktif).
+pub fn clear_person_mask() {
+    *PERSON_MASK.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
+/// Salinan masker terakhir (untuk emit pastor); None bila belum disetel.
+pub fn person_mask_png() -> Option<Vec<u8>> {
+    PERSON_MASK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
 
 /// Setel frame video untuk layer kaca (JPEG penuh ukuran video). Dipanggil
 /// host per frame SEBELUM `render_frame`.
@@ -714,6 +745,7 @@ impl Video for CaptionVideo {
                 template: template.to_string(),
                 sheets: own_sheet.cloned().into_iter().collect(),
                 word_tags: doc.word_tags.clone(),
+                behind_ranges: doc.behind_ranges.clone(),
                 word_index_bases: bases,
             };
             let svg = render_one(&temp, template, params, &temp.cues, now_ms, &mut frame, ctx);

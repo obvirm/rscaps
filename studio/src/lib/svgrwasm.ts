@@ -113,7 +113,7 @@ async function ensureInlineImages(
     await registerImageWasm(glass[1], baseRgba, width, height);
     inlineGlassKey = glass[1];
   }
-  for (const m of svg.matchAll(/href="(data:image\/[a-z0-9.+-]+;base64,[^"]+)"/g)) {
+  for (const m of svg.matchAll(/href="(data:image\/[a-z0-9.+-]+(?:;[a-z0-9-]+)*;base64,[^"]+)"/g)) {
     const href = m[1];
     if (href === inlineGlassKey || inlineStaticKeys.has(href)) continue;
     const decoded = await decodeDataUrlRgba(href);
@@ -164,7 +164,10 @@ export async function decodeDataUrlRgba(
   href: string,
 ): Promise<{ rgba: Uint8Array; w: number; h: number } | null> {
   try {
-    const blob = await (await fetch(href)).blob();
+    // Parametrized data URL (masker pastor `;rscaps-pmask`) — buang param
+    // sebelum fetch supaya browser decode normal sebagai mime dasarnya.
+    const clean = href.replace(/;rscaps-[a-z-]+(?=;base64,)/, "");
+    const blob = await (await fetch(clean)).blob();
     const bmp = await createImageBitmap(blob);
     const c = new OffscreenCanvas(bmp.width, bmp.height);
     const cctx = c.getContext("2d");

@@ -19,6 +19,8 @@ export interface LoadedBridge {
   /** Frame video (JPEG penuh) untuk layer kaca selene — per frame. */
   setFrameImage: (bytes: Uint8Array) => void;
   clearFrameImage: () => void;
+  setPersonMaskPng: (bytes: Uint8Array) => void;
+  clearPersonMask: () => void;
   /** Daftar kata dokumen aktif (JSON `[WordInfo, .]`) - element inspector. */
   listWords: () => string;
   parseSubtitle: (text: string, format: string) => string;
@@ -45,6 +47,8 @@ export async function loadBridge(): Promise<LoadedBridge> {
     set_document_json: (json: string) => void;
     set_frame_image: (bytes: Uint8Array) => void;
     clear_frame_image: () => void;
+    set_person_mask_png: (bytes: Uint8Array) => void;
+    clear_person_mask: () => void;
     list_words_json: () => string;
     parse_subtitle: (text: string, format: string) => string;
     format_subtitle: (cuesJson: string, format: string) => string;
@@ -84,6 +88,8 @@ export async function loadBridge(): Promise<LoadedBridge> {
     setDocumentJson: mod.set_document_json,
     setFrameImage: mod.set_frame_image,
     clearFrameImage: mod.clear_frame_image,
+    setPersonMaskPng: mod.set_person_mask_png,
+    clearPersonMask: mod.clear_person_mask,
     listWords: mod.list_words_json,
     parseSubtitle: mod.parse_subtitle,
     formatSubtitle: mod.format_subtitle,
