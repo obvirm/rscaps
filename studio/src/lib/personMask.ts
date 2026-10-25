@@ -1,6 +1,13 @@
 /// Klien segmentasi orang + cache masker (mirror MaskCache tscaps): nearest
-/// dalam toleransi 0.15s. Analisis = seek video tersembunyi per sampel
-/// (maskFps), segment di worker, hasil dipakai preview/export pastor.
+/// dalam toleransi 1.5× langkah analisis. Analisis = seek video tersembunyi
+/// per sampel (fps adaptif), segment di worker, hasil dipakai preview/export
+/// pastor.
+// Worker di-fetch sebagai teks: file JS polos (`?url` → aset verbatim di
+// build; TS mentah akan mati di worker produksi). Bundle MediaPipe CJS
+// di-vendor via `?url` dan dikirim ke worker lewat pesan init (path dev
+// /src/... tidak ada di dist).
+import workerUrl from "./personMaskWorker.js?url";
+import bundleUrl from "./vendor/mediapipe_vision_bundle.cjs?url";
 const MASK_FPS_MAX = 10;
 /** Video panjang: adaptif turun (cap total sampel ≈400; lantai 2 fps). */
 const MASK_MAX_SAMPLES = 400;
@@ -36,27 +43,16 @@ export class PersonMaskClient {
   /** fps efektif analisis terakhir (batching toleransi nearest). */
   fpsUsed = MASK_FPS_MAX;
 
-  private workerUrl: string | null = null;
-
   private async ensureWorker(): Promise<Worker> {
     if (!this.worker) {
-      // CLASSIC worker via Blob: runtime MediaPipe memanggil importScripts,
-      // dilarang di module worker — dan vite memaksa type:module untuk
-      // pola `new Worker(new URL(...))`. Scriptnya di-fetch (sudah
-      // di-transform TS→JS oleh vite, tanpa import/export), dibungkus
-      // Blob, lalu dibangun sebagai worker klasik.
-      if (!this.workerUrl) {
-        const src = await fetch(
-          new URL("./personMaskWorker.ts", import.meta.url),
-        ).then((r) => {
-          if (!r.ok) throw new Error(`worker fetch gagal: ${r.status}`);
-          return r.text();
-        });
-        this.workerUrl = URL.createObjectURL(
-          new Blob([src], { type: "text/javascript" }),
-        );
-      }
-      this.worker = new Worker(this.workerUrl);
+      // CLASSIC worker langsung dari URL aset (?url): file JS polos tanpa
+      // import/export — tanpa `type:module` (runtime MediaPipe butuh
+      // importScripts-style evaluasi; pola `new Worker(new URL(...))` dipaksa
+      // type:module oleh vite dan importScripts mati di Chrome modern).
+      this.worker = new Worker(workerUrl);
+      // URL bundel vendor + prewarm: FIFO menjamin init diproses sebelum
+      // segment pertama.
+      this.worker.postMessage({ type: "init", bundleUrl });
       this.worker.onmessage = (event: MessageEvent<WorkerOutbound>) => {
         const msg = event.data;
         if (msg.type === "mask") {
