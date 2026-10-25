@@ -191,6 +191,10 @@ fn word_shadow_filter(copies: usize, dy: f32, std: f32) -> String {
 
 /// Segment inside one `behind_ranges` window — tscaps gating: the WHOLE
 /// segment time range must fit, so the register never flips mid-segment.
+/// Rentang per-cue yang BERSENTUHAN digabung dulu jadi satu pita: unit
+/// segmentasi engine bisa melintasi cue (kalimat multi-cue tanpa terminator,
+/// arah sama) — pita berdempetan menjamin tiap instan di dalamnya behind,
+/// jadi tak ada flip visual meski window-nya "menyilla" beberapa rentang.
 fn behind_actor_active(
     doc: &CaptionDocument,
     segment: &pipeline::WindowedSegment,
@@ -200,9 +204,16 @@ fn behind_actor_active(
     }
     let start = segment.start_ms;
     let end = segment.end_ms;
-    doc.behind_ranges
-        .iter()
-        .any(|&(rs, re)| (rs as f32) <= start && end <= (re as f32))
+    let mut bands: Vec<(f32, f32)> = Vec::with_capacity(doc.behind_ranges.len());
+    for &(rs, re) in &doc.behind_ranges {
+        let (rs, re) = (rs as f32, re as f32);
+        match bands.last_mut() {
+            // Rentang diasumsikan terurut (khas per-cue); sentuhan = satu pita.
+            Some(last) if rs <= last.1 => last.1 = last.1.max(re),
+            _ => bands.push((rs, re)),
+        }
+    }
+    bands.iter().any(|&(bs, be)| bs <= start && end <= be)
 }
 
 pub fn render<'a>(
@@ -641,6 +652,35 @@ mod tests {
         assert!(behind_svg.contains("Anton"), "behind register pakai Anton");
         assert!(quiet_svg.contains("Manrope"), "quiet register pakai Manrope");
         assert!(!quiet_svg.contains("Anton"), "{quiet_svg}");
+    }
+
+    #[test]
+    fn segments_spanning_touching_windows_stay_behind() {
+        // Unit segmentasi engine bisa melintasi cue (satu aliran kata; cue
+        // RTL berurutan tanpa terminator tak terpecah). Window per-cue yang
+        // BERSENTUHAN = satu pita: segmen yang menyilla dua window tetap
+        // behind (tiap instan di dalamnya behind — tak ada flip visual).
+        // Band dengan CELAH tetap menolak (aturan straddle tscaps).
+        let cues = vec![
+            crate::Cue { start_ms: 0, end_ms: 2500, text: "Welcome to rscaps".into(), sheet: None },
+            crate::Cue { start_ms: 2500, end_ms: 5500, text: "مرحبا بالعالم من rscaps — هذا نص عربي طويل لاختبار تقسيم الأسطر".into(), sheet: None },
+            crate::Cue { start_ms: 5500, end_ms: 8000, text: "שלום עולם — זהו טקסט עברי לבדיקת פריסה".into(), sheet: None },
+            crate::Cue { start_ms: 8000, end_ms: 10000, text: "Captions rendered by fframes in Rust".into(), sheet: None },
+            crate::Cue { start_ms: 10000, end_ms: 13000, text: "Mixed line with مرحبا and שלום together".into(), sheet: None },
+        ];
+        let mk = |ranges: &[(u32, u32)]| CaptionDocument {
+            duration_frames: 900,
+            template: "pastor".into(),
+            behind_ranges: ranges.to_vec(),
+            cues: cues.clone(),
+            ..Default::default()
+        };
+        // Window berdempetan [2500,5500]+[5500,8000] → cue Ibrani behind.
+        let svg = render_pastor(&mk(&[(2500, 5500), (5500, 8000)]), 168); // t=5.6s
+        assert!(svg.contains("Anton"), "{svg}");
+        // Window bercelah saja → segmen lintas-cue tak tertutup satu band.
+        let svg = render_pastor(&mk(&[(2500, 5500)]), 168);
+        assert!(!svg.contains("Anton"), "{svg}");
     }
 
     #[test]

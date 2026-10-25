@@ -759,7 +759,9 @@ class StudioState {
     this.personMaskProgress = 0;
     try {
       const duration = Math.max(0.1, this.durationFrames / this.fps);
-      await this.personMaskClient.analyze(this.videoUrl, duration);
+      await this.personMaskClient.analyze(this.videoUrl, duration, (p) => {
+        this.personMaskProgress = p;
+      });
       // Encode PNG putih + alpha=confidence per sampel (sekali per sampel).
       this.personMaskPngs = [];
       for (const m of this.personMaskClient.entries) {

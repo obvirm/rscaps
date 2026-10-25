@@ -1,8 +1,10 @@
 /// Klien segmentasi orang + cache masker (mirror MaskCache tscaps): nearest
 /// dalam toleransi 0.15s. Analisis = seek video tersembunyi per sampel
 /// (maskFps), segment di worker, hasil dipakai preview/export pastor.
-const MASK_FPS = 10;
-const MASK_TOLERANCE_SEC = 0.15;
+const MASK_FPS_MAX = 10;
+/** Video panjang: adaptif turun (cap total sampel ≈400; lantai 2 fps). */
+const MASK_MAX_SAMPLES = 400;
+const MASK_FPS_MIN = 2;
 /** Fraksi piksel "person" (alpha>128) minimal agar frame dianggap berisi orang. */
 const PERSON_PIXEL_FRACTION = 0.03;
 /** Cue aktif behind bila ≥85% sampelnya berisi orang. */
@@ -31,7 +33,8 @@ export class PersonMaskClient {
   progress = -1;
   /** Sampel masker terurut waktu (dari analisis terakhir). */
   entries: PersonMask[] = [];
-  /** Progress analisis 0..1; -1 = tidak berjalan; 1 = selesai (poll manual). */
+  /** fps efektif analisis terakhir (batching toleransi nearest). */
+  fpsUsed = MASK_FPS_MAX;
 
   private workerUrl: string | null = null;
 
@@ -89,11 +92,19 @@ export class PersonMaskClient {
   }
 
   /** Sampel masker di seluruh durasi via video tersembunyi (tanpa ganggu preview). */
-  async analyze(videoUrl: string, durationSec: number): Promise<PersonMask[]> {
+  async analyze(
+    videoUrl: string,
+    durationSec: number,
+    onProgress?: (fraction: number) => void,
+  ): Promise<PersonMask[]> {
     this.progress = 0;
     this.entries = [];
+    this.fpsUsed = Math.max(
+      MASK_FPS_MIN,
+      Math.min(MASK_FPS_MAX, MASK_MAX_SAMPLES / Math.max(durationSec, 1)),
+    );
     const timestamps: number[] = [];
-    const step = 1 / MASK_FPS;
+    const step = 1 / this.fpsUsed;
     for (let t = 0; t < durationSec; t += step) timestamps.push(t);
     if (timestamps.length === 0) {
       this.progress = 1;
@@ -120,6 +131,7 @@ export class PersonMaskClient {
         }
         captured++;
         this.progress = captured / timestamps.length;
+        onProgress?.(this.progress);
       }
     } finally {
       video.removeAttribute("src");
@@ -139,6 +151,9 @@ export class PersonMaskClient {
   nearestIndex(t: number): number {
     const entries = this.entries;
     if (entries.length === 0) return -1;
+    // Toleransi mengikuti langkah analisis (1.5× step): video panjang
+    // disampel lebih jarang — occlusion tetap hidup antar sampel.
+    const tol = 1.5 / this.fpsUsed;
     let lo = 0;
     let hi = entries.length - 1;
     while (lo < hi) {
@@ -151,7 +166,7 @@ export class PersonMaskClient {
     const best =
       Math.abs(entries[candA]!.t - t) <= Math.abs(entries[candB]!.t - t) ? candA : candB;
     const chosen = entries[best]!;
-    return Math.abs(chosen.t - t) <= MASK_TOLERANCE_SEC ? best : -1;
+    return Math.abs(chosen.t - t) <= tol ? best : -1;
   }
 
   /**
