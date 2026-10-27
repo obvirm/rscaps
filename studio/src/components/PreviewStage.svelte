@@ -16,16 +16,17 @@
     return () => store.attachVideoElement(null);
   });
 
-  // ── Preview = export ──────────────────────────────────────────────────────
-  // Saat video ada & engine WASM siap, caption TIDAK dilukis browser: frame
-  // video + layer caption diraster/komposit lewat jalur burnWorker yang sama
-  // dengan export (svgr-wasm + blend difference), lalu hasilnya digambar ke
-  // kanvas ini. SVG tetap ter-mount sebagai layer geometri hit-test (opacity
-  // 0 - getBoundingClientRect tetap bekerja untuk element inspector).
+  // ── Preview mode ──────────────────────────────────────────────────────────
+  // "simple": browser-native SVG (cepat, lancar untuk scrubbing/editing)
+  // "export": burnWorker + usvgr (preview = export, akurat blend/glass/occlusion)
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   const burner = new PreviewBurner();
   const burnActive = $derived(
-    store.videoUrl !== null && store.videoWidth > 0 && burner.available && store.wasmReady,
+    store.previewMode === "export" &&
+    store.videoUrl !== null &&
+    store.videoWidth > 0 &&
+    burner.available &&
+    store.wasmReady,
   );
 
   let lastKey = "";

@@ -5,6 +5,10 @@ edition = "2024"
 license = "MIT"
 description = "rscaps headless caption engine — render frame, konversi subtitle, API server"
 
+[lib]
+name = "rscaps_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rscaps"
 path = "src/main.rs"

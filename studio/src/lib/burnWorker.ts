@@ -87,6 +87,132 @@ const layerCache = new Map<string, ImageBitmap>();
 let lastGlassKey = "";
 const staticKeys = new Set<string>();
 
+// ── Occlusion pastor: strip dari SVG, komposit GPU per frame ────────────────
+// Layer occlusion (mask luminance putih + glass frame) di-raster usvgr = 4
+// dari 5 dinding biaya preview (resample mask + luminance + apply + parse
+// string besar; svg berubah TIAP frame karena glass embed frame → cache
+// layer tak pernah kena). Kontrak host (dipakai preview + export web):
+// elemen occlusion DIHAPUS dari string sebelum raster; komposit dilakukan
+// di canvas GPU: frame × alpha-masker (destination-in) = mask luminance
+// putih (eksak: L(putih)×A = A; Δ≤1/255 pembulatan). String jadi stabil →
+// cache layer hidup → usvgr hanya saat konten caption berubah.
+interface OcclLayer {
+  /** svg tanpa elemen occlusion (kunci cache). */
+  svg: string;
+  /** rect region (video coords) — null = full frame. */
+  rect: [number, number, number, number] | null;
+  /** href data URL masker asli (kunci decode). */
+  maskHref: string;
+  /** dimensi masker (px) untuk pemetaan region→source-rect. */
+  maskW: number;
+  maskH: number;
+}
+
+const OCCL_RE = /<clipPath id="pastor-occl"><rect x="([\d.-]+)" y="([\d.-]+)" width="([\d.-]+)" height="([\d.-]+)"\/><\/clipPath><mask id="pastor-person"[^>]*x="[^"]*"[^>]*>(?:[\s\S]*?)<\/mask><image[^>]*rscaps-glass[^>]*\/>/;
+const MASK_HREF_RE = /href="(data:image\/png;rscaps-pmask;base64,[^"]+)"/;
+const MASK_DIM_RE = /<image href="data:image\/png;rscaps-pmask;base64,[^"]*" x="0" y="0" width="(\d+)" height="(\d+)"/;
+
+/**
+ * Ekstrak layer occlusion pastor dari svg (kalau ada) → {svg tanpa
+ * occlusion, rect, masker}. Kompositnya dikerjakan `drawOcclusion` di
+ * canvas GPU. Kalau tak ada occlusion → svg kembali apa adanya.
+ */
+function extractOcclusion(svg: string): OcclLayer | null {
+  const m = svg.match(OCCL_RE);
+  if (!m) return null;
+  const maskHref = svg.match(MASK_HREF_RE)?.[1] ?? "";
+  const dims = svg.match(MASK_DIM_RE);
+  const rect: [number, number, number, number] = [+m[1], +m[2], +m[3], +m[4]];
+  return {
+    svg: svg.replace(OCCL_RE, ""),
+    rect: rect[2] > 0 && rect[3] > 0 ? rect : null,
+    maskHref,
+    maskW: dims ? +dims[1] : 0,
+    maskH: dims ? +dims[2] : 0,
+  };
+}
+
+/** Bitmap masker (RGBA, putih + alpha=confidence) per href — cache kecil. */
+const maskBitmaps = new Map<string, ImageBitmap>();
+
+async function occlMaskBitmap(maskHref: string): Promise<ImageBitmap | null> {
+  if (!maskHref) return null;
+  const hit = maskBitmaps.get(maskHref);
+  if (hit) return hit;
+  const decoded = await decodeDataUrlRgba(maskHref);
+  if (!decoded) return null;
+  const bmp = await createImageBitmap(
+    new ImageData(new Uint8ClampedArray(decoded.rgba), decoded.w, decoded.h),
+  );
+  if (maskBitmaps.size >= 8) {
+    const oldest = maskBitmaps.keys().next().value;
+    if (oldest !== undefined && oldest !== maskHref) {
+      maskBitmaps.get(oldest)?.close();
+      maskBitmaps.delete(oldest);
+    }
+  }
+  maskBitmaps.set(maskHref, bmp);
+  return bmp;
+}
+
+/** Kanvas temp untuk komposit frame×masker (ukuran region, GPU). */
+let occTemp: OffscreenCanvas | null = null;
+let occTempCtx: OffscreenCanvasRenderingContext2D | null = null;
+
+/**
+ * Komposit occlusion di ATAS layer caption (canvas GPU): piksel frame video
+ * ASLI (bukan kanvas ber-teks!) dipotong siluet orang (destination-in
+ * masker) lalu digambar ke kanvas utama pada region bbox. Setara mask
+ * luminance SVG (masker putih: L×A = A) — Δ≤1/255 pembulatan 8-bit.
+ * `src` = sumber piksel video (VideoFrame / ImageBitmap) + dimensi aslinya.
+ */
+interface OcclSource {
+  source: CanvasImageSource;
+  sw: number;
+  sh: number;
+}
+
+async function drawOcclusion(
+  occ: OcclLayer,
+  ctx: OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number,
+  src: OcclSource,
+): Promise<void> {
+  const mask = await occlMaskBitmap(occ.maskHref);
+  if (!mask) return;
+  const [x, y, w, h] = occ.rect ?? [0, 0, width, height];
+  if (!occTemp || occTemp.width !== w || occTemp.height !== h) {
+    occTemp = new OffscreenCanvas(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+    occTempCtx = occTemp.getContext("2d");
+  }
+  const tctx = occTempCtx;
+  if (!tctx) return;
+  tctx.globalCompositeOperation = "source-over";
+  tctx.clearRect(0, 0, occTemp.width, occTemp.height);
+  // Frame video ASLI (area region) — teks di bawah TIDAK ikut: occlusion
+  // menimpa teks dengan piksel orang, semantik mask SVG.
+  const fx = src.sw > 0 ? src.sw / width : 1;
+  const fy = src.sh > 0 ? src.sh / height : 1;
+  tctx.drawImage(
+    src.source,
+    x * fx, y * fy, w * fx, h * fy,
+    0, 0, occTemp.width, occTemp.height,
+  );
+  // × siluet orang: destination-in memakai alpha sumber (masker putih +
+  // alpha=confidence — identik luminance putih). Masker digambar full-frame
+  // preserveAspectRatio=none → sub-rect masker = region × skala masker.
+  tctx.globalCompositeOperation = "destination-in";
+  tctx.drawImage(
+    mask,
+    (x / width) * mask.width, (y / height) * mask.height,
+    (w / width) * mask.width, (h / height) * mask.height,
+    0, 0, occTemp.width, occTemp.height,
+  );
+  tctx.globalCompositeOperation = "source-over";
+  ctx.drawImage(occTemp, 0, 0, occTemp.width, occTemp.height, x, y, w, h);
+}
+
 async function ensureSvgImages(
   svg: string,
   ctx: OffscreenCanvasRenderingContext2D,
@@ -160,8 +286,9 @@ async function layerBitmap(
   return bmp;
 }
 
+const WP_LOG_EVERY = 24;
 function wpLog(): void {
-  if (wp.n === 0 || wp.n % 600 !== 0) return;
+  if (!(wp.n <= 30 || wp.n % WP_LOG_EVERY === 0)) return;
   const n = wp.n;
   console.log(
     `[burnWorker] n=${n} raster=${(wp.raster / n).toFixed(2)} mkBmp=${(wp.mkBmp / n).toFixed(2)} draw=${(wp.draw / n).toFixed(2)} vf=${(wp.vf / n).toFixed(2)} hit=${wp.cacheHit} miss=${wp.cacheMiss}`,
@@ -175,11 +302,18 @@ self.addEventListener("unhandledrejection", (ev) => {
   console.error("[burnWorker] unhandledrejection", String(ev.reason));
 });
 
-self.onmessage = async (e: MessageEvent<BurnRequest>) => {
+self.onmessage = async (e: MessageEvent<BurnRequest & { prefetch?: boolean }>) => {
   const { idx, svg, blend, width, height, t, dur, videoFrame, bitmap, buf, preview } = e.data;
   try {
     const ts = Math.round(t * 1e6);
     const durUs = Math.round(dur * 1e6) || undefined;
+
+    // ── Prefetch: hangatkan cache layer saja (tanpa komposit/respons) ─────
+    if (e.data.prefetch) {
+      const ctx = ensureCanvas(width, height);
+      if (ctx) await layerBitmap(svg, width, height, ctx);
+      return;
+    }
 
     // ── Jalur utama: VideoFrame GPU → canvas → VideoFrame GPU ────────────
     if (videoFrame) {
@@ -197,15 +331,28 @@ self.onmessage = async (e: MessageEvent<BurnRequest>) => {
       const d0 = performance.now();
       ctx.globalCompositeOperation = "source-over";
       ctx.drawImage(videoFrame, 0, 0, width, height);
-      videoFrame.close();
       const d1 = performance.now();
       wp.draw += d1 - d0;
 
-      const base = await layerBitmap(svg, width, height, ctx);
+      // Occlusion pastor: strip dari svg → komposit GPU (string stabil,
+      // cache layer hidup). Order: base → occlusion → blend (= order svg).
+      // VideoFrame ditutup SETELAH occlusion (butuh piksel asli).
+      const occ = extractOcclusion(svg);
+      const baseSvg = occ ? occ.svg : svg;
+
+      const base = await layerBitmap(baseSvg, width, height, ctx);
       if (base) {
         ctx.globalCompositeOperation = "source-over";
         ctx.drawImage(base, 0, 0);
       }
+      if (occ) {
+        await drawOcclusion(occ, ctx, width, height, {
+          source: videoFrame,
+          sw: videoFrame.displayWidth || videoFrame.codedWidth || width,
+          sh: videoFrame.displayHeight || videoFrame.codedHeight || height,
+        });
+      }
+      videoFrame.close();
       const blendBmp = await layerBitmap(blend, width, height, ctx);
       if (blendBmp) {
         ctx.globalCompositeOperation = "difference";
@@ -231,13 +378,25 @@ self.onmessage = async (e: MessageEvent<BurnRequest>) => {
       if (!ctx) throw new Error("worker 2D context gagal");
       ctx.globalCompositeOperation = "source-over";
       ctx.drawImage(bitmap, 0, 0, width, height);
-      bitmap.close();
 
-      const base = await layerBitmap(svg, width, height, ctx);
+      // Occlusion pastor: strip + komposit GPU (sama dengan jalur utama).
+      // Bitmap ditutup SETELAH occlusion (butuh piksel asli).
+      const occ = extractOcclusion(svg);
+      const baseSvg = occ ? occ.svg : svg;
+
+      const base = await layerBitmap(baseSvg, width, height, ctx);
       if (base) {
         ctx.globalCompositeOperation = "source-over";
         ctx.drawImage(base, 0, 0);
       }
+      if (occ) {
+        await drawOcclusion(occ, ctx, width, height, {
+          source: bitmap,
+          sw: bitmap.width,
+          sh: bitmap.height,
+        });
+      }
+      bitmap.close();
       const blendBmp = await layerBitmap(blend, width, height, ctx);
       if (blendBmp) {
         ctx.globalCompositeOperation = "difference";
@@ -248,6 +407,8 @@ self.onmessage = async (e: MessageEvent<BurnRequest>) => {
       // VideoFrame. Jalur raster+komposit identik dengan export.
       if (preview) {
         const bmp = await createImageBitmap(ctx.canvas);
+        wp.n++;
+        wpLog();
         const res: BurnResponse = { idx, frame: null, buf: null, bitmap: bmp };
         (self as unknown as Worker).postMessage(res, [bmp]);
         return;

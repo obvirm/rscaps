@@ -376,14 +376,66 @@ static FRAME_IMAGE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 /// SEBELUM `render_frame`; None = tak ada occlusion (register quiet).
 static PERSON_MASK: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 
+/// Bounding-box area alpha>0 masker terakhir, dalam KOORDINAT PIKSEL MASKER
+/// `(x0, y0, x1, y1, mask_w, mask_h)` (x1/y1 eksklusif). Di-cache saat
+/// `set_person_mask_png` (decode sekali per sampel) — pemakaian: region
+/// masker/clip occlusion pastor di-crop ke area orang supaya raster tak
+/// menghitung seluruh frame tiap frame. None = decode gagal → fallback
+/// full-frame (perilaku lama).
+static PERSON_MASK_REGION: Mutex<Option<(f32, f32, f32, f32, f32, f32)>> =
+    Mutex::new(None);
+
+/// Decode PNG + pindai alpha → bbox piksel ber-alpha. None bila PNG tak
+/// valid / seluruhnya transparan.
+fn person_mask_bbox(png_bytes: &[u8]) -> Option<(f32, f32, f32, f32, f32, f32)> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width as f32, info.height as f32);
+    let channels = info.color_type.samples() as usize;
+    // Alpha selalu kanal terakhir (RGBA/GrayscaleAlpha); tanpa alpha =
+    // masker opaque penuh → full frame.
+    if !matches!(
+        info.color_type,
+        png::ColorType::Rgba | png::ColorType::GrayscaleAlpha
+    ) {
+        return Some((0.0, 0.0, w, h, w, h));
+    }
+    let mut x0 = w;
+    let mut y0 = h;
+    let mut x1 = 0.0f32;
+    let mut y1 = 0.0f32;
+    for y in 0..info.height as usize {
+        let row = &buf[y * info.width as usize * channels..];
+        for x in 0..info.width as usize {
+            if row[x * channels + channels - 1] != 0 {
+                let fx = x as f32;
+                x0 = x0.min(fx);
+                y0 = y0.min(y as f32);
+                x1 = x1.max(fx + 1.0);
+                y1 = y1.max(y as f32 + 1.0);
+            }
+        }
+    }
+    if x1 <= x0 {
+        return None;
+    }
+    Some((x0, y0, x1, y1, w, h))
+}
+
 /// Setel masker orang (PNG, putih + alpha=confidence) SEBELUM `render_frame`.
+/// PNG di-decode SEKALI di sini untuk bbox area orang (di-cache).
 pub fn set_person_mask_png(bytes: &[u8]) {
+    let region = person_mask_bbox(bytes);
     *PERSON_MASK.lock().unwrap_or_else(|p| p.into_inner()) = Some(bytes.to_vec());
+    *PERSON_MASK_REGION.lock().unwrap_or_else(|p| p.into_inner()) = region;
 }
 
 /// Buang masker tersimpan (host memanggil saat frame di luar rentang aktif).
 pub fn clear_person_mask() {
     *PERSON_MASK.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *PERSON_MASK_REGION.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
 /// Salinan masker terakhir (untuk emit pastor); None bila belum disetel.
@@ -392,6 +444,12 @@ pub fn person_mask_png() -> Option<Vec<u8>> {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .clone()
+}
+
+/// Bbox masker terakhir `(x0, y0, x1, y1, mask_w, mask_h)` dalam piksel
+/// masker; None bila belum disetel / decode gagal.
+pub fn person_mask_region() -> Option<(f32, f32, f32, f32, f32, f32)> {
+    *PERSON_MASK_REGION.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 /// Setel frame video untuk layer kaca (JPEG penuh ukuran video). Dipanggil

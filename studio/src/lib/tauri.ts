@@ -20,6 +20,19 @@ function internals(): TauriInternals | null {
     .__TAURI_INTERNALS__;
 }
 
+/** Generic invoke untuk Tauri commands. */
+export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const t = internals();
+  if (!t) throw new Error("not running in Tauri");
+  return t.invoke(cmd, args) as Promise<T>;
+}
+
+export interface RenderProgress {
+  current: number;
+  total: number;
+  stage: string;
+}
+
 const CHUNK_BYTES = 4 * 1024 * 1024;
 
 /** Simpan bytes lewat dialog Save native. `null` = user membatalkan atau

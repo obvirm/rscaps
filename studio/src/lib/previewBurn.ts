@@ -71,8 +71,8 @@ export class PreviewBurner {
 
   /**
    * Komposit satu frame. Bitmap video DITRANSFER (berpindah kepemilikan) —
-   * pemanggil tidak boleh memakainya lagi setelah memanggil ini.
-   * Latest-wins: hanya respons dengan idx terakhir yang dianggap relevan.
+   * pemanggil tidak boleh memakainya lagi setelah memanggil ini. Latest-wins:
+   * hanya respons dengan idx terakhir yang dianggap relevan.
    */
   request(req: Omit<PreviewBurnRequest, "idx">): Promise<PreviewBurnResult> {
     const worker = this.ensure();
@@ -93,6 +93,19 @@ export class PreviewBurner {
       };
       worker.postMessage(payload, [req.bitmap]);
     });
+  }
+
+  /**
+   * Hangatkan cache layer worker: raster svg frame mendatang TANPA
+   * komposit/respons (fire-and-forget). Supaya saat playback mencapai frame
+   * itu, burn-nya cache-hit (miss raster blur 200-400ms tak terlihat).
+   * Dipanggil SETELAH burn frame aktif dikirim — antrean worker memproses
+   * display burn lebih dulu.
+   */
+  prefetch(svg: string, width: number, height: number): void {
+    const worker = this.ensure();
+    if (!worker) return;
+    worker.postMessage({ prefetch: true, svg, width, height });
   }
 
   /** Abaikan respons yang masih menggantung (scrub cepat). */

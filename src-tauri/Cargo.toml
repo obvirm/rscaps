@@ -1,5 +1,3 @@
-[workspace]
-
 [package]
 name = "rscaps"
 version = "0.1.0"
@@ -26,4 +24,19 @@ log = "0.4"
 tauri = { version = "2.12.4", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+# Native render pipeline (CLI engines: cpu, skia, fframes + ffmpeg)
+rscaps-cli = { path = "../crates/rscaps-cli", features = ["gpu-skia"] }
+caption-core = { path = "../crates/caption-core" }
+# For font manifest
+caption-bridge = { path = "../crates/caption-bridge" }
+# fframes for FFramesContext
+fframes = { version = "1.2.1-rc.38", default-features = false, features = ["cpu_renderer"] }
+# tokio for async command handling
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# tempfile for native_get_temp_dir
+tempfile = "3"
+
+[features]
+# Enable gpu-skia for Skia GPU renderer (requires Vulkan)
+gpu-skia = ["rscaps-cli/gpu-skia"]
 

@@ -168,22 +168,38 @@ fn behind_font_size(line_w_em: f32, video_w: f32, video_h: f32, st: &style::Styl
     (fill * video_w / line_w_em).clamp(BEHIND_MIN_CQH * video_h, BEHIND_MAX_CQH * video_h)
 }
 
-/// The `soft-drop-shadow(0.06, 0.35)` chain: `copies` identical opaque
-/// black shadows, each fed by the previous one's result. The FIRST input
-/// is `SourceGraphic` — feDropShadow merges its shadow UNDER the input,
-/// so SourceAlpha (siluet hitam) akan memakan warna glif (bug lama:
-/// teks pastor jatuh hitam, kuning #e6d647 tak pernah kembali).
+/// The `soft-drop-shadow(0.06, 0.35)` chain: tscaps menumpuk `copies` layer
+/// `text-shadow` identik (INDEPENDEN, bukan berantai) → alpha gabungan
+/// `1-(1-A)^copies`. Dirender EKSAK dengan SATU blur + feFuncA table 17
+/// titik (pola cleo) — N feDropShadow berantai (versi lama) memicu N blur
+/// per kata di raster CPU dan mendominasi waktu raster (~500ms/frame);
+/// satu blur di level blok ≈ 30-50ms. Hasil piksel setara (Δα ≤ 2/255).
 fn word_shadow_filter(copies: usize, dy: f32, std: f32) -> String {
-    let mut out = String::new();
-    let mut input = String::from("SourceGraphic");
-    for i in 0..copies {
-        let result = format!("s{i}");
+    let mut out = format!(
+        "<feOffset in=\"SourceAlpha\" dx=\"0\" dy=\"{dy}\" result=\"p-o\"/>\
+         <feGaussianBlur in=\"p-o\" stdDeviation=\"{std}\" result=\"p-b\"/>\
+         <feFlood flood-color=\"#000000\" flood-opacity=\"1.0\" result=\"p-f\"/>\
+         <feComposite in=\"p-f\" in2=\"p-b\" operator=\"in\" result=\"p-s\"/>"
+    );
+    let shadow_in = if copies > 1 {
+        let mut table = String::from("0");
+        for i in 1..=16 {
+            let a = i as f32 / 16.0;
+            table.push_str(&format!(" {:.4}", 1.0 - (1.0 - a).powi(copies as i32)));
+        }
         out.push_str(&format!(
-            "<feDropShadow in=\"{input}\" dx=\"0\" dy=\"{dy}\" stdDeviation=\"{std}\" \
-             flood-color=\"#000000\" flood-opacity=\"1.0\" result=\"{result}\"/>"
+            "<feComponentTransfer in=\"p-s\" result=\"p-sn\">\
+             <feFuncA type=\"table\" tableValues=\"{table}\"/>\
+             </feComponentTransfer>"
         ));
-        input = result;
-    }
+        "p-sn"
+    } else {
+        "p-s"
+    };
+    out.push_str(&format!(
+        "<feMerge><feMergeNode in=\"{shadow_in}\"/>\
+         <feMergeNode in=\"SourceGraphic\"/></feMerge>"
+    ));
     out
 }
 
@@ -338,8 +354,29 @@ pub fn render<'a>(
     } else {
         QUIET_SHADOW_COPIES
     };
+    // Region filter selimut bleed saja (3σ + dy + rise + 8px, % dari bbox
+    // blok) — pola cleo: region % bebas (-40%/-60%/180%/260%) membuat blur
+    // menghitung area berlebih di raster CPU. Rise menggeser baris sampai
+    // `distance×fs` — masuk ink vertikal + bleed supaya bayangan tak
+    // terpotong saat animasi.
+    let rise_px = if behind && !ov.motion_static {
+        ov.distance_or(RISE_DISTANCE_EM) * fs
+    } else {
+        0.0
+    };
+    let n_lines = lines.len().max(1) as f32;
+    let ink_w = lines
+        .iter()
+        .map(|&(s, e)| widths[s..e].iter().map(|w| w + 2.0 * margin).sum::<f32>())
+        .fold(1.0f32, f32::max);
+    let ink_h = (n_lines - 1.0) * (line_h + line_gap) + ascent + descent + rise_px;
+    let bleed = 3.0 * shadow_std + shadow_dy + rise_px + 8.0;
+    let fx = format!("{:.1}%", -bleed / ink_w * 100.0);
+    let fw = format!("{:.1}%", (ink_w + 2.0 * bleed) / ink_w * 100.0);
+    let fy = format!("{:.1}%", -bleed / ink_h * 100.0);
+    let fh = format!("{:.1}%", (ink_h + 2.0 * bleed) / ink_h * 100.0);
     let defs_svg = format!(
-        "<filter id=\"pastor-word\" x=\"-40%\" y=\"-60%\" width=\"180%\" height=\"260%\" \
+        "<filter id=\"pastor-word\" x=\"{fx}\" y=\"{fy}\" width=\"{fw}\" height=\"{fh}\" \
          color-interpolation-filters=\"sRGB\">{}</filter>",
         word_shadow_filter(shadow_copies, shadow_dy, shadow_std)
     );
@@ -360,9 +397,11 @@ pub fn render<'a>(
         family.to_string()
     };
     let svg_font_attr = stack::svg_font_family(&family);
+    // Filter di level BLOK (sekali per blok, bukan per kata) — blur CPU
+    // dihitung sekali atas komposit blok, bukan puluhan kali per kata.
     let mut words_svg = format!(
         "<g font-family=\"{svg_font_attr}\" font-weight=\"{font_weight}\" font-size=\"{fs}\" \
-         letter-spacing=\"{ls_px}\" fill=\"{fill}\">",
+         letter-spacing=\"{ls_px}\" fill=\"{fill}\" filter=\"url(#pastor-word)\">",
         fill = ov.primary,
     );
     for (line_idx, &(start, end)) in lines.iter().enumerate() {
@@ -421,7 +460,7 @@ pub fn render<'a>(
                 .map(|t| format!(" transform=\"{t}\""))
                 .unwrap_or_default();
             words_svg.push_str(&format!(
-                "<text x=\"{x}\" y=\"{baseline}\" filter=\"url(#pastor-word)\"{family_attr}{wo}{wo_transform}>{text}</text>"
+                "<text x=\"{x}\" y=\"{baseline}\"{family_attr}{wo}{wo_transform}>{text}</text>"
             ));
         }
         words_svg.push_str("</g>");
@@ -455,14 +494,34 @@ pub fn render<'a>(
         if let (Some(mask), Some(frame)) = (crate::person_mask_png(), crate::frame_image()) {
             let mask_data = crate::base64_encode(&mask);
             let frame_data = crate::base64_encode(&frame);
+            // Region occlusion = bbox alpha masker (piksel masker → koordinat
+            // video; mask digambar full-frame preserveAspectRatio=none) +
+            // margin. Tanpa ini, raster menghitung mesin masker full-frame
+            // (resample + luminance + apply ≈ 2Mpx) tiap frame (~400ms);
+            // region bbox ~10× lebih murah. Output piksel identik: di luar
+            // bbox alpha masker = 0 → glass transparan, sama seperti region
+            // penuh. Region None (decode gagal) → fallback full-frame.
+            let occ_margin = 32.0f32;
+            let (ox, oy, ow, oh) = crate::person_mask_region()
+                .map(|(x0, y0, x1, y1, mw, mh)| {
+                    let sx = video_w as f32 / mw.max(1.0);
+                    let sy = video_h as f32 / mh.max(1.0);
+                    let x = (x0 * sx - occ_margin).max(0.0);
+                    let y = (y0 * sy - occ_margin).max(0.0);
+                    let w = ((x1 - x0) * sx + 2.0 * occ_margin).min(video_w as f32 - x);
+                    let h = ((y1 - y0) * sy + 2.0 * occ_margin).min(video_h as f32 - y);
+                    (x, y, w, h)
+                })
+                .unwrap_or((0.0, 0.0, video_w as f32, video_h as f32));
             occlusion_svg = format!(
-                "<mask id=\"pastor-person\" maskUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" \
-                 width=\"{video_w}\" height=\"{video_h}\">\
+                "<clipPath id=\"pastor-occl\"><rect x=\"{ox}\" y=\"{oy}\" width=\"{ow}\" height=\"{oh}\"/></clipPath>\
+                 <mask id=\"pastor-person\" maskUnits=\"userSpaceOnUse\" x=\"{ox}\" y=\"{oy}\" \
+                 width=\"{ow}\" height=\"{oh}\">\
                  <image href=\"data:image/png;rscaps-pmask;base64,{mask_data}\" x=\"0\" y=\"0\" \
                  width=\"{video_w}\" height=\"{video_h}\" preserveAspectRatio=\"none\"/></mask>\
                  <image href=\"data:image/jpeg;rscaps-glass;base64,{frame_data}\" x=\"0\" y=\"0\" \
                  width=\"{video_w}\" height=\"{video_h}\" preserveAspectRatio=\"none\" \
-                 mask=\"url(#pastor-person)\"/>"
+                 clip-path=\"url(#pastor-occl)\" mask=\"url(#pastor-person)\"/>"
             );
         }
     }
@@ -487,6 +546,11 @@ pub fn render<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// render_pastor menyentuh global (set_document_json, mask/frame) —
+    /// serialkan antar test; tanpa ini suite flaky (race DOC antar thread).
+    static RENDER_LOCK: Mutex<()> = Mutex::new(());
 
     fn family_of(ttf: &[u8]) -> Option<String> {
         let face = fframes::ttf_parser::Face::parse(ttf, 0).unwrap();
@@ -604,8 +668,14 @@ mod tests {
         let std = SHADOW_BLUR_EM * 100.0 / 2.0;
         let quiet = word_shadow_filter(QUIET_SHADOW_COPIES, dy, std);
         let behind = word_shadow_filter(BEHIND_SHADOW_COPIES, dy, std);
-        assert_eq!(quiet.matches("feDropShadow").count(), 1);
-        assert_eq!(behind.matches("feDropShadow").count(), 2);
+        // Satu blur + feFuncA table (1-(1-A)^copies), BUKAN rantai
+        // feDropShadow — rantai = N blur per kata, dominan di raster CPU.
+        assert_eq!(quiet.matches("feGaussianBlur").count(), 1);
+        assert_eq!(behind.matches("feGaussianBlur").count(), 1);
+        assert_eq!(quiet.matches("feDropShadow").count(), 0);
+        assert!(!quiet.contains("feFuncA"), "copies=1 → tanpa table: {quiet}");
+        assert!(behind.contains("feFuncA"), "{behind}");
+        assert!(behind.contains("tableValues=\"0 0.1211"), "{behind}");
         assert!(quiet.contains("stdDeviation=\"17.5\""), "{quiet}");
     }
 
@@ -623,6 +693,7 @@ mod tests {
     }
 
     fn render_pastor(doc: &CaptionDocument, frame: u64) -> String {
+        let _g = RENDER_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let ctx = fframes::FFramesContext {
             time_base: fframes::TimeBase { fps: 30, sample_rate: 48000 },
             current_video_size: fframes::VideoSize { width: 320, height: 240 },
@@ -721,6 +792,44 @@ mod tests {
         let svg = render_pastor(&doc, 15);
         assert!(!svg.contains("<mask id=\"pastor-person\""), "{svg}");
         assert!(svg.contains("Manrope"), "{svg}");
+
+        // 4) PNG masker valid → region masker/clip mengikuti bbox alpha
+        // (mask 8×8, alpha di x2..5/y3..6 → video 320×240: sx=40, sy=30,
+        // margin 32 → x=48 y=58 w=184 h=154).
+        let (mw, mh) = (8u32, 8u32);
+        let mut data = vec![0u8; (mw * mh * 4) as usize];
+        for y in 3..6 {
+            for x in 2..5 {
+                let i = ((y * mw + x) * 4) as usize;
+                data[i] = 255;
+                data[i + 1] = 255;
+                data[i + 2] = 255;
+                data[i + 3] = 255;
+            }
+        }
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, mw, mh);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().expect("png header");
+            writer.write_image_data(&data).expect("png data");
+        }
+        crate::set_person_mask_png(&png_bytes);
+        let doc = doc_with_ranges(&[(0, 3000)]);
+        let svg = render_pastor(&doc, 15);
+        assert!(
+            svg.contains("x=\"48\" y=\"58\" width=\"184\" height=\"154\""),
+            "{svg}"
+        );
+        assert!(svg.contains("clip-path=\"url(#pastor-occl)\""), "{svg}");
+        // Fallback tetap ada: PNG rusak → region full-frame (320×240).
+        crate::set_person_mask_png(b"mask-bytes");
+        let svg = render_pastor(&doc, 15);
+        assert!(
+            svg.contains("x=\"0\" y=\"0\" width=\"320\" height=\"240\""),
+            "{svg}"
+        );
 
         crate::clear_person_mask();
         crate::clear_frame_image();

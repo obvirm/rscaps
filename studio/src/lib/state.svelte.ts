@@ -1,7 +1,7 @@
 import { loadBridge, type LoadedBridge } from "./wasm";
 import { splitSvgLayers } from "./svgLayers";
 import { transcribeBlob, type TranscribeStage } from "./transcribe";
-import { saveFileNative } from "./tauri";
+import { saveFileNative, invoke, type RenderProgress } from "./tauri";
 import { PersonMaskClient } from "./personMask";
 import { burnInExport, computeOutputSize, wrapFileSystemWritable, type ExportFormat, type ExportQuality, type ExportResolution } from "./export";
 import {
@@ -101,6 +101,13 @@ class StudioState {
   bootError = $state<string | null>(null);
   /** Engine WASM siap (bootWasm selesai) - gerbang mode preview=export. */
   wasmReady = $state(false);
+
+  /** Preview mode: "simple" = browser-native SVG (cepat, lancar), "export" = burnWorker+usvgr (akurat export). */
+  previewMode = $state<"simple" | "export">("simple");
+
+  /** Native export progress (untuk UI progress bar). */
+  nativeExportProgress = $state<RenderProgress | null>(null);
+
   /** Template catalog from caption-core (populated on wasm boot). */
   templates = $state<TemplateEntry[]>([]);
   /** Canonical default params (sentinels for template-wins resolution). */
@@ -179,6 +186,9 @@ class StudioState {
   sheets = $derived(this.doc?.sheets ?? []);
   /** Sheet aktif (null = sheet default dokumen). */
   activeSheet = $derived(this.sheets.find((s) => s.id === this.activeSheetId) ?? null);
+
+  /** Apakah berjalan di dalam Tauri webview. */
+  isTauri = $derived(typeof window !== "undefined" && "__TAURI_INTERNALS__" in window);
 
   // ── Helpers ─────────────────────────────────────────────────────────────
   setStatus(message: string, isError = false): void {
@@ -681,9 +691,31 @@ class StudioState {
     );
   }
 
-  /** Encode bitmap → JPEG → set_frame_image (panggil SEBELUM render frame). */
+  /** Encode bitmap → JPEG → set_frame_image (panggil SEBELUM render frame).
+   *
+   * Pastor (occlusion behind-actor): burnWorker ME-STRIP layer occlusion
+   * dari svg dan mengomposit frame×masker di canvas GPU — bytes JPEG tak
+   * pernah diraster web. Kirim dummy 1×1 (encode ≈ 0ms) supaya string
+   * SVG stabil antar frame → cache layer worker hidup → preview mulus.
+   * Selene: bytes asli (glass diraster usvgr + filter). */
+  private frameImageDummy: Uint8Array | null = null;
+
   async supplyFrameImage(bmp: ImageBitmap): Promise<boolean> {
     if (!this.wasm || !this.usesFrameImage) return false;
+    if (this.usesPersonMask) {
+      // Dummy konstan (JPEG 1×1 abu — persis pola probe fframes CLI).
+      if (!this.frameImageDummy) {
+        const c = new OffscreenCanvas(1, 1);
+        const cc = c.getContext("2d");
+        if (!cc) return false;
+        cc.fillStyle = "#101010";
+        cc.fillRect(0, 0, 1, 1);
+        const blob = await c.convertToBlob({ type: "image/jpeg", quality: 0.75 });
+        this.frameImageDummy = new Uint8Array(await blob.arrayBuffer());
+      }
+      this.wasm.setFrameImage(this.frameImageDummy);
+      return true;
+    }
     const canvas = new OffscreenCanvas(bmp.width, bmp.height);
     const ctx = canvas.getContext("2d");
     if (!ctx) return false;
@@ -1706,6 +1738,104 @@ class StudioState {
       fsFile?.abort?.(err)?.catch?.(() => {});
     } finally {
       this.exporting = false;
+    }
+  }
+
+  // ── Native export (CLI engines: cpu/skia/fframes + ffmpeg) ─────────────────
+  // Hanya tersedia di Tauri. Menggunakan pipeline CLI native (rscaps-cli crate).
+  async exportProjectNative(
+    projectId: string,
+    opts: {
+      engine: "cpu" | "skia" | "fframes";
+      hwEncode: boolean;
+      hwEncoder: string;
+      hwaccel?: string;
+      format: ExportFormat;
+      quality: ExportQuality;
+      resolution: ExportResolution;
+      crf: number;
+      preset: string;
+      ffmpegDir?: string;
+    },
+  ): Promise<void> {
+    if (this.exporting) return;
+    if (!this.isTauri) {
+      this.setStatus("Native export hanya tersedia di aplikasi desktop (Tauri)", true);
+      return;
+    }
+    this.exporting = true;
+    this.nativeExportProgress = { current: 0, total: 1, stage: "memulai" };
+
+    try {
+      const project = await getProject(projectId);
+      if (!project) throw new Error("project not found");
+
+      // Ambil video blob (in-memory jika project terbuka, atau dari IndexedDB)
+      const isCurrent = projectId === this.currentId;
+      let blob: Blob | null = isCurrent ? this.videoBlob : null;
+      if (!blob) blob = (await loadVideo(projectId)) ?? null;
+      if (!blob) {
+        throw new Error("source video missing for this project — re-import the video file to export");
+      }
+
+      // Simpan video ke file sementara (CLI butuh path file)
+      const tempDir = await invoke<string>("native_get_temp_dir");
+      const tempVideoPath = `${tempDir}/rscaps_export_${Date.now()}.mp4`;
+      const videoArrayBuffer = await blob.arrayBuffer();
+      await invoke("native_write_file", { path: tempVideoPath, data: Array.from(new Uint8Array(videoArrayBuffer)) });
+
+      // Simpan SRT ke file sementara
+      const docJson = isCurrent ? this.docText : JSON.stringify(project.doc);
+      const doc = JSON.parse(docJson);
+      const srtContent = this.wasm?.formatSubtitle(JSON.stringify(doc.cues), "srt") ?? "";
+      const tempSrtPath = `${tempDir}/rscaps_export_${Date.now()}.srt`;
+      await invoke("native_write_file", { path: tempSrtPath, data: srtContent });
+
+      // Output path via native save dialog
+      const ext = opts.format === "webm" ? "webm" : "mp4";
+      const outPath = await invoke<string>("save_export_pick", {
+        fileName: `${project.name || "export"}.${ext}`,
+        filterName: opts.format === "webm" ? "WebM video" : "MP4 video",
+        filterExt: [ext],
+      });
+      if (!outPath) {
+        this.setStatus("Export dibatalkan", true);
+        return;
+      }
+
+      // Params JSON jika ada
+      let paramsPath: string | null = null;
+      if (doc.params && Object.keys(doc.params).length > 0) {
+        paramsPath = `${tempDir}/rscaps_params_${Date.now()}.json`;
+        await invoke("native_write_file", { path: paramsPath, data: JSON.stringify(doc.params) });
+      }
+
+      // Jalankan native render
+      await invoke("native_render_video", {
+        opts: {
+          engine: opts.engine,
+          hw_encode: opts.hwEncode,
+          hw_encoder: opts.hwEncoder,
+          hwaccel: opts.hwaccel || null,
+          video_path: tempVideoPath,
+          srt_path: tempSrtPath,
+          template: doc.template || "cleo",
+          out_path: outPath,
+          params_json: paramsPath,
+          fonts_dir: null,
+          ffmpeg_dir: opts.ffmpegDir || null,
+          crf: opts.crf,
+          preset: opts.preset,
+        },
+      });
+
+      this.setStatus(`exported ${project.name || "export"}.${ext} (native ${opts.engine})`);
+    } catch (err) {
+      console.error(err);
+      this.setStatus(String(err), true);
+    } finally {
+      this.exporting = false;
+      this.nativeExportProgress = null;
     }
   }
 
