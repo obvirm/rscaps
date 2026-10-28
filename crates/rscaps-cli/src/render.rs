@@ -350,7 +350,7 @@ pub fn render_video(
                 fdb: font_source.database(),
             }
         };
-        let raster_cache: Arc<RasterCache> = Arc::new(RasterCache::new(128));
+        let raster_cache: Arc<RasterCache> = Arc::new(RasterCache::new(128)); // 128 ≈ 420MB (band 1920×427×4B) — 512 ≈ 1.7GB, boros commit RAM
         let frames_done = std::sync::atomic::AtomicU32::new(0);
 
         // ── Band crop: sample frame → union bbox alpha → pita vertikal ─────
@@ -562,7 +562,19 @@ fn compute_caption_band(
     height: u32,
 ) -> Option<(u32, u32)> {
     const SAMPLES: u32 = 24;
-    const MARGIN: u32 = 128;
+    // Margin bleed blur. DEFAULT 128px — invariant dokumentasi: margin ≥
+    // bleed 105px (3σ+dy blur cleo). Env `RSCAPS_BAND_MARGIN` untuk uji
+    // empiris banding (kecil = lebih cepat, tapi bisa klip bleed → artefak
+    // tepi bayangan). Env `RSCAPS_BAND_CROP=0` mematikan band crop (band
+    // penuh = ground truth untuk perbandingan kualitas).
+    let margin: u32 = std::env::var("RSCAPS_BAND_MARGIN")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(128);
+    let band_crop = std::env::var("RSCAPS_BAND_CROP")
+        .map(|v| v != "0")
+        .unwrap_or(true);
     let mut state = match raster {
         #[cfg(feature = "gpu-skia")]
         LaneRaster::Skia(r) => LaneState::Skia(r.make_renderer()),
@@ -598,11 +610,14 @@ fn compute_caption_band(
     if !found_any {
         return None;
     }
-    let y0 = y_min.saturating_sub(MARGIN);
-    let y1 = (y_max + MARGIN).min(height);
+    let y0 = y_min.saturating_sub(margin);
+    let y1 = (y_max + margin).min(height);
     let bh = y1 - y0;
     if bh >= height * 85 / 100 {
         return None; // caption menyebar — band tak berguna
+    }
+    if !band_crop {
+        return None;
     }
     Some((y0, bh))
 }

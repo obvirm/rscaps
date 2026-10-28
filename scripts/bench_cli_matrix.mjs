@@ -20,15 +20,17 @@ const step = (m) => console.log(`[step] ${m}`);
 
 // ── Konfigurasi matrix ──────────────────────────────────────────────────────
 // engine: cpu | skia | fframes ; encode: libx264 | nvenc ; decode: cpu | cuda
+// slices: per-engine override (cpu=3 ok, skia/fframes=1 avoid OOM)
+// preset: ultrafast untuk libx264 varian biar cepat
 const CONFIGS = [
-  { id: "fframes_x264",        engine: "fframes", hwEncode: false, hwaccel: null,    note: "fframes + libx264, decode CPU" },
-  { id: "fframes_nvenc_cuda",  engine: "fframes", hwEncode: true,  hwaccel: "cuda",  note: "fframes + nvenc + decode CUDA (full GPU)" },
-  { id: "skia_x264",           engine: "skia",    hwEncode: false, hwaccel: null,    note: "skia(Vulkan raster) + libx264" },
-  { id: "skia_nvenc",          engine: "skia",    hwEncode: true,  hwaccel: null,    note: "skia + nvenc" },
-  { id: "cpu_x264",            engine: "cpu",     hwEncode: false, hwaccel: null,    note: "cpu(usvgr raster) + libx264 — baseline" },
-  { id: "cpu_x264_cuda",       engine: "cpu",     hwEncode: false, hwaccel: "cuda",  note: "cpu + libx264 + decode CUDA" },
-  { id: "cpu_nvenc",           engine: "cpu",     hwEncode: true,  hwaccel: null,    note: "cpu + nvenc" },
-  { id: "cpu_nvenc_cuda",      engine: "cpu",     hwEncode: true,  hwaccel: "cuda",  note: "cpu + nvenc + decode CUDA" },
+  { id: "fframes_x264",        engine: "fframes", hwEncode: false, hwaccel: null,    slices: 1, preset: "ultrafast", crf: 23, note: "fframes + libx264, decode CPU" },
+  { id: "fframes_nvenc_cuda",  engine: "fframes", hwEncode: true,  hwaccel: "cuda",  slices: 1, preset: "p1",        crf: 23, note: "fframes + nvenc + decode CUDA (full GPU)" },
+  { id: "skia_x264",           engine: "skia",    hwEncode: false, hwaccel: null,    slices: 2, preset: "ultrafast", crf: 23, note: "skia(Vulkan raster) + libx264" },
+  { id: "skia_nvenc",          engine: "skia",    hwEncode: true,  hwaccel: null,    slices: 2, preset: "medium",    crf: 23, note: "skia + nvenc" },
+  { id: "cpu_x264",            engine: "cpu",     hwEncode: false, hwaccel: null,    slices: 3, preset: "ultrafast", crf: 25, note: "cpu(usvgr raster) + libx264 — baseline" },
+  { id: "cpu_x264_cuda",       engine: "cpu",     hwEncode: false, hwaccel: "cuda",  slices: 3, preset: "ultrafast", crf: 25, note: "cpu + libx264 + decode CUDA" },
+  { id: "cpu_nvenc",           engine: "cpu",     hwEncode: true,  hwaccel: null,    slices: 3, preset: "medium",    crf: 23, note: "cpu + nvenc" },
+  { id: "cpu_nvenc_cuda",      engine: "cpu",     hwEncode: true,  hwaccel: "cuda",  slices: 3, preset: "medium",    crf: 23, note: "cpu + nvenc + decode CUDA" },
 ];
 
 // ── Usage sampling (RAM/CPU/GPU proses render) ─────────────────────────────
@@ -84,12 +86,19 @@ async function runOne(cfg) {
   ];
   if (cfg.hwEncode) args.push("--hw-encode");
   if (cfg.hwaccel) args.push("--hwaccel", cfg.hwaccel);
+  if (cfg.preset) args.push("--preset", cfg.preset);
+  if (cfg.crf) args.push("--crf", String(cfg.crf));
 
   const env = {
     ...process.env,
     PATH: `${FFMPEG_BIN};${process.env.PATH}`,
-    RSCAPS_FFRAMES_CHUNK: "300", // 300 frame ≈ 2.5GB predecode — 600 frame bikin
-    // x264 malloc gagal saat RAM sistem tersisa ~10GB (run 19/10)
+    RSCAPS_FFRAMES_CHUNK: "150", // 150 frame ≈ 1.25GB predecode/chunk —
+    // in-flight = decode_jobs(2) + antrean(1) + render(1) ≈ 5GB; 300 frame
+    // → 12.5GB → "Cannot allocate memory" (libav -12) saat commit sistem
+    // tinggal ~8GB. 600 frame bikin x264 malloc gagal (run 19/10).
+    RSCAPS_FFRAMES_DECODE_JOBS: "2", // decode paralel 2 chunk (dinding decode)
+    RSCAPS_FFRAMES_RENDER_JOBS: "1", // raster fframes = GPU → 2 worker kontensi
+    RSCAPS_SLICES: String(cfg.slices),
   };
 
   step(`RUN ${cfg.id} — ${cfg.note}`);

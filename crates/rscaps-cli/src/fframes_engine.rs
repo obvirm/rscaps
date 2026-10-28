@@ -30,9 +30,12 @@ use crate::render::{probe_video, tool_bin};
 /// Ukuran potongan (chunk): hanya chunk ini yang di-pre-decode ke RAM.
 /// Video lebih panjang dirender per potongan (fframes `frame_range`) lalu
 /// digabung dengan ffmpeg concat — jadi tak ada cap total. Override lewat env
-/// `RSCAPS_FFRAMES_CHUNK` (untuk uji). 300 bukan 600: pipelining decode
-/// menahan 2 potongan di RAM (2 × 300 × 8.3MB ≈ 5GB).
-const CHUNK_FRAMES: usize = 300;
+/// `RSCAPS_FFRAMES_CHUNK` (untuk uji).
+///
+/// 150 (bukan 300/600): chunk = 150 frame 1080p ≈ 1.25GB RGBA. Chunk in-flight
+/// = decode_jobs + antrean render (≈4) → ≈5GB RAM. 300 frame → 12.5GB →
+/// "Cannot allocate memory" (libav -12) saat RAM sistem tinggal ~12GB.
+const CHUNK_FRAMES: usize = 150;
 
 fn chunk_frames() -> usize {
     std::env::var("RSCAPS_FFRAMES_CHUNK")
@@ -40,6 +43,84 @@ fn chunk_frames() -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(CHUNK_FRAMES)
+}
+
+/// Jumlah chunk yang di-decode PARALEL (thread terpisah). Decode fframes
+///dulunya 62% dinding: 1 chunk decode (ffmpeg → RGBA) lebih lambat dari
+/// 1 chunk render, jadi pipeline 1-ahead tak cukup — queue decode beberapa
+/// chunk concurrent memperpendek dinding decode. RAM ≈ jobs × chunk × 8.3MB
+/// (150 frame 1080p ≈ 1.25GB/chunk).
+///
+/// 2 (bukan 3): 3 chunk in-flight ≈ 3.7GB; commit sistem di mesin uji tinggal
+/// ~8GB → "Cannot allocate memory" (libav -12) saat alokasi besar.
+fn decode_jobs() -> usize {
+    std::env::var("RSCAPS_FFRAMES_DECODE_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(2)
+}
+
+/// Jumlah chunk yang di-RENDER paralel (worker raster+encode).
+///
+/// 1 (bukan 2): raster fframes = Skia Vulkan GPU — 2 worker berebut GPU yang
+/// SAMA → tiap worker melambat ~2-3× (chunk 150: 1.6s serial → 6.5s paralel).
+/// Throughput total tak naik, hanya tambah contention + RAM.
+fn render_jobs() -> usize {
+    std::env::var("RSCAPS_FFRAMES_RENDER_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1)
+}
+
+/// Antrean kerja terikat (bounded) + condvar — producer (decode) → consumer
+/// (render). `max_len` membatasi chunk tertahan → RAM terkendali.
+struct WorkQueue<T> {
+    inner: std::sync::Mutex<(std::collections::VecDeque<T>, bool, usize)>,
+    cv: std::sync::Condvar,
+    max_len: usize,
+}
+
+impl<T> WorkQueue<T> {
+    fn new(max_len: usize) -> Self {
+        Self {
+            inner: std::sync::Mutex::new((std::collections::VecDeque::new(), false, 0)),
+            cv: std::sync::Condvar::new(),
+            max_len: max_len.max(1),
+        }
+    }
+
+    fn push(&self, v: T) {
+        let mut g = self.inner.lock().unwrap();
+        while g.2 >= self.max_len {
+            g = self.cv.wait(g).unwrap();
+        }
+        g.0.push_back(v);
+        g.2 += 1;
+        self.cv.notify_all();
+    }
+
+    fn pop(&self) -> Option<T> {
+        let mut g = self.inner.lock().unwrap();
+        loop {
+            if let Some(v) = g.0.pop_front() {
+                g.2 -= 1;
+                self.cv.notify_all();
+                return Some(v);
+            }
+            if g.1 {
+                return None; // producer selesai & antrean kosong
+            }
+            g = self.cv.wait(g).unwrap();
+        }
+    }
+
+    fn close(&self) {
+        let mut g = self.inner.lock().unwrap();
+        g.1 = true;
+        self.cv.notify_all();
+    }
 }
 
 // ── decode frame video sumber → PreloadedImageData ─────────────────────────
@@ -578,6 +659,8 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     }
 
     let chunk = chunk_frames();
+    let jobs = decode_jobs();
+    let render_jobs = render_jobs();
 
     if duration_frames <= chunk {
         // Satu kali render — seluruh video di-pre-decode (bounded `chunk`).
@@ -616,10 +699,18 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
     }
 
     // Video panjang → potongan ≤ `chunk` frame, digabung dengan ffmpeg concat.
-    // Hanya 2 potongan aktif di RAM (yang dirender + yang di-decode) — decode
-    // potongan berikutnya berjalan di thread lain SELAGI potongan aktif
-    // dirender, jadi decoder tak masuk critical path.
-    eprintln!("[fframes] video {duration_frames} frame > {chunk} → render per potongan (pipelined)");
+    //
+    // Pipa 2 tahap: DECODE chunk (paralel, `decode_jobs`) → antrean terikat →
+    // RENDER chunk (paralel, `render_jobs`) → file segmen → concat berurutan.
+    //
+    // Dinding lama = render serial ~10ms/frame (blit video 2Mpx + raster
+    // caption + filter + encode) ≈ 3.1s per chunk 300 frame. Decode paralel
+    // saja tak cukup (render tetap serial) — chunk render paralel才是 yang
+    // memecah dinding. Batas antrean menjaga RAM: (decode_jobs +
+    // render_jobs + 1) × chunk × 8.3MB.
+    eprintln!(
+        "[fframes] video {duration_frames} frame > {chunk} → render per potongan (decode×{jobs}, render×{render_jobs})"
+    );
     let mut segments: Vec<PathBuf> = Vec::new();
     type Frames = Vec<std::sync::Arc<PreloadedImageData>>;
     let spawn_decode = |s: usize, c: usize| {
@@ -640,71 +731,128 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
             )
         })
     };
-    let mut next_start = 0usize;
-    let mut seg_idx = 0usize;
-    let mut pending: Option<(usize, usize, usize, std::thread::JoinHandle<anyhow::Result<Frames>>)> = None;
-    if next_start < duration_frames {
-        let end = (next_start + chunk).min(duration_frames);
-        let count = end - next_start;
-        pending = Some((next_start, end, count, spawn_decode(next_start, count)));
-        next_start = end;
-        seg_idx += 1;
+    type Job = (usize, usize, usize, std::thread::JoinHandle<anyhow::Result<Frames>>);
+    type Chunk = (usize, usize, usize, usize, Frames); // idx, start, end, count, frames
+    let queue = Arc::new(WorkQueue::<Chunk>::new(render_jobs.max(1)));
+    let n_chunks = (duration_frames + chunk - 1) / chunk;
+    // Segmen dikumpulkan per indeks chunk (render paralel → urutan file acak);
+    // concat HARUS urut → BTreeMap terurut.
+    let seg_by_idx: std::sync::Mutex<std::collections::BTreeMap<usize, PathBuf>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+    std::thread::scope(|scope| -> Result<()> {
+        // ── Worker render: ambil chunk dari antrean, raster+encode sendiri ──
+        let mut handles = Vec::new();
+        for _ in 0..render_jobs.max(1) {
+            let queue = Arc::clone(&queue);
+            let seg_by_idx = &seg_by_idx;
+            let video_encoder = &video_encoder;
+            let probe_images = &probe_images;
+            let fonts = &fonts;
+            let tmp_dir = &tmp_dir;
+            let duration_frames = duration_frames;
+            let src_w = src_w;
+            let src_h = src_h;
+            let glass = glass;
+            handles.push(scope.spawn(move || -> Result<()> {
+                while let Some((idx, start, end, count, frames)) = queue.pop() {
+                    let mut media_images = images_of(&frames);
+                    for (key, img) in probe_images {
+                        media_images.insert(key.clone(), Arc::clone(img));
+                    }
+                    let media = FframesMedia {
+                        images: media_images,
+                        fonts: fonts.clone(),
+                        // Potongan VIDEO-ONLY: audio di-mux SEKALI di akhir —
+                        // satu encode AAC = satu priming di awal file, tanpa
+                        // drift akumulatif ~23ms di tiap batas concat.
+                        audio: HashMap::new(),
+                    };
+                    let seg_path = tmp_dir.join(format!("seg_{start}.mp4"));
+                    let render_opts = RenderOptions {
+                        media: Some(&media),
+                        video_encoder_options: video_encoder.clone(),
+                        audio_encoder_options: EncoderOptions::default(),
+                        logger: fframes::FFramesLoggerVariant::Lines,
+                        load_system_fonts: std::env::var("RSCAPS_LOAD_SYSTEM_FONTS").as_deref() == Ok("1"),
+                        default_font: "Arial",
+                        frame_range: Some(start..end),
+                        ..Default::default()
+                    };
+                    let t_render = std::time::Instant::now();
+                    dispatch_render(
+                        src_w,
+                        src_h,
+                        frames,
+                        start,
+                        // Nama audio kosong → CompositeVideo::audio() = AudioMap::none().
+                        String::new(),
+                        duration_frames,
+                        &render_opts,
+                        &seg_path,
+                        glass,
+                    )?;
+                    eprintln!(
+                        "[fframes] profil potongan {idx} (frame {start}..{end}): render={render_ms}ms ({count} frame)",
+                        render_ms = t_render.elapsed().as_millis(),
+                    );
+                    seg_by_idx.lock().unwrap().insert(idx, seg_path);
+                }
+                Ok(())
+            }));
+        }
+
+        // ── Producer: decode chunk (paralel) → antrean render ────────────────
+        // WAJIB: antrean selalu ditutup, termasuk saat producer error —
+        // kalau tidak, worker render menggantung selamanya (deadlock).
+        let producer = (|| -> Result<()> {
+            let mut dq: std::collections::VecDeque<Job> = std::collections::VecDeque::new();
+            let mut next_start = 0usize;
+            while dq.len() < jobs && next_start < duration_frames {
+                let end = (next_start + chunk).min(duration_frames);
+                let count = end - next_start;
+                dq.push_back((next_start, end, count, spawn_decode(next_start, count)));
+                next_start = end;
+            }
+            let mut chunk_idx = 0usize;
+            while let Some((start, end, count, join)) = dq.pop_front() {
+                // Top-up decode SEBELUM join → decode chunk berikutnya jalan
+                // paralel selagi chunk aktif menunggu/di-render.
+                while dq.len() < jobs && next_start < duration_frames {
+                    let end2 = (next_start + chunk).min(duration_frames);
+                    let count2 = end2 - next_start;
+                    dq.push_back((next_start, end2, count2, spawn_decode(next_start, count2)));
+                    next_start = end2;
+                }
+                let frames = match join.join() {
+                    Ok(r) => r?,
+                    Err(_) => anyhow::bail!("thread decode panic"),
+                };
+                queue.push((chunk_idx, start, end, count, frames));
+                chunk_idx += 1;
+            }
+            Ok(())
+        })();
+        queue.close();
+
+        // Tunggu semua worker render selesai.
+        for h in handles {
+            match h.join() {
+                Ok(r) => r?,
+                Err(_) => anyhow::bail!("thread render panic"),
+            }
+        }
+        producer
+    })?;
+    // Segmen urut according indeks chunk (render paralel → urutan file acak).
+    {
+        let guard = seg_by_idx.lock().unwrap();
+        for (_idx, p) in guard.iter() {
+            segments.push(p.clone());
+        }
     }
-    while let Some((start, end, count, join)) = pending.take() {
-        eprintln!("[fframes] potongan {}: frame {start}..{end} ({count})", seg_idx);
-        let frames = match join.join() {
-            Ok(r) => r?,
-            Err(_) => anyhow::bail!("thread decode panic"),
-        };
-        // Spawn decode potongan berikutnya SEBELUM render (overlap).
-        if next_start < duration_frames {
-            let end2 = (next_start + chunk).min(duration_frames);
-            let count2 = end2 - next_start;
-            pending = Some((next_start, end2, count2, spawn_decode(next_start, count2)));
-            next_start = end2;
-            seg_idx += 1;
-        }
-        let mut media_images = images_of(&frames);
-        for (key, img) in &probe_images {
-            media_images.insert(key.clone(), Arc::clone(img));
-        }
-        let media = FframesMedia {
-            images: media_images,
-            fonts: fonts.clone(),
-            // Potongan VIDEO-ONLY: audio di-mux SEKALI di akhir — satu
-            // encode AAC = satu priming di awal file, tanpa drift
-            // akumulatif ~23ms di tiap batas concat.
-            audio: HashMap::new(),
-        };
-        let seg_path = tmp_dir.join(format!("seg_{start}.mp4"));
-        let render_opts = RenderOptions {
-            media: Some(&media),
-            video_encoder_options: video_encoder.clone(),
-            audio_encoder_options: EncoderOptions::default(),
-            logger: fframes::FFramesLoggerVariant::Lines,
-            load_system_fonts: std::env::var("RSCAPS_LOAD_SYSTEM_FONTS").as_deref() == Ok("1"),
-            default_font: "Arial",
-            frame_range: Some(start..end),
-            ..Default::default()
-        };
-        let t_render = std::time::Instant::now();
-        dispatch_render(
-            src_w,
-            src_h,
-            frames,
-            start,
-            // Nama audio kosong → CompositeVideo::audio() = AudioMap::none().
-            String::new(),
-            duration_frames,
-            &render_opts,
-            &seg_path,
-            glass,
-        )?;
-        eprintln!(
-            "[fframes] profil potongan: render={render_ms}ms ({count} frame)",
-            render_ms = t_render.elapsed().as_millis(),
-        );
-        segments.push(seg_path);
+    if segments.len() != n_chunks {
+        anyhow::bail!("segmen fframes tidak lengkap: {}/{}", segments.len(), n_chunks);
     }
     // Concat potongan video-only; bila sumber punya audio (dan decode
     // berhasil), mux audio SEKALI dari wav ekstraksi — video -c copy.
