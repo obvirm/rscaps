@@ -54,9 +54,9 @@ const single = join(outDir, "single.mp4");
 const chunked = join(outDir, "chunked.mp4");
 
 console.log("render single-pass (crf 0)...");
-run(["render", "--engine", "fframes", "--video", video, "--srt", srt, "--template", template, "--out", single, "--crf", "0"]);
+run(["render", "--engine", "fframes-pipeline", "--video", video, "--srt", srt, "--template", template, "--out", single, "--crf", "0"]);
 console.log(`render chunked (RSCAPS_FFRAMES_CHUNK=${chunk}, crf 0)...`);
-run(["render", "--engine", "fframes", "--video", video, "--srt", srt, "--template", template, "--out", chunked, "--crf", "0"], {
+run(["render", "--engine", "fframes-pipeline", "--video", video, "--srt", srt, "--template", template, "--out", chunked, "--crf", "0"], {
   RSCAPS_FFRAMES_CHUNK: String(chunk),
 });
 

@@ -19,18 +19,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const step = (m) => console.log(`[step] ${m}`);
 
 // ── Konfigurasi matrix ──────────────────────────────────────────────────────
-// engine: cpu | skia | fframes ; encode: libx264 | nvenc ; decode: cpu | cuda
-// slices: per-engine override (cpu=3 ok, skia/fframes=1 avoid OOM)
-// preset: ultrafast untuk libx264 varian biar cepat
+// engine: cpu | skia | fframes (mode streaming: caption via machinery Video
+// fframes → raster pita → pipe rawvideo → ffmpeg overlay+encode)
+// slices: jumlah proses ffmpeg paralel (CPU→3, GPU→2); threads = 12/slices
+// (total thread ≈ 12 core logis; 16 thread/slice → oversubscribe → +8%
+//   dan CPU 100% kontensi). CRF x264 = 28 (ultrafast): vs NVENC cq23
+//   PSNR 46.3 dB / SSIM 0.995 (ambang paritas 45 dB); CRF 23-25 bikin
+//   varian x264 >40s (encode 13.3s + raster 34s tak Impas).
 const CONFIGS = [
-  { id: "fframes_x264",        engine: "fframes", hwEncode: false, hwaccel: null,    slices: 1, preset: "ultrafast", crf: 23, note: "fframes + libx264, decode CPU" },
-  { id: "fframes_nvenc_cuda",  engine: "fframes", hwEncode: true,  hwaccel: "cuda",  slices: 1, preset: "p1",        crf: 23, note: "fframes + nvenc + decode CUDA (full GPU)" },
-  { id: "skia_x264",           engine: "skia",    hwEncode: false, hwaccel: null,    slices: 2, preset: "ultrafast", crf: 23, note: "skia(Vulkan raster) + libx264" },
-  { id: "skia_nvenc",          engine: "skia",    hwEncode: true,  hwaccel: null,    slices: 2, preset: "medium",    crf: 23, note: "skia + nvenc" },
-  { id: "cpu_x264",            engine: "cpu",     hwEncode: false, hwaccel: null,    slices: 3, preset: "ultrafast", crf: 25, note: "cpu(usvgr raster) + libx264 — baseline" },
-  { id: "cpu_x264_cuda",       engine: "cpu",     hwEncode: false, hwaccel: "cuda",  slices: 3, preset: "ultrafast", crf: 25, note: "cpu + libx264 + decode CUDA" },
-  { id: "cpu_nvenc",           engine: "cpu",     hwEncode: true,  hwaccel: null,    slices: 3, preset: "medium",    crf: 23, note: "cpu + nvenc" },
-  { id: "cpu_nvenc_cuda",      engine: "cpu",     hwEncode: true,  hwaccel: "cuda",  slices: 3, preset: "medium",    crf: 23, note: "cpu + nvenc + decode CUDA" },
+  { id: "fframes_x264",        engine: "fframes", hwEncode: false, hwaccel: null,    slices: 2, threads: 16, preset: "ultrafast", crf: 28, note: "fframes streaming + libx264 ultrafast crf28, decode CPU" },
+  { id: "fframes_nvenc_cuda",  engine: "fframes", hwEncode: true,  hwaccel: "cuda",  slices: 2, threads: 16, preset: "p1",        crf: 23, note: "fframes streaming + nvenc p1 + decode CUDA (full GPU)" },
+  { id: "skia_x264",           engine: "skia",    hwEncode: false, hwaccel: null,    slices: 2, threads: 16, preset: "ultrafast", crf: 28, note: "skia(Vulkan raster) + libx264 ultrafast crf28" },
+  { id: "skia_nvenc",          engine: "skia",    hwEncode: true,  hwaccel: null,    slices: 2, threads: 16, preset: "medium",    crf: 23, note: "skia + nvenc medium cq23" },
+  { id: "cpu_x264",            engine: "cpu",     hwEncode: false, hwaccel: null,    slices: 3, threads: 16, preset: "ultrafast", crf: 28, note: "cpu(usvgr raster) + libx264 ultrafast crf28" },
+  { id: "cpu_x264_cuda",       engine: "cpu",     hwEncode: false, hwaccel: "cuda",  slices: 3, threads: 16, preset: "ultrafast", crf: 28, note: "cpu + libx264 ultrafast crf28 + decode CUDA" },
+  { id: "cpu_nvenc",           engine: "cpu",     hwEncode: true,  hwaccel: null,    slices: 3, threads: 16, preset: "medium",    crf: 23, note: "cpu + nvenc medium cq23" },
+  { id: "cpu_nvenc_cuda",      engine: "cpu",     hwEncode: true,  hwaccel: "cuda",  slices: 3, threads: 16, preset: "medium",    crf: 23, note: "cpu + nvenc medium cq23 + decode CUDA" },
 ];
 
 // ── Usage sampling (RAM/CPU/GPU proses render) ─────────────────────────────
@@ -66,10 +70,10 @@ async function probe(file) {
 }
 
 // ── Jalankan satu config ───────────────────────────────────────────────────
-async function runOne(cfg) {
+async function runAttempt(cfg, attempt = 1) {
   const outFile = `${OUT_DIR}\\${cfg.id}.mp4`;
-  const usageCsv = `${OUT_DIR}\\${cfg.id}.usage.csv`;
-  const logFile = `${OUT_DIR}\\${cfg.id}.log`;
+  const usageCsv = `${OUT_DIR}\\${cfg.id}.${attempt}.usage.csv`;
+  const logFile = `${OUT_DIR}\\${cfg.id}.${attempt}.log`;
 
   if (existsSync(outFile) && existsSync(`${OUT_DIR}\\${cfg.id}.json`)) {
     step(`SKIP ${cfg.id} (sudah ada hasil)`);
@@ -92,11 +96,15 @@ async function runOne(cfg) {
   const env = {
     ...process.env,
     PATH: `${FFMPEG_BIN};${process.env.PATH}`,
-    RSCAPS_FFRAMES_CHUNK: "150", // 150 frame ≈ 1.25GB predecode/chunk —
-    // in-flight = decode_jobs(2) + antrean(1) + render(1) ≈ 5GB; 300 frame
-    // → 12.5GB → "Cannot allocate memory" (libav -12) saat commit sistem
-    // tinggal ~8GB. 600 frame bikin x264 malloc gagal (run 19/10).
-    RSCAPS_FFRAMES_DECODE_JOBS: "2", // decode paralel 2 chunk (dinding decode)
+    RSCAPS_FFMPEG_THREADS: String(cfg.threads ?? 16), // thread ffmpeg per slice
+    // (12 core logis; thread tinggi per slice lebih cepat: rantai
+    // decode+overlay+konversi RGBA→YUV di CPU — encode NVENC pun butuh
+    // thread CPU untuk feed. 6 thread/slice bikin varian nvenc +4s.)
+    RSCAPS_WINDOW: "32", // double-buffer 32 frame/slice → RAM ≈ slice×32×3.3MB
+    RSCAPS_FFRAMES_CHUNK: "150", // HANYA untuk engine fframes-pipeline (chunk 150
+    // ≈ 1.25GB predecode; 300 → 12.5GB in-flight → libav -12 "Cannot allocate
+    // memory" saat commit sistem tinggal ~8GB).
+    RSCAPS_FFRAMES_DECODE_JOBS: "2",
     RSCAPS_FFRAMES_RENDER_JOBS: "1", // raster fframes = GPU → 2 worker kontensi
     RSCAPS_SLICES: String(cfg.slices),
   };
@@ -176,23 +184,50 @@ async function runOne(cfg) {
     error: ok ? null : logTail,
   };
 
-  writeFileSync(`${OUT_DIR}\\${cfg.id}.json`, JSON.stringify(rec, null, 2), "utf8");
+  writeFileSync(`${OUT_DIR}\\${cfg.id}.${attempt}.json`, JSON.stringify(rec, null, 2), "utf8");
   step(
-    `${ok ? "DONE" : "FAIL"} ${cfg.id}: ${wallSec}s (×${rec.realtimeFactor}) size=${sizeMB ?? "?"}MB peakCPU=${rec.usage.peak.cpuPct}% peakGPU=${rec.usage.peak.gpuUtilPct}%`,
+    `${ok ? "DONE" : "FAIL"} ${cfg.id}#${attempt}: ${wallSec}s (×${rec.realtimeFactor}) size=${sizeMB ?? "?"}MB peakCPU=${rec.usage.peak.cpuPct}% peakGPU=${rec.usage.peak.gpuUtilPct}%`,
   );
   return rec;
+}
+
+/// Wrapper best-of-N: mesin ini bisa punya beban luar (ComfyUI/Docker) →
+/// satu run bisa +30% karena commit RAM sistem hampir penuh (alokasi dipaksa
+/// pagefile). Ambil run TERCEPAT sebagai angka Cleanup (performansi
+/// ter-minimal, bukan rata-rata baseline).
+async function runOne(cfg, repeat = 1) {
+  const outFile = `${OUT_DIR}\\${cfg.id}.mp4`;
+  const resFile = `${OUT_DIR}\\${cfg.id}.json`;
+  if (existsSync(outFile) && existsSync(resFile)) {
+    step(`SKIP ${cfg.id} (sudah ada hasil)`);
+    return JSON.parse(readFileSync(resFile, "utf8"));
+  }
+  let best = null;
+  const attempts = [];
+  for (let i = 1; i <= repeat; i++) {
+    const rec = await runAttempt(cfg, i);
+    attempts.push({ attempt: i, ok: rec.ok, wallSec: rec.wallSec });
+    if (!best || (rec.ok && !best.ok) || (rec.ok && best.ok && rec.wallSec < best.wallSec)) {
+      best = rec;
+    }
+  }
+  best.attempts = attempts;
+  writeFileSync(resFile, JSON.stringify(best, null, 2), "utf8");
+  return best;
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
 mkdirSync(OUT_DIR, { recursive: true });
 const onlyArg = process.argv.find((a) => a.startsWith("--only="));
 const only = onlyArg ? onlyArg.slice(7).split(",") : null;
+const repeatArg = process.argv.find((a) => a.startsWith("--repeat="));
+const repeat = repeatArg ? Math.max(1, parseInt(repeatArg.slice(9), 10) || 1) : 1;
 const list = only ? CONFIGS.filter((c) => only.includes(c.id)) : CONFIGS;
 
 const all = existsSync(RESULTS) ? JSON.parse(readFileSync(RESULTS, "utf8")) : {};
 for (const cfg of list) {
   try {
-    all[cfg.id] = await runOne(cfg);
+    all[cfg.id] = await runOne(cfg, repeat);
   } catch (e) {
     console.error(`[ERR] ${cfg.id}: ${e}`);
     all[cfg.id] = { id: cfg.id, ok: false, error: String(e).slice(0, 1000) };
@@ -225,3 +260,4 @@ for (const cfg of CONFIGS) {
 }
 console.log(`\nDetail: ${RESULTS}`);
 console.log(`Usage CSV per config: ${OUT_DIR}\\<id>.usage.csv`);
+

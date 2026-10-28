@@ -101,7 +101,7 @@ try {
     mkdirSync(dumpDir, { recursive: true });
     const r = spawnSync(
       bin,
-      ["render", "--engine", "fframes", "--video", VIDEO, "--srt", SRT, "--template", id,
+      ["render", "--engine", "fframes-pipeline", "--video", VIDEO, "--srt", SRT, "--template", id,
        "--out", mp4, "--crf", "0"],
       { env: { ...env, RSCAPS_DUMP_SVG_DIR: dumpDir }, encoding: "utf8", timeout: 300000 },
     );

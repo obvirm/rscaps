@@ -129,13 +129,13 @@ async fn native_render_video(
     opts: NativeRenderOpts,
 ) -> Result<(), String> {
     // Validasi engine
-    let valid_engines = ["cpu", "skia", "fframes"];
+    let valid_engines = ["cpu", "skia", "fframes", "fframes-pipeline"];
     if !valid_engines.contains(&opts.engine.as_str()) {
-        return Err(format!("engine tidak valid: {} (pilih: cpu, skia, fframes)", opts.engine));
+        return Err(format!("engine tidak valid: {} (pilih: cpu, skia, fframes, fframes-pipeline)", opts.engine));
     }
     // skia butuh feature gpu-skia
     #[cfg(not(feature = "gpu-skia"))]
-    if opts.engine == "skia" {
+    if opts.engine == "skia" || opts.engine == "fframes" {
         return Err("engine skia butuh build dengan --features gpu-skia".to_string());
     }
 

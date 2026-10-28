@@ -131,7 +131,8 @@ cargo run -p rscaps-cli -- render --video in.mp4 --srt subs.srt \
 Engines and encode options:
 
 - `--engine skia` — **fastest headless path**: 12 GPU raster lanes, per-SVG raster cache, double-buffered pipe, and 3 parallel ffmpeg processes over a band-cropped caption transport, joined with `concat -c copy`. Pair with `--hw-encode` for hardware encode.
-- `--engine fframes` — full fframes pipeline (raster + encode + audio mux in Rust). Long videos are rendered in pipelined chunks - chunk N+1 decodes on another thread while chunk N renders - then joined with `ffmpeg concat`, so there is no length cap. Canvas follows the real video size (portrait works).
+- `--engine fframes` — **streaming mode (default)**: caption rendered through the fframes `Video` machinery, rastered as a cropped caption band, streamed frame-by-frame over a rawvideo pipe into ffmpeg (overlay + encode). Only the current frame is held in RAM — 4-minute 1080p burn in ~30-34s at ~1.5-2.4GB RSS.
+- `--engine fframes-pipeline` — full fframes pipeline (composite raster + encode + audio mux in Rust). Long videos are rendered in pipelined chunks - chunk N+1 decodes on another thread while chunk N renders - then joined with `ffmpeg concat`, so there is no length cap. Canvas follows the real video size (portrait works). Heavier than streaming mode; kept for composite-SVG dumps and single-process encode.
 - `--engine cpu` - same slice architecture as `skia` with CPU (usvgr) raster lanes - the no-GPU fallback, ~29s for a 4-minute 1080p burn.
 - `--hw-encode` + `--hw-encoder h264_nvenc|h264_qsv|h264_vaapi|h264_videotoolbox|h264_amf` — GPU encode (falls back to `libx264` when the encoder is unavailable).
 - `--hwaccel <auto|cuda|d3d11va|vaapi|qsv>` — decode with an FFmpeg hardware accel.
@@ -160,7 +161,8 @@ Rendering is verified end-to-end with scripts, not by eye:
 - `node scripts/shot_editor.mjs out.png "--tabs=style,layout"` — screenshot the editor over a test project.
 - `node scripts/verify_params.mjs`, `verify_portrait.mjs`, `verify_position.mjs` — control wiring.
 - `node scripts/crosscheck.mjs` — multi-language RTL/bidi battery against tscaps (`scripts/battery.srt`).
-- `node scripts/verify_chunk.mjs` — chunked vs single-pass `--engine fframes` parity (per-frame `framemd5`).
+- `node scripts/verify_chunk.mjs` — chunked vs single-pass `--engine fframes-pipeline` parity (per-frame `framemd5`).
+- `node scripts/bench_cli_matrix.mjs --repeat=2` — 4-minute 1080p benchmark across the 8 CLI engine/encode/decode variants (best-of-N; reports wall time, RAM, GPU).
 
 ## Status
 

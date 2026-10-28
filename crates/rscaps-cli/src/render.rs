@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::doc;
 use crate::fonts::CliFontSource;
 use caption_core::CaptionDocument;
-use fframes::{FFramesContext, FFramesMode, TimeBase, VideoSize};
+use fframes::{FFramesContext, FFramesMode, TimeBase, Video, VideoSize};
 
 #[derive(Debug, Clone)]
 pub struct VideoProbe {
@@ -181,9 +181,17 @@ pub fn render_video(
     opts: &RenderVideoOpts<'_>,
     mut on_progress: impl FnMut(u32, u32),
 ) -> Result<()> {
-    // Engine "fframes": pipeline penuh fframes::render (CompositeVideo +
-    // frame video sumber + audio + encode). Berbeda jalur dari PNG-pipe.
-    if opts.engine == "fframes" {
+    // Engine "fframes-pipeline": pipeline penuh fframes::render (CompositeVideo
+    // + frame video sumber + audio + encode) — raster komposit full-frame di
+    // Rust. Lantai ~10ms/frame (image blit 2Mpx + konversi YUV + encoder
+    // internal) → ~75-85s untuk 4-menit 1080p30. Pipeline penuh tetap ada
+    // untuk harness paritas (dump SVG komposit) & kebutuhan encode 1-proses.
+    //
+    // Engine "fframes" (default) = mode STREAMING: caption via machinery Video
+    // fframes (CaptionVideo) → raster PITA (band) → pipe rawvideo → ffmpeg
+    // overlay+encode. Streaming per frame (tak ada buffer video di RAM),
+    // RAM ~0.7GB, VRAM 1 konteks Vulkan, ~32-38s untuk 4-menit 1080p30.
+    if opts.engine == "fframes-pipeline" {
         on_progress(0, 1);
         crate::fframes_engine::render_fframes(&crate::fframes_engine::FframesRenderOpts {
             video: opts.video,
@@ -235,7 +243,10 @@ pub fn render_video(
 
     let ctx = FFramesContext {
         time_base: TimeBase {
-            fps: frame_count as usize,
+            // FPS canvas caption = 30 (CaptionVideo::FPS). Nilai lama
+            // frame_count (7200) tidak dipakai template, tapi Salah untuk
+            // jalur Video fframes (seconds()/time_base).
+            fps: caption_core::CaptionVideo::FPS,
             sample_rate: 48000,
         },
         current_video_size: VideoSize {
@@ -260,8 +271,11 @@ pub fn render_video(
     // Engine skia: backend Vulkan/CPU + font-DB fframes dibuat SEKALI di sini
     // (bukan per frame) - lihat SkiaRasterizer. Hanya saat feature gpu-skia;
     // di luar feature, engine skia bail di pemilihan lane raster.
+    // Engine fframes (streaming) pakai rasterizer yang sama: caption di-pita
+    // saja, lalu ffmpeg yang composite video → jauh lebih murah daripada
+    // raster komposit full-frame di Rust.
     #[cfg(feature = "gpu-skia")]
-    let skia_raster = if opts.engine == "skia" {
+    let skia_raster = if opts.engine == "skia" || opts.engine == "fframes" {
         Some(SkiaRasterizer::new(
             probe.width,
             probe.height,
@@ -321,7 +335,7 @@ pub fn render_video(
     // NVENC session ×K + decode ×K. Raster (12 lane, backend sesuai engine)
     // dan cache per-SVG dibagi rata ke tiap slice; double-buffer tetap jalan
     // per slice (raster window N+1 selagi window N ditulis).
-    if opts.engine == "skia" || opts.engine == "cpu" {
+    if opts.engine == "skia" || opts.engine == "cpu" || opts.engine == "fframes" {
         let slices = std::env::var("RSCAPS_SLICES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -331,8 +345,19 @@ pub fn render_video(
             .map(|n| n.get())
             .unwrap_or(12) / slices)
             .max(1);
-        const WINDOW: u32 = 128; // RAM: SLICES×WINDOW×8.3MB ≈ 3.2GB
-        let lane_raster = if opts.engine == "skia" {
+        // Depth double-buffer (frameAhead). RAM ≈ SLICES × WINDOW × 3.3MB
+        // (pita 1920×427×4B). Default 32 → ~320MB @3 slice; env buat uji.
+        const WINDOW: u32 = 32;
+        let window: u32 = std::env::var("RSCAPS_WINDOW")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(WINDOW);
+        let lane_raster = if opts.engine == "cpu" {
+            LaneRaster::Cpu {
+                fdb: font_source.database(),
+            }
+        } else {
             #[cfg(feature = "gpu-skia")]
             {
                 LaneRaster::Skia(
@@ -343,12 +368,18 @@ pub fn render_video(
             }
             #[cfg(not(feature = "gpu-skia"))]
             {
-                bail!("engine skia butuh build ulang: cargo build -p rscaps-cli --features gpu-skia")
+                bail!(
+                    "engine {} butuh build ulang: cargo build -p rscaps-cli --features gpu-skia",
+                    opts.engine
+                )
             }
-        } else {
-            LaneRaster::Cpu {
-                fdb: font_source.database(),
-            }
+        };
+        // Sumber SVG caption: template langsung (cpu/skia) vs machinery Video
+        // fframes (CaptionVideo + Frame + ctx) untuk engine fframes streaming.
+        // Dua-duanya satu sumber logika (caption-core).
+        let svg_source = match opts.engine {
+            "fframes" => SvgSource::Fframes,
+            _ => SvgSource::Template,
         };
         let raster_cache: Arc<RasterCache> = Arc::new(RasterCache::new(128)); // 128 ≈ 420MB (band 1920×427×4B) — 512 ≈ 1.7GB, boros commit RAM
         let frames_done = std::sync::atomic::AtomicU32::new(0);
@@ -422,12 +453,13 @@ pub fn render_video(
                         zeros,
                         range: s0..s1,
                         lanes: lanes_per_slice,
-                        window: WINDOW,
+                        window,
                         fps_f64,
                         out: seg_path,
                         progress_ref,
                         band_y,
                         band_h,
+                        svg_source,
                     })?;
                     Ok(p_out_path)
                 });
@@ -636,6 +668,18 @@ fn wrap_svg_band(svg: &str, width: u32, y0: u32, bh: u32) -> Option<String> {
     ))
 }
 
+/// Sumber SVG caption per frame.
+///
+/// - `Template`: `caption_core::templates::render` langsung (engine cpu/skia).
+/// - `Fframes`: machinery `Video` fframes — `CaptionVideo::render_frame`
+///   dengan `fframes::Frame` + `FFramesContext` (engine fframes streaming).
+///   Logika caption tetap caption-core (satu sumber).
+#[derive(Clone, Copy, Debug)]
+enum SvgSource {
+    Template,
+    Fframes,
+}
+
 struct SliceParams<'a> {
     ffmpeg: &'a Path,
     head: &'a [String],
@@ -657,6 +701,8 @@ struct SliceParams<'a> {
     /// Band crop: baris atas + tinggi pita (band_h == tinggi frame = full).
     band_y: u32,
     band_h: u32,
+    /// Sumber SVG caption per frame (template langsung vs machinery Video fframes).
+    svg_source: SvgSource,
 }
 
 fn run_skia_slice(p: SliceParams<'_>) -> Result<()> {
@@ -761,16 +807,31 @@ fn run_skia_slice(p: SliceParams<'_>) -> Result<()> {
                         while f < w_end {
                             let now_ms = (f as f64) * 1000.0 / p.fps_f64;
                             let t_build = std::time::Instant::now();
-                            let svg = caption_core::templates::render(
-                                &doc_lane.template,
-                                doc_lane,
-                                now_ms as f32,
-                                ctx_lane,
-                            )
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("template tak dikenal: {}", doc_lane.template)
-                            })?;
-                            let raw = svg.to_string();
+                            let raw = match p.svg_source {
+                                SvgSource::Template => caption_core::templates::render(
+                                    &doc_lane.template,
+                                    doc_lane,
+                                    now_ms as f32,
+                                    ctx_lane,
+                                )
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("template tak dikenal: {}", doc_lane.template)
+                                })?
+                                .to_string(),
+                                // Machinery Video fframes: CaptionVideo (caption-core)
+                                // merender SVG dari index frame — timing identik dengan
+                                // jalur template (30fps).
+                                SvgSource::Fframes => {
+                                    let frame = fframes::Frame::new(
+                                        f as usize,
+                                        f as usize,
+                                        caption_core::CaptionVideo::FPS,
+                                    );
+                                    caption_core::CaptionVideo
+                                        .render_frame(frame, ctx_lane)
+                                        .value
+                                }
+                            };
                             let s = if raw.is_empty() {
                                 String::new()
                             } else if p.band_h == p.probe.height {
@@ -1023,7 +1084,15 @@ impl SkiaRendererOwned<'_> {
     /// Render satu frame → RGBA premultiplied mentah (pipe rawvideo).
     pub fn render_frame_rgba(&mut self, svg: &str, width: u32, height: u32) -> Result<Vec<u8>> {
         use fframes::FrameRenderer;
-        let opt = fframes::usvgr::Options::default();
+        // Gambar statis (kaca selene, mask iris/pastor) arrive sebagai data: URL
+        // — usvgr tak bisa decode sendiri; registry global (decode-once) lalu
+        // Options.image_data (kunci = href persis).
+        crate::images::ensure_svg_images(svg);
+        let images = crate::images::snapshot();
+        let opt = fframes::usvgr::Options {
+            image_data: Some(&images),
+            ..Default::default()
+        };
         let tree = fframes::usvgr::Tree::from_str(svg, &opt, self.fontdb)
             .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
         let clear = fframes::Color {
@@ -1037,22 +1106,14 @@ impl SkiaRendererOwned<'_> {
             SkiaRendererInner::Cpu(r) => r.render_tree(&tree, clear, width, height),
         }
         .map_err(|err| anyhow::anyhow!("render skia: {err}"))?;
-        // RgbaFrame = straight RGBA; pipe rawvideo memakai premultiplied agar
-        // setara byte-dengan-jalur PNG lama (tiny-skia Pixmap premultiplied).
-        // Konversi bulk ke buffer pre-alokasi — dulu per-piksel
-        // extend_from_slice (2 juta iterasi @1080p ≈ 15-25ms/frame).
+        // Readback Skia = ImageInfo(..., AlphaType::Premul) → piksel SUDAH
+        // premultiplied (sama dgn pixmap tiny-skia jalur CPU). Loop
+        // premultiply per-piksel lama (820K it/frame @pita 1920×427) cuma
+        // boros CPU ~4-8ms/frame DAN membuat tepi AA jadi terlalu gelap
+        // (double-premultiply). Tulis apa adanya.
         let n = width as usize * height as usize * 4;
-        let mut bytes = vec![0u8; n];
         debug_assert_eq!(frame.pixels.len(), n);
-        for (dst, src) in bytes.chunks_exact_mut(4).zip(frame.pixels.chunks_exact(4)) {
-            let px = svgr::tiny_skia::ColorU8::from_rgba(src[0], src[1], src[2], src[3])
-                .premultiply();
-            dst[0] = px.red();
-            dst[1] = px.green();
-            dst[2] = px.blue();
-            dst[3] = px.alpha();
-        }
-        Ok(bytes)
+        Ok(frame.pixels)
     }
 
     /// Render satu frame → bytes PNG (dipakai perintah `frames`).

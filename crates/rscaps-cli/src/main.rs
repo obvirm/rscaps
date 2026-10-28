@@ -426,7 +426,7 @@ fn render_png(
     engine: &str,
 ) -> Result<svgr::tiny_skia::Pixmap> {
     match engine {
-        "fframes" => anyhow::bail!("engine fframes hanya untuk `render` (burn-in), bukan `frames` - pakai --engine cpu atau skia"),
+        "fframes" | "fframes-pipeline" => anyhow::bail!("engine {engine} hanya untuk `render` (burn-in), bukan `frames` - pakai --engine cpu atau skia"),
         _ => {}
     }
     let opt = svgr::usvgr::Options {
