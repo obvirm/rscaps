@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from "../lib/state.svelte";
+  import { Zap, Layers } from "@lucide/svelte";
 
   let frameInput = $state("0");
 
@@ -34,8 +35,18 @@
     <label class="frame-field">frame
       <input type="number" min="0" bind:value={frameInput} onchange={onFrameChange} />
     </label>
-    <button class="btn" onclick={() => store.renderAt(Number(frameInput) || 0)}>Render</button>
-    <button class="btn" onclick={() => store.renderRaster().catch((e) => store.setStatus(String(e), true))}>Raster</button>
+    <button
+      class="btn mode-btn"
+      onclick={() => store.previewMode = store.previewMode === "simple" ? "export" : "simple"}
+      title="Preview mode: {store.previewMode} (click to toggle)"
+      aria-label="Preview mode: {store.previewMode}. Click to toggle."
+    >
+      {#if store.previewMode === "simple"}
+        <Zap size={14} />
+      {:else}
+        <Layers size={14} />
+      {/if}
+    </button>
   </div>
 </div>
 
@@ -138,5 +149,11 @@
   .btn:hover {
     background: rgb(var(--bg-3));
     border-color: rgb(var(--accent));
+  }
+  .mode-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 8px;
   }
 </style>

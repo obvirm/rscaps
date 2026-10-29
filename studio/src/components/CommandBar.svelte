@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ArrowLeft, Undo2, Redo2, Sun, Moon, Monitor, Layers, Zap } from "@lucide/svelte";
+  import { ArrowLeft, Undo2, Redo2, Sun, Moon, Monitor } from "@lucide/svelte";
   import { store } from "../lib/state.svelte";
   import { cycleTheme, getMode, type Theme } from "../lib/theme";
   import ExportDialog from "./ExportDialog.svelte";
@@ -165,21 +165,6 @@
       aria-label="Theme: {themeMode}. Click to change."
     >
       <ThemeIcon size={16} />
-    </button>
-  </div>
-
-  <div class="desktop-only cluster">
-    <button
-      class="icon-btn"
-      onclick={() => store.previewMode = store.previewMode === "simple" ? "export" : "simple"}
-      title="Preview mode: {store.previewMode} (click to toggle)"
-      aria-label="Preview mode: {store.previewMode}. Click to toggle."
-    >
-      {#if store.previewMode === "simple"}
-        <Zap size={16} />
-      {:else}
-        <Layers size={16} />
-      {/if}
     </button>
   </div>
 

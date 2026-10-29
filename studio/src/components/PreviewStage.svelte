@@ -162,10 +162,11 @@
   }
   .video-box {
     position: relative;
-    width: 100%;
+    width: min(100%, calc((100cqh - var(--controls-h, 210px)) * var(--ratio, 1.7778)));
+    height: auto;
     aspect-ratio: var(--aspect, 16 / 9);
     max-height: calc(100cqh - var(--controls-h, 210px));
-    max-width: calc((100cqh - var(--controls-h, 210px)) * var(--ratio, 1.7778));
+    max-width: 100%;
     background: rgb(var(--bg-0));
     border: 1px solid rgb(var(--border));
     border-radius: var(--r-lg);
