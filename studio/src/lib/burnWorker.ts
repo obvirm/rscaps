@@ -54,6 +54,28 @@ const ensureCanvas = (w: number, h: number) => {
   return gCtx;
 };
 
+function drawCover(
+  ctx: OffscreenCanvasRenderingContext2D,
+  bitmap: ImageBitmap,
+  width: number,
+  height: number,
+): void {
+  const sourceAspect = bitmap.width / bitmap.height;
+  const targetAspect = width / height;
+  let sx = 0;
+  let sy = 0;
+  let sw = bitmap.width;
+  let sh = bitmap.height;
+  if (sourceAspect > targetAspect) {
+    sw = bitmap.height * targetAspect;
+    sx = (bitmap.width - sw) / 2;
+  } else {
+    sh = bitmap.width / targetAspect;
+    sy = (bitmap.height - sh) / 2;
+  }
+  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, width, height);
+}
+
 // Cache layer caption per SVG unik (cue statis = svg identik tiap frame).
 // Key = string svg, value = ImageBitmap hasil unpremultiply.
 // Cache layer caption per SVG unik. 48 = cukup untuk tail statis antar cue
@@ -412,11 +434,12 @@ self.onmessage = async (e: MessageEvent<BurnRequest & { prefetch?: boolean }>) =
       const ctx = ensureCanvas(width, height);
       if (!ctx) throw new Error("worker 2D context gagal");
       ctx.globalCompositeOperation = "source-over";
-      ctx.drawImage(bitmap, 0, 0, width, height);
+      const occ = extractOcclusion(svg);
+      if (preview && !occ) drawCover(ctx, bitmap, width, height);
+      else ctx.drawImage(bitmap, 0, 0, width, height);
 
       // Occlusion pastor: strip + komposit GPU (sama dengan jalur utama).
       // Bitmap ditutup SETELAH occlusion (butuh piksel asli).
-      const occ = extractOcclusion(svg);
       const baseSvg = occ ? occ.svg : svg;
 
       const base = await layerBitmap(baseSvg, width, height, ctx, previewSupersample);
