@@ -40,9 +40,15 @@
       const v = videoEl;
       const canvas = canvasEl;
       if (!v || !canvas || inFlight || v.readyState < 2) return;
-      if (canvas.width !== store.videoWidth || canvas.height !== store.videoHeight) {
-        canvas.width = store.videoWidth;
-        canvas.height = store.videoHeight;
+      const sourceW = store.videoWidth;
+      const sourceH = store.videoHeight;
+      const box = regionEl.querySelector<HTMLElement>(".video-box");
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, Math.round((box?.clientWidth ?? sourceW) * dpr));
+      const h = Math.max(1, Math.round((box?.clientHeight ?? sourceH) * dpr));
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
         lastKey = "";
       }
       const f = Math.round(v.currentTime * store.fps);
@@ -51,8 +57,6 @@
       lastKey = key;
       inFlight = true;
       const idx = f;
-      const w = store.videoWidth;
-      const h = store.videoHeight;
       createImageBitmap(v)
         .then(async (bmp) => {
           // Layer kaca (selene): frame JPEG disetel SEBELUM render supaya
@@ -66,6 +70,8 @@
             blend: layers?.blend ?? null,
             width: w,
             height: h,
+            sourceWidth: sourceW,
+            sourceHeight: sourceH,
             t: v.currentTime,
             bitmap: bmp,
           });

@@ -172,13 +172,13 @@
     <button
       class="btn"
       onclick={() => fileInput.click()}
-      title="Import captions from a .srt or .vtt file">Import</button
+      title="Import subtitles — supports .srt and .vtt">Import subtitle</button
     >
-    <button class="btn" onclick={() => store.exportSubtitle("srt")} title="Download captions as SubRip (.srt)"
-      >.srt</button
-    >
-    <button class="btn" onclick={() => store.exportSubtitle("vtt")} title="Download captions as WebVTT (.vtt)"
-      >.vtt</button
+    <button
+      class="btn"
+      onclick={() => void store.transcribeCurrent()}
+      disabled={store.transcribing}
+      title="Transcribe the video again (replaces current captions)">Resub</button
     >
   </div>
 

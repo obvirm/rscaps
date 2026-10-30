@@ -14,6 +14,8 @@ interface BurnRequest {
   blend: string;
   width: number;
   height: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
   /** detik */
   t: number;
   /** detik */
@@ -178,12 +180,20 @@ async function drawOcclusion(
   width: number,
   height: number,
   src: OcclSource,
+  sourceWidth = width,
+  sourceHeight = height,
 ): Promise<void> {
   const mask = await occlMaskBitmap(occ.maskHref);
   if (!mask) return;
-  const [x, y, w, h] = occ.rect ?? [0, 0, width, height];
-  if (!occTemp || occTemp.width !== w || occTemp.height !== h) {
-    occTemp = new OffscreenCanvas(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+  const [x, y, w, h] = occ.rect ?? [0, 0, sourceWidth, sourceHeight];
+  const sx = width / sourceWidth;
+  const sy = height / sourceHeight;
+  const dx = x * sx;
+  const dy = y * sy;
+  const dw = w * sx;
+  const dh = h * sy;
+  if (!occTemp || occTemp.width !== dw || occTemp.height !== dh) {
+    occTemp = new OffscreenCanvas(Math.max(1, Math.round(dw)), Math.max(1, Math.round(dh)));
     occTempCtx = occTemp.getContext("2d");
   }
   const tctx = occTempCtx;
@@ -192,8 +202,8 @@ async function drawOcclusion(
   tctx.clearRect(0, 0, occTemp.width, occTemp.height);
   // Frame video ASLI (area region) — teks di bawah TIDAK ikut: occlusion
   // menimpa teks dengan piksel orang, semantik mask SVG.
-  const fx = src.sw > 0 ? src.sw / width : 1;
-  const fy = src.sh > 0 ? src.sh / height : 1;
+  const fx = src.sw > 0 ? src.sw / sourceWidth : 1;
+  const fy = src.sh > 0 ? src.sh / sourceHeight : 1;
   tctx.drawImage(
     src.source,
     x * fx, y * fy, w * fx, h * fy,
@@ -205,12 +215,12 @@ async function drawOcclusion(
   tctx.globalCompositeOperation = "destination-in";
   tctx.drawImage(
     mask,
-    (x / width) * mask.width, (y / height) * mask.height,
-    (w / width) * mask.width, (h / height) * mask.height,
+    (x / sourceWidth) * mask.width, (y / sourceHeight) * mask.height,
+    (w / sourceWidth) * mask.width, (h / sourceHeight) * mask.height,
     0, 0, occTemp.width, occTemp.height,
   );
   tctx.globalCompositeOperation = "source-over";
-  ctx.drawImage(occTemp, 0, 0, occTemp.width, occTemp.height, x, y, w, h);
+  ctx.drawImage(occTemp, 0, 0, occTemp.width, occTemp.height, dx, dy, dw, dh);
 }
 
 async function ensureSvgImages(
@@ -250,28 +260,49 @@ async function layerBitmap(
   width: number,
   height: number,
   ctx: OffscreenCanvasRenderingContext2D,
+  supersample = 1,
 ): Promise<ImageBitmap | null> {
   if (!svg || svg.trim().length === 0) return null;
   if (!svgHasPaint(svg)) return null; // layer kosong: tak perlu raster
   await ensureSvgImages(svg, ctx, width, height);
-  const cached = layerCache.get(svg);
+  const cacheKey = `${width}x${height}@${supersample}:${svg}`;
+  const cached = layerCache.get(cacheKey);
   if (cached) {
     wp.cacheHit++;
     // LRU touch: pindahkan ke akhir.
-    layerCache.delete(svg);
-    layerCache.set(svg, cached);
+    layerCache.delete(cacheKey);
+    layerCache.set(cacheKey, cached);
     return cached;
   }
   wp.cacheMiss++;
   const r0 = performance.now();
   // raster_svg (Rust) sudah mengembalikan STRAIGHT alpha — tidak perlu
   // unpremultiply lagi di JS (hemat ~5ms per miss).
-  const straight = await rasterSvgWasm(svg, width, height);
+  const rasterWidth = width * supersample;
+  const rasterHeight = height * supersample;
+  const straight = await rasterSvgWasm(svg, rasterWidth, rasterHeight);
   const r1 = performance.now();
-  // Salin ke buffer JS milik sendiri (view wasm bisa detached saat memory.grow).
-  const bmp = await createImageBitmap(
-    new ImageData(new Uint8ClampedArray(straight), width, height),
+  // Salin ke canvas milik sendiri (view wasm bisa detached saat memory.grow).
+  const rasterCanvas = new OffscreenCanvas(rasterWidth, rasterHeight);
+  const rasterCtx = rasterCanvas.getContext("2d");
+  if (!rasterCtx) throw new Error("layer raster canvas context gagal");
+  rasterCtx.putImageData(
+    new ImageData(new Uint8ClampedArray(straight), rasterWidth, rasterHeight),
+    0,
+    0,
   );
+  let bmp: ImageBitmap;
+  if (supersample > 1) {
+    const downsampleCanvas = new OffscreenCanvas(width, height);
+    const downsampleCtx = downsampleCanvas.getContext("2d");
+    if (!downsampleCtx) throw new Error("layer downsample context gagal");
+    downsampleCtx.imageSmoothingEnabled = true;
+    downsampleCtx.imageSmoothingQuality = "high";
+    downsampleCtx.drawImage(rasterCanvas, 0, 0, width, height);
+    bmp = await createImageBitmap(downsampleCanvas);
+  } else {
+    bmp = await createImageBitmap(rasterCanvas);
+  }
   const r2 = performance.now();
   wp.raster += r1 - r0;
   wp.mkBmp += r2 - r1;
@@ -282,7 +313,7 @@ async function layerBitmap(
       layerCache.delete(oldest);
     }
   }
-  layerCache.set(svg, bmp);
+  layerCache.set(cacheKey, bmp);
   return bmp;
 }
 
@@ -303,7 +334,11 @@ self.addEventListener("unhandledrejection", (ev) => {
 });
 
 self.onmessage = async (e: MessageEvent<BurnRequest & { prefetch?: boolean }>) => {
-  const { idx, svg, blend, width, height, t, dur, videoFrame, bitmap, buf, preview } = e.data;
+  const { idx, svg, blend, width, height, sourceWidth, sourceHeight, t, dur, videoFrame, bitmap, buf, preview } = e.data;
+  const logicalWidth = sourceWidth || width;
+  const logicalHeight = sourceHeight || height;
+  // Keep preview supersampling bounded on large 4K+ canvases.
+  const previewSupersample = preview && width * height <= 2_500_000 ? 2 : 1;
   try {
     const ts = Math.round(t * 1e6);
     const durUs = Math.round(dur * 1e6) || undefined;
@@ -340,7 +375,7 @@ self.onmessage = async (e: MessageEvent<BurnRequest & { prefetch?: boolean }>) =
       const occ = extractOcclusion(svg);
       const baseSvg = occ ? occ.svg : svg;
 
-      const base = await layerBitmap(baseSvg, width, height, ctx);
+      const base = await layerBitmap(baseSvg, width, height, ctx, previewSupersample);
       if (base) {
         ctx.globalCompositeOperation = "source-over";
         ctx.drawImage(base, 0, 0);
@@ -350,10 +385,10 @@ self.onmessage = async (e: MessageEvent<BurnRequest & { prefetch?: boolean }>) =
           source: videoFrame,
           sw: videoFrame.displayWidth || videoFrame.codedWidth || width,
           sh: videoFrame.displayHeight || videoFrame.codedHeight || height,
-        });
+        }, logicalWidth, logicalHeight);
       }
       videoFrame.close();
-      const blendBmp = await layerBitmap(blend, width, height, ctx);
+      const blendBmp = await layerBitmap(blend, width, height, ctx, previewSupersample);
       if (blendBmp) {
         ctx.globalCompositeOperation = "difference";
         ctx.drawImage(blendBmp, 0, 0);
@@ -384,7 +419,7 @@ self.onmessage = async (e: MessageEvent<BurnRequest & { prefetch?: boolean }>) =
       const occ = extractOcclusion(svg);
       const baseSvg = occ ? occ.svg : svg;
 
-      const base = await layerBitmap(baseSvg, width, height, ctx);
+      const base = await layerBitmap(baseSvg, width, height, ctx, previewSupersample);
       if (base) {
         ctx.globalCompositeOperation = "source-over";
         ctx.drawImage(base, 0, 0);
@@ -394,10 +429,10 @@ self.onmessage = async (e: MessageEvent<BurnRequest & { prefetch?: boolean }>) =
           source: bitmap,
           sw: bitmap.width,
           sh: bitmap.height,
-        });
+        }, logicalWidth, logicalHeight);
       }
       bitmap.close();
-      const blendBmp = await layerBitmap(blend, width, height, ctx);
+      const blendBmp = await layerBitmap(blend, width, height, ctx, previewSupersample);
       if (blendBmp) {
         ctx.globalCompositeOperation = "difference";
         ctx.drawImage(blendBmp, 0, 0);

@@ -14,6 +14,8 @@ export interface PreviewBurnRequest {
   blend: string | null;
   width: number;
   height: number;
+  sourceWidth: number;
+  sourceHeight: number;
   /** detik, hanya untuk identitas respons */
   t: number;
   bitmap: ImageBitmap;
@@ -86,6 +88,8 @@ export class PreviewBurner {
         blend: req.blend ?? "",
         width: req.width,
         height: req.height,
+        sourceWidth: req.sourceWidth,
+        sourceHeight: req.sourceHeight,
         t: req.t,
         dur: 0,
         bitmap: req.bitmap,

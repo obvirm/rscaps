@@ -227,14 +227,14 @@
           <select id="ex-native-engine" class="select" bind:value={nativeEngine} disabled={store.exporting}>
             <option value="fframes">FFrames (full GPU pipeline: decode→composite→encode)</option>
             <option value="cpu">CPU (usvgr + tiny-skia, deterministik, paritas web)</option>
-            <option value="skia">Skia GPU (butuh build --features gpu-skia)</option>
+            <option value="skia">Skia GPU (Vulkan)</option>
           </select>
           <p class="hint">
             {nativeEngine === "fframes"
               ? "Terbaik: decode+composite+encode GPU, pipelined chunked, tanpa RAM cap."
               : nativeEngine === "cpu"
                 ? "Deterministik, cocok CI/server, paritas pixel dengan web export."
-                : "GPU Vulkan, butuh rebuild: cargo build -p rscaps-cli --features gpu-skia"}
+                : "GPU via Vulkan, alternatif lebih cepat dari CPU."}
           </p>
         </div>
 
