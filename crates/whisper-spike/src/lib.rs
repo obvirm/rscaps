@@ -74,6 +74,10 @@ pub mod wasm {
     // every segment and would defeat plain periodicity.
     const MIN_FULL_PERIODS: usize = 3;
     const MIN_REPETITION_TOKENS: usize = 30;
+    // Short single-token loops (e.g. "Sampai Sampai x10" on a silent tail
+    // window) never reach the 30-token floor — a consecutive run of the SAME
+    // token ≥ 8 times cannot be speech, so catch it with a much lower floor.
+    const MIN_SAME_TOKEN_RUN: usize = 8;
 
     /// Tokens suppressed at every step (whisper generation_config.suppress_tokens).
     const SUPPRESS_TOKENS: &[i64] = &[
@@ -132,6 +136,20 @@ pub mod wasm {
             .copied()
             .filter(|&t| !tokenizer::is_timestamp(t))
             .collect();
+
+        // Short single-token run: same text token repeated back-to-back.
+        let mut run = 1usize;
+        for i in 1..text.len() {
+            if text[i] == text[i - 1] {
+                run += 1;
+                if run >= MIN_SAME_TOKEN_RUN {
+                    return true;
+                }
+            } else {
+                run = 1;
+            }
+        }
+
         let max_period = text.len() / MIN_FULL_PERIODS;
         for period in 1..=max_period {
             let window = (period * MIN_FULL_PERIODS)
@@ -152,6 +170,61 @@ pub mod wasm {
             }
         }
         false
+    }
+
+    /// Trim a degenerate repetition tail detected by `ends_in_repetition_loop`
+    /// so the looped tokens never reach the transcript. Works on the raw
+    /// generated list (timestamps included): finds the smallest periodic tail
+    /// window (or a same-token run) and drops it.
+    fn trim_repetition_tail(generated: &mut Vec<i64>) {
+        // Same-token run at the tail (timestamps between repeats are dropped
+        // for the check, so scan the timestamp-filtered view but remember the
+        // raw span).
+        let raw: Vec<(usize, i64)> = generated
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(_, t)| !tokenizer::is_timestamp(t))
+            .collect();
+        if raw.len() < MIN_SAME_TOKEN_RUN {
+            // fall through to periodic check below (short single-token loops
+            // need >= MIN_SAME_TOKEN_RUN anyway)
+        } else {
+            let mut run_start = raw.len() - 1;
+            for i in (1..raw.len()).rev() {
+                if raw[i].1 == raw[i - 1].1 {
+                    run_start = i - 1;
+                    if raw.len() - run_start >= MIN_SAME_TOKEN_RUN {
+                        generated.truncate(raw[run_start].0);
+                        return;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        // Periodic tail: drop the last full window for the smallest period.
+        let text: Vec<(usize, i64)> = raw;
+        let max_period = text.len() / MIN_FULL_PERIODS;
+        for period in 1..=max_period {
+            let window = (period * MIN_FULL_PERIODS)
+                .max(period * ((MIN_REPETITION_TOKENS + period - 1) / period));
+            if window > text.len() {
+                continue;
+            }
+            let from = text.len() - window;
+            let mut periodic = true;
+            for i in (from + period)..text.len() {
+                if text[i].1 != text[i - period].1 {
+                    periodic = false;
+                    break;
+                }
+            }
+            if periodic {
+                generated.truncate(text[from].0);
+                return;
+            }
+        }
     }
 
     /// WhisperTimeStampLogitsProcessor: forces timestamp pairs, suppresses
@@ -647,8 +720,10 @@ pub mod wasm {
             }
             // Anti-loop: if the generated text has degenerated into a
             // repetition (e.g. Whisper's "Thank you." hallucination), stop
-            // before burning the rest of the token budget on garbage.
+            // before burning the rest of the token budget on garbage AND trim
+            // the degenerate tail so it never reaches the transcript.
             if ends_in_repetition_loop(&generated) {
+                trim_repetition_tail(&mut generated);
                 break;
             }
             if best_id == tokenizer::EOS {
