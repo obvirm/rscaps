@@ -218,18 +218,49 @@ export interface WasmBridge {
 // ── Project model ─────────────────────────────────────────────────────────
 
 export type WhisperBackend = "cpu" | "webgpu";
-export type WhisperModel = "tiny" | "base" | "small" | "medium" | "large";
+export type WhisperModel = "tiny" | "base" | "small" | "medium" | "large" | "turbo";
+
+// Kuantisasi ONNX (onnx-community repos). q8 = *_quantized (MatMulNBits pada
+// model besar, MatMulInteger pada kecil), q4/q4f16 = MatMulNBits, bnb4 =
+// bitsandbytes 4-bit, int8/uint8 = MatMulInteger klasik (dequant fp32 di
+// ORT-wasm → berat/berisiko OOM di model besar), fp16/fp32 = tanpa kuantisasi.
+export type WhisperQuant = "fp32" | "fp16" | "int8" | "uint8" | "q8" | "q4" | "q4f16" | "bnb4";
+
+export const WHISPER_QUANTS: { id: WhisperQuant; label: string }[] = [
+  { id: "q8", label: "Q8 (int8, recommended)" },
+  { id: "q4", label: "Q4 (4-bit)" },
+  { id: "q4f16", label: "Q4 F16 (4-bit, fp16 accumulate)" },
+  { id: "bnb4", label: "BNB 4-bit (bitsandbytes)" },
+  { id: "int8", label: "INT8 (classic MatMulInteger)" },
+  { id: "uint8", label: "UINT8 (classic MatMulInteger)" },
+  { id: "fp16", label: "FP16 (half)" },
+  { id: "fp32", label: "FP32 (original)" },
+];
+
+// Varian kuantisasi yang benar-benar di-ship repo per model (dicek via HF tree
+// API; q4f16 encoder hanya ada di medium+; fp32 large/turbo = external-data
+// .onnx_data → tidak bisa lewat commit_from_memory).
+export const QUANT_AVAIL: Record<WhisperModel, WhisperQuant[]> = {
+  tiny:  ["q8", "q4", "bnb4", "int8", "uint8", "fp16", "fp32"],
+  base:  ["q8", "q4", "bnb4", "int8", "uint8", "fp16", "fp32"],
+  small: ["q8", "q4", "bnb4", "int8", "uint8", "fp16", "fp32"],
+  medium:["q8", "q4", "q4f16", "bnb4", "int8", "uint8", "fp16", "fp32"],
+  large: ["q8", "q4", "q4f16", "bnb4", "int8", "uint8", "fp16"],
+  turbo: ["q8", "q4", "q4f16", "bnb4", "int8", "uint8", "fp16"],
+};
+
+// Default kuantisasi per model (yang sudah/kemungkinan besar muat di wasm32 4 GB).
+export const DEFAULT_QUANT: Record<WhisperModel, WhisperQuant> = {
+  tiny: "q8", base: "q8", small: "q8", medium: "q8", large: "q4", turbo: "q4",
+};
 
 export const WHISPER_MODELS: { id: WhisperModel; label: string }[] = [
-  { id: "tiny", label: "Tiny — ~152 MB" },
-  { id: "base", label: "Base — ~75 MB" },
-  { id: "small", label: "Small — ~923 MB" },
-  // Disabled: fp32 decoder+encoder 2.9 GB blows the wasm32 4 GB linear-memory
-  // ceiling once sessions + KV caches are resident (ort-web loads from memory).
-  { id: "medium", label: "Medium — ~2.9 GB" },
-  // Disabled: Xenova ships large-v3 as external-data onnx (+5.9 GB) which
-  // commit_from_memory cannot resolve, beyond the same wasm32 ceiling.
-  { id: "large", label: "Large — ~5.9 GB" },
+  { id: "tiny", label: "Tiny" },
+  { id: "base", label: "Base" },
+  { id: "small", label: "Small" },
+  { id: "medium", label: "Medium" },
+  { id: "large", label: "Large v3" },
+  { id: "turbo", label: "Large v3 Turbo" },
 ];
 
 // Whisper language token ids run in a fixed alphabetical order starting at

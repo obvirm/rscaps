@@ -24,10 +24,15 @@ pub mod wasm {
     const HEAD_DIM_DEFAULT: usize = 64;
 
     /// One whisper model architecture. All fields are read per call so a
-    /// single wasm build can serve every model size.
+    /// single wasm build can serve every model size. `dec_layers` is separate
+    /// from `layers` because large-v3-turbo is asymmetric: 32 encoder layers
+    /// but only 4 decoder layers (the KV-cache loops below are decoder-side,
+    /// so they iterate `dec_layers`; the encoder needs no layer count — its
+    /// ONNX graph is fixed).
     #[derive(Clone, Copy)]
     struct Arch {
         layers: usize,
+        dec_layers: usize,
         heads: usize,
         head_dim: usize,
         d_model: usize,
@@ -38,6 +43,7 @@ pub mod wasm {
     impl Arch {
         const BASE: Arch = Arch {
             layers: 6,
+            dec_layers: 6,
             heads: 8,
             head_dim: HEAD_DIM_DEFAULT,
             d_model: 512,
@@ -239,10 +245,13 @@ pub mod wasm {
 
     /// Select the model architecture BEFORE load_encoder/load_decoder (the
     /// decoder graph shape and mel size depend on it). Defaults to whisper-base.
+    /// `layers` = encoder layer count (kept for completeness), `dec_layers` =
+    /// decoder layer count — equal except on large-v3-turbo (32 / 4).
     #[wasm_bindgen]
-    pub fn set_arch(layers: u32, heads: u32, head_dim: u32, d_model: u32, vocab: u32, n_mels: u32) {
+    pub fn set_arch(layers: u32, dec_layers: u32, heads: u32, head_dim: u32, d_model: u32, vocab: u32, n_mels: u32) {
         let a = Arch {
             layers: layers.max(1) as usize,
+            dec_layers: dec_layers.max(1) as usize,
             heads: heads.max(1) as usize,
             head_dim: head_dim.max(1) as usize,
             d_model: d_model.max(1) as usize,
@@ -361,8 +370,8 @@ pub mod wasm {
         let enc = Array3::from_shape_vec((1, ENC_LEN, a.d_model), hidden.to_vec()).map_err(js)?;
         let enc_value = Value::from_array(enc).map_err(js)?;
         let empty = || Array4::zeros((1, a.heads, 0, a.head_dim));
-        let past_dec: Vec<(Array4<f32>, Array4<f32>)> = (0..a.layers).map(|_| (empty(), empty())).collect();
-        let past_enc: Vec<(Array4<f32>, Array4<f32>)> = (0..a.layers).map(|_| (empty(), empty())).collect();
+        let past_dec: Vec<(Array4<f32>, Array4<f32>)> = (0..a.dec_layers).map(|_| (empty(), empty())).collect();
+        let past_enc: Vec<(Array4<f32>, Array4<f32>)> = (0..a.dec_layers).map(|_| (empty(), empty())).collect();
 
         let prompt: Vec<i64> = vec![tokenizer::SOT, 50259, 50359, NOTIMESTAMPS];
         let ids_arr = Array2::from_shape_vec((1, prompt.len()), prompt).map_err(js)?;
@@ -374,7 +383,7 @@ pub mod wasm {
             "use_cache_branch".to_string(),
             Value::from_array(Array1::from_vec(vec![false])).map_err(js)?.into(),
         ));
-        for i in 0..a.layers {
+        for i in 0..a.dec_layers {
             inputs.push((format!("past_key_values.{i}.decoder.key"), Value::from_array(past_dec[i].0.clone()).map_err(js)?.into()));
             inputs.push((format!("past_key_values.{i}.decoder.value"), Value::from_array(past_dec[i].1.clone()).map_err(js)?.into()));
             inputs.push((format!("past_key_values.{i}.encoder.key"), Value::from_array(past_enc[i].0.clone()).map_err(js)?.into()));
@@ -475,9 +484,9 @@ pub mod wasm {
         // tensors can trigger is prevented by the 64 MB pre-grow above.
         let empty = || Array4::zeros((1, a.heads, 0, a.head_dim));
         let mut past_dec: Vec<(Array4<f32>, Array4<f32>)> =
-            (0..a.layers).map(|_| (empty(), empty())).collect();
+            (0..a.dec_layers).map(|_| (empty(), empty())).collect();
         let mut past_enc: Vec<(Array4<f32>, Array4<f32>)> =
-            (0..a.layers).map(|_| (empty(), empty())).collect();
+            (0..a.dec_layers).map(|_| (empty(), empty())).collect();
 
         let mut input_ids: Vec<i64> = prompt.clone();
         let mut generated: Vec<i64> = Vec::new();
@@ -494,7 +503,7 @@ pub mod wasm {
         loop {
             iter += 1;
             let ids_arr = Array2::from_shape_vec((1, input_ids.len()), input_ids.clone()).map_err(js)?;
-            let mut inputs: Vec<(String, SessionInputValue)> = Vec::with_capacity(3 + a.layers * 4);
+            let mut inputs: Vec<(String, SessionInputValue)> = Vec::with_capacity(3 + a.dec_layers * 4);
             inputs.push((
                 "input_ids".to_string(),
                 Value::from_array(ids_arr).map_err(js)?.into(),
@@ -507,7 +516,7 @@ pub mod wasm {
                 "use_cache_branch".to_string(),
                 Value::from_array(Array1::from_vec(vec![use_cache])).map_err(js)?.into(),
             ));
-            for i in 0..a.layers {
+            for i in 0..a.dec_layers {
                 inputs.push((
                     format!("past_key_values.{i}.decoder.key"),
                     Value::from_array(past_dec[i].0.clone()).map_err(js)?.into(),
@@ -559,7 +568,7 @@ pub mod wasm {
             }
 
             // Advance KV cache from present.* outputs.
-            for i in 0..a.layers {
+            for i in 0..a.dec_layers {
                 let (dkd, k) = take_f32(&mut outputs, &format!("present.{i}.decoder.key"))
                     .await
                     .map_err(|e| JsValue::from_str(&format!("take present.{}.decoder.key: {:?}", i, e)))?;

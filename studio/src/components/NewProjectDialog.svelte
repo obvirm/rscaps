@@ -5,10 +5,14 @@
   import {
     WHISPER_LANGUAGES,
     WHISPER_MODELS,
+    WHISPER_QUANTS,
+    QUANT_AVAIL,
+    DEFAULT_QUANT,
     formatTimeShort,
     type Direction,
     type WhisperBackend,
     type WhisperModel,
+    type WhisperQuant,
   } from "../lib/types";
   import { isModelSupported } from "../lib/transcribe";
   import type { VideoProbe } from "../lib/video";
@@ -31,6 +35,7 @@
   let direction = $state<Direction>("auto");
   let backend = $state<WhisperBackend>("cpu");
   let model = $state<WhisperModel>("base");
+  let quant = $state<WhisperQuant>(DEFAULT_QUANT["base"]);
   let language = $state("en");
   let advancedOpen = $state(false);
   let creating = $state(false);
@@ -66,6 +71,7 @@
       onclose();
       await router.openProject(id);
       store.language = language;
+      store.quant = quant;
       void store.transcribeCurrent();
     } catch (err) {
       store.setStatus(String(err), true);
@@ -162,7 +168,7 @@
 
         <div class="field">
           <label class="label" for="np-model">Model</label>
-          <select id="np-model" class="select" bind:value={model}>
+          <select id="np-model" class="select" bind:value={model} onchange={() => (quant = DEFAULT_QUANT[model])}>
             {#each WHISPER_MODELS as m (m.id)}
               <option value={m.id} disabled={!isModelSupported(m.id)}>
                 {m.label}{isModelSupported(m.id) ? "" : " — not in this build"}
@@ -170,6 +176,26 @@
             {/each}
           </select>
           <p class="hint">Larger models give better accuracy but take longer to download and run.</p>
+        </div>
+
+        <div class="field">
+          <label class="label" for="np-quant">Quantization</label>
+          <select id="np-quant" class="select" bind:value={quant}>
+            {#each WHISPER_QUANTS as q (q.id)}
+              <option value={q.id} disabled={!QUANT_AVAIL[model].includes(q.id)}>
+                {q.label}{QUANT_AVAIL[model].includes(q.id) ? "" : " — not shipped for this model"}
+              </option>
+            {/each}
+          </select>
+          <p class="hint">
+            {quant === "q8"
+              ? "Best size/accuracy balance — recommended."
+              : quant === "q4" || quant === "q4f16"
+                ? "Smaller and faster; slight accuracy drop."
+                : quant === "fp32" || quant === "fp16"
+                  ? "Uncompressed — biggest download, may not fit in browser memory on larger models."
+                  : "Experimental quantization; results may vary."}
+          </p>
         </div>
 
         <div class="field">

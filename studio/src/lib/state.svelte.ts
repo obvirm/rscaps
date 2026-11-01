@@ -17,6 +17,9 @@ import {
   type TemplateEntry,
   type WhisperBackend,
   type WhisperModel,
+  type WhisperQuant,
+  DEFAULT_QUANT,
+  QUANT_AVAIL,
   type WordInfo,
   type WordOverride,
 } from "./types";
@@ -85,6 +88,7 @@ class StudioState {
   videoName = $state<string | null>(null);
   backend = $state<WhisperBackend>("cpu");
   model = $state<WhisperModel>("base");
+  quant = $state<WhisperQuant>(DEFAULT_QUANT["base"]);
   language = $state("en");
   transcribing = $state(false);
   transcribeFraction = $state(0);
@@ -376,7 +380,7 @@ class StudioState {
         this.setStatus("no video found to transcribe", true);
         return;
       }
-      const result = await transcribeBlob(blob, this.model, this.language, (fraction, stage) => {
+      const result = await transcribeBlob(blob, this.model, this.quant, this.language, (fraction, stage) => {
         this.transcribeFraction = fraction;
         this.transcribeStage = stage;
         this.setStatus(STAGE_STATUS[stage] ?? stage);
