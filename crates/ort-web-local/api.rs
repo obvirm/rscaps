@@ -22,7 +22,7 @@ use crate::{
 	memory::{Allocator, MemoryInfo},
 	session::{RunOptions, Session, SessionOptions},
 	tensor::{SyncDirection, Tensor, TensorData, TypeInfo, create_buffer, onnx_to_dtype},
-	util::value_to_string
+	util::{error_with_stack, value_to_string}
 };
 
 // TODO: remove on ort-sys bump
@@ -174,7 +174,7 @@ unsafe fn RunAsync(
 
 				OrtStatusPtr::default()
 			}
-			Err(e) => Error::new_sys(OrtErrorCode::ORT_FAIL, format!("Failed to run session: {}", value_to_string(&e)))
+			Err(e) => Error::new_sys(OrtErrorCode::ORT_FAIL, format!("Failed to run session: {}", error_with_stack(&e)))
 		}
 	}) as Pin<Box<dyn Future<Output = OrtStatusPtr>>>;
 	unsafe { core::mem::transmute(fut) }

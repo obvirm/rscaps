@@ -126,17 +126,28 @@ pub fn create_buffer(dtype: binding::DataType, shape: &[i32]) -> JsValue {
 }
 
 pub unsafe fn buffer_from_ptr(dtype: binding::DataType, ptr: *mut c_void, byte_len: usize) -> JsValue {
+	// Owned copy, NOT Uint8Array::view(): a view stays pinned to this wasm
+	// memory, and any Memory.grow while the async run is in flight detaches
+	// it — onnxruntime-web then throws "Cannot perform Construct on a detached
+	// ArrayBuffer" (at `new Uint8Array` inside ort.min.js). Copies here are
+	// 1-8 MB per tensor, negligible next to the run itself.
+	let slice = slice::from_raw_parts(ptr.cast::<u8>(), byte_len);
+	let owned = {
+		let arr = js_sys::Uint8Array::new_with_length(byte_len as u32);
+		arr.copy_from(slice);
+		arr
+	};
 	match dtype {
-		binding::DataType::Bool | binding::DataType::Uint8 => unsafe { js_sys::Uint8Array::view(slice::from_raw_parts(ptr.cast(), byte_len)) }.into(),
-		binding::DataType::Int8 => unsafe { js_sys::Int8Array::view(slice::from_raw_parts(ptr.cast(), byte_len)) }.into(),
-		binding::DataType::Uint16 => unsafe { js_sys::Uint16Array::view(slice::from_raw_parts(ptr.cast(), byte_len / 2)) }.into(),
-		binding::DataType::Int16 => unsafe { js_sys::Int16Array::view(slice::from_raw_parts(ptr.cast(), byte_len / 2)) }.into(),
-		binding::DataType::Uint32 => unsafe { js_sys::Uint32Array::view(slice::from_raw_parts(ptr.cast(), byte_len / 4)) }.into(),
-		binding::DataType::Int32 => unsafe { js_sys::Int32Array::view(slice::from_raw_parts(ptr.cast(), byte_len / 4)) }.into(),
-		binding::DataType::Uint64 => unsafe { js_sys::BigUint64Array::view(slice::from_raw_parts(ptr.cast(), byte_len / 8)) }.into(),
-		binding::DataType::Int64 => unsafe { js_sys::BigInt64Array::view(slice::from_raw_parts(ptr.cast(), byte_len / 8)) }.into(),
-		binding::DataType::Float32 => unsafe { js_sys::Float32Array::view(slice::from_raw_parts(ptr.cast(), byte_len / 4)) }.into(),
-		binding::DataType::Float64 => unsafe { js_sys::Float64Array::view(slice::from_raw_parts(ptr.cast(), byte_len / 8)) }.into(),
+		binding::DataType::Bool | binding::DataType::Uint8 => owned.into(),
+		binding::DataType::Int8 => js_sys::Int8Array::new(&owned.buffer()).into(),
+		binding::DataType::Uint16 => js_sys::Uint16Array::new(&owned.buffer()).into(),
+		binding::DataType::Int16 => js_sys::Int16Array::new(&owned.buffer()).into(),
+		binding::DataType::Uint32 => js_sys::Uint32Array::new(&owned.buffer()).into(),
+		binding::DataType::Int32 => js_sys::Int32Array::new(&owned.buffer()).into(),
+		binding::DataType::Uint64 => js_sys::BigUint64Array::new(&owned.buffer()).into(),
+		binding::DataType::Int64 => js_sys::BigInt64Array::new(&owned.buffer()).into(),
+		binding::DataType::Float32 => js_sys::Float32Array::new(&owned.buffer()).into(),
+		binding::DataType::Float64 => js_sys::Float64Array::new(&owned.buffer()).into(),
 		binding::DataType::Int4 | binding::DataType::Uint4 | binding::DataType::Float16 | binding::DataType::String => unimplemented!(),
 		binding::DataType::__Invalid => unreachable!()
 	}
