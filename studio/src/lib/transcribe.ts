@@ -92,6 +92,7 @@ interface WhisperModule {
     vocab: number,
     nMels: number,
   ) => void;
+  set_opt_level: (level: number) => void;
   load_encoder: (bytes: Uint8Array) => Promise<void>;
   load_decoder: (bytes: Uint8Array) => Promise<void>;
   load_tokenizer: (json: string) => void;
@@ -211,6 +212,13 @@ async function loadWhisper(
     mod.set_arch(a.layers, a.decLayers, a.heads, 64, a.dModel, 51865, a.nMels);
 
     onProgress(0.05, "model");
+    // fp16 models hit ORT regression #26717 (SimplifiedLayerNormFusion crash
+    // during session init). Basic level skips the extended fusions that carry
+    // the bug; the patched ort-web now actually applies this level. Other
+    // quantizations stay at All (= onnxruntime-web's old default behaviour).
+    const optLevel = quant === "fp16" ? 1 : 4;
+    console.log(`[DBG] model=${model} quant=${quant} optLevel=${optLevel}`);
+    mod.set_opt_level(optLevel);
     const suffix = QUANT_SUFFIX[quant];
     // Fetch sequentially with byte progress so the bar moves smoothly during a
     // first-run download.

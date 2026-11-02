@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "src-tauri"]
+# Fork ort-web (backend wasm) — jangan jadi member; dipakai lewat [patch].
+exclude = ["crates/ort-web-local"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,3 +15,9 @@ license = "MIT"
 # lto "thin" (bukan "true"): lto penuh memicu rustc ICE di crate exr.
 opt-level = 3
 lto = "thin"
+
+# Fork ort-web: stub SetSessionGraphOptimizationLevel/AddSessionConfigEntry
+# upstream no-op → opt level & config entry tak pernah sampai ke
+# onnxruntime-web (fp16 crash ORT #26717). Fork ini mengisinya.
+[patch.crates-io]
+ort-web = { path = "crates/ort-web-local" }

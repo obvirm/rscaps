@@ -8,6 +8,7 @@ pub mod wasm {
     use std::sync::Mutex;
 
     use ndarray::{Array1, Array2, Array3, Array4};
+    use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
     use ort::session::{RunOptions, Session, SessionInputValue};
     use ort::value::Value;
     use ort_web::{SyncDirection, ValueExt};
@@ -292,6 +293,11 @@ pub mod wasm {
     static ENCODER: Mutex<Option<Session>> = Mutex::new(None);
     static DECODER: Mutex<Option<Session>> = Mutex::new(None);
     static TOKENIZER: Mutex<Option<WhisperTokenizer>> = Mutex::new(None);
+    // Graph optimization level for the NEXT session loads (0=disable,
+    // 1=basic, 2=extended, 3=all). fp16 exports crash ORT-wasm's fusion pass
+    // (SimplifiedLayerNormFusion on InsertedPrecisionFreeCast) at the default
+    // level 3 — JS drops to basic (1) for those files.
+    static OPT_LEVEL: Mutex<u32> = Mutex::new(3);
 
     fn js(err: impl std::fmt::Display) -> JsValue {
         JsValue::from_str(&err.to_string())
@@ -334,10 +340,32 @@ pub mod wasm {
         *ARCH.lock().unwrap_or_else(|p| p.into_inner()) = a;
     }
 
+    /// Set the graph optimization level used by subsequent load_encoder /
+    /// load_decoder calls (0=disable, 1=basic, 2=extended, 3=layout, 4=all).
+    #[wasm_bindgen]
+    pub fn set_opt_level(level: u32) {
+        *OPT_LEVEL.lock().unwrap_or_else(|p| p.into_inner()) = level.min(4);
+    }
+
+    fn session_builder() -> Result<SessionBuilder, JsValue> {
+        let level = *OPT_LEVEL.lock().map_err(js)?;
+        let g = match level {
+            0 => GraphOptimizationLevel::Disable,
+            1 => GraphOptimizationLevel::Level1,
+            2 => GraphOptimizationLevel::Level2,
+            3 => GraphOptimizationLevel::Level3,
+            _ => GraphOptimizationLevel::All,
+        };
+        Session::builder()
+            .map_err(js)?
+            .with_optimization_level(g)
+            .map_err(js)
+    }
+
     /// Load the whisper encoder ONNX model into memory.
     #[wasm_bindgen]
     pub async fn load_encoder(bytes: &[u8]) -> Result<(), JsValue> {
-        let session = Session::builder().map_err(js)?.commit_from_memory(bytes).await.map_err(js)?;
+        let session = session_builder()?.commit_from_memory(bytes).await.map_err(js)?;
         *ENCODER.lock().map_err(js)? = Some(session);
         Ok(())
     }
@@ -345,7 +373,7 @@ pub mod wasm {
     /// Load the whisper merged decoder ONNX model into memory.
     #[wasm_bindgen]
     pub async fn load_decoder(bytes: &[u8]) -> Result<(), JsValue> {
-        let session = Session::builder().map_err(js)?.commit_from_memory(bytes).await.map_err(js)?;
+        let session = session_builder()?.commit_from_memory(bytes).await.map_err(js)?;
         *DECODER.lock().map_err(js)? = Some(session);
         Ok(())
     }
