@@ -25,6 +25,9 @@ serde_json = "1"
 # Force-enable the wasm_js backend feature: .cargo/config.toml passes
 # --cfg getrandom_backend="wasm_js" for wasm32 builds (rayon/candle graph needs it).
 getrandom = { version = "0.3", features = ["wasm_js"] }
+# Pure-Rust zlib for the HF compression-ratio fallback gate (no C deps →
+# wasm32-safe). Used to flag degenerate repetitive attempts (ratio > 2.4).
+miniz_oxide = "0.8"
 
 # Native/desktop backend: pure Rust (candle), proven working with whisper-tiny.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -40,4 +43,3 @@ web-sys = { version = "0.3", features = ["console"] }
 
 [features]
 default = []
-

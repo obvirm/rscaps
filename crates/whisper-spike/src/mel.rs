@@ -2,8 +2,8 @@
 //! and Xenova's `WhisperFeatureExtractor`): 80 mel bins, n_fft 400, hop 160,
 //! 16 kHz, padded to a 30 s (480 000-sample) window → (80, 3000) log-mel.
 
-use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
+use rustfft::num_complex::Complex;
 
 pub const SAMPLE_RATE: usize = 16000;
 pub const N_FFT: usize = 400;
@@ -46,7 +46,9 @@ fn mel_to_hz(mel: f64) -> f64 {
 /// n_mels varies per model: 80 (tiny..medium), 128 (large-v3).
 pub fn mel_filterbank(n_mels: usize) -> Vec<f32> {
     let n_bins = N_FFT / 2 + 1; // 201
-    let fft_freqs: Vec<f64> = (0..n_bins).map(|i| i as f64 * SAMPLE_RATE as f64 / N_FFT as f64).collect();
+    let fft_freqs: Vec<f64> = (0..n_bins)
+        .map(|i| i as f64 * SAMPLE_RATE as f64 / N_FFT as f64)
+        .collect();
 
     let mel_min = hz_to_mel(FMIN);
     let mel_max = hz_to_mel(FMAX);

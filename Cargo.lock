@@ -3844,8 +3844,6 @@ checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
 [[package]]
 name = "ort-web"
 version = "0.3.1+1.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b75b69e27ece1c9be6d3c5919e75c63ed0b7f61e615df752c13335fb45f3ec"
 dependencies = [
  "js-sys",
  "ort",
@@ -6771,6 +6769,7 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
  "js-sys",
+ "miniz_oxide 0.8.9",
  "ndarray",
  "ort",
  "ort-candle",

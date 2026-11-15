@@ -4,7 +4,10 @@ use std::time::Instant;
 fn main() -> Result<(), Box<dyn Error>> {
     ort::set_api(ort_candle::api());
 
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/encoder_model.onnx");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../models/encoder_model.onnx"
+    );
     let t0 = Instant::now();
     let mut session = ort::session::Session::builder()?.commit_from_file(path)?;
     println!("session loaded in {:.1}s", t0.elapsed().as_secs_f32());

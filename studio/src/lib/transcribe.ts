@@ -72,11 +72,32 @@ const QUANT_SUFFIX: Record<WhisperQuant, string> = {
   bnb4: "_bnb4",
 };
 
+// Encoder: A/B cross-load (large) membuktikan encoder kuant (_quantized/uint8)
+// membuat decoder memilih tail-hallucination, sementara decoder kuant relatif
+// baik; encoder int8 stabil di semua ukuran. Encoder SELALU diambil varian
+// int8 — decoder tetap mengikuti quant yang dipilih user. (Fast-path folder
+// lokal bisa beda asal file-nya int8/fp16 non-kuant — sama-sama stabil.)
+const ENCODER_SUFFIX = "_int8";
+
 export function isModelSupported(model: WhisperModel): boolean {
   return SUPPORTED_MODELS.has(model);
 }
 
 const SAMPLE_RATE = 16000;
+
+// Speech-activity check (VAD-lite): peak RMS over 100 ms frames; active
+// speech/music sits far above this floor, room tone and digital silence below.
+function hasSpeechEnergy(samples: Float32Array): boolean {
+  const frame = Math.round(SAMPLE_RATE * 0.1);
+  let peak = 0;
+  for (let i = 0; i + frame <= samples.length; i += frame) {
+    let sum = 0;
+    for (let j = i; j < i + frame; j++) sum += samples[j] * samples[j];
+    const rms = Math.sqrt(sum / frame);
+    if (rms > peak) peak = rms;
+  }
+  return peak > 0.01;
+}
 // whisper consumes a fixed 30 s window (480 000 samples -> 80x3000 mel).
 const CHUNK_SAMPLES = 30 * SAMPLE_RATE;
 
@@ -91,10 +112,13 @@ interface WhisperModule {
     dModel: number,
     vocab: number,
     nMels: number,
+    classic: boolean,
   ) => void;
   set_opt_level: (level: number) => void;
-  load_encoder: (bytes: Uint8Array) => Promise<void>;
-  load_decoder: (bytes: Uint8Array) => Promise<void>;
+  set_logprob_gate: (v: number) => void;
+  set_min_new_tokens: (v: number) => void;
+  load_encoder: (bytes: Uint8Array | null) => Promise<void>;
+  load_decoder: (bytes: Uint8Array | null) => Promise<void>;
   load_tokenizer: (json: string) => void;
   encode_audio: (samples: Float32Array) => Promise<Float32Array>;
   transcribe: (
@@ -107,7 +131,19 @@ interface WhisperModule {
   ) => Promise<string>;
 }
 
-const TRANSCRIBE_TASK = 50359n; // <|transcribe|>
+// Vocab variant per repo (ground truth generation_config.json, 2026-11):
+// repo *_timestamped tiny/base/small/medium = klasik (transcribe=50359,
+// notimestamps=50363, ts_begin=50364); large-v3-ONNX & turbo_timestamped =
+// v3 (transcribe=50360, notimestamps=50364, ts_begin=50365). Bahasa &
+// decoder_start sama di keduanya.
+const MODEL_CLASSIC: Partial<Record<WhisperModel, boolean>> = {
+  tiny: true,
+  base: true,
+  small: true,
+  medium: true,
+  large: false,
+  turbo: false,
+};
 const MAX_TOKENS = 448;
 
 // One module instance per model: the wasm holds that model's encoder/decoder
@@ -121,28 +157,71 @@ function ensureOk(res: Response, url: string): Response {
   return res;
 }
 
-// Fetch a file while reporting byte progress (0→1 within this file). Falls back
-// to an indeterminate `total = 0` when the server omits Content-Length.
+// Fetch a file while reporting byte progress (0→1 within this file). The
+// output buffer is preallocated from Content-Length — concatenating streamed
+// chunks (parts + final copy) doubled the JS peak and made 1.7 GB+ models hit
+// "Array buffer allocation failed" (RangeError) in Chrome's heap.
 async function readWithProgress(res: Response, onFrac: (frac: number) => void): Promise<Uint8Array> {
   const total = Number(res.headers.get("content-length")) || 0;
   if (!res.body) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
-  const parts: Uint8Array[] = [];
+  let out: Uint8Array;
   let loaded = 0;
+  if (total > 0) {
+    out = new Uint8Array(total);
+  } else {
+    // Unknown length: accumulate (rare — our sources always send it).
+    const parts: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      loaded += value.length;
+      onFrac(0);
+    }
+    out = new Uint8Array(loaded);
+    let off = 0;
+    for (const p of parts) {
+      out.set(p, off);
+      off += p.length;
+    }
+    return out;
+  }
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    parts.push(value);
+    if (loaded + value.length > total) break; // server lied about length
+    out.set(value, loaded);
     loaded += value.length;
-    if (total > 0) onFrac(loaded / total);
+    onFrac(loaded / total);
   }
-  const out = new Uint8Array(loaded);
-  let off = 0;
-  for (const p of parts) {
-    out.set(p, off);
-    off += p.length;
-  }
+  if (loaded < total) throw new Error(`short read: ${loaded}/${total}`);
   return out;
+}
+
+// Varian external-data (model ≥1,5 GB): folder lokal dev dapat membawa
+// <file>.ext.onnx + <file>.ext.data (pisah via scripts/tmp_split_onnx.mjs).
+// ort.min.js memuat data lewat mountExternalData dan melepasnya setelah
+// create — transient build turun dari ~3× bobot ke ~1× sehingga medium/int8,
+// medium/uint8, large/fp16, dan turbo/fp16 muat di plafon wasm32 4 GB.
+async function fetchModelExt(
+  model: WhisperModel,
+  quant: WhisperQuant,
+  base: string,
+  onFrac: (frac: number) => void,
+): Promise<{ pb: Uint8Array; data: Uint8Array } | null> {
+  const dir = `/models/whisper-${model}-${quant}`;
+  try {
+    const res = await fetch(`${dir}/${base}.ext.onnx`);
+    if (!res.ok || !(res.headers.get("content-type") || "").includes("octet-stream")) return null;
+    const pb = await readWithProgress(res, onFrac);
+    const dres = await fetch(`${dir}/${base}.ext.data`);
+    if (!dres.ok) return null;
+    const data = await readWithProgress(dres, onFrac);
+    return { pb, data };
+  } catch {
+    return null;
+  }
 }
 
 async function fetchModelFile(
@@ -173,12 +252,17 @@ async function fetchModelFile(
   }
   const res = ensureOk(await fetch(url), url);
   const bytes = await readWithProgress(res, onFrac);
-  await cache.put(
-    url,
-    new Response(bytes.slice().buffer, {
-      headers: { "content-length": String(bytes.length) },
-    }),
-  );
+  // CacheStorage stores a full copy of the bytes; above ~1.6 GB the extra
+  // Response-body copy trips Chrome's ArrayBuffer allocation again, so huge
+  // models are NOT cached (dev fast-path folders cover them).
+  if (bytes.length < 1_600_000_000) {
+    await cache.put(
+      url,
+      new Response(bytes.buffer as ArrayBuffer, {
+        headers: { "content-length": String(bytes.length) },
+      }),
+    );
+  }
   return bytes;
 }
 
@@ -200,32 +284,51 @@ async function loadWhisper(
     // ort-web dist self-host; jangan pakai default Rust (hardcoded port dev
     // lama) — ikuti origin halaman supaya port dev berganti pun tetap jalan.
     await mod.init(`${location.origin}/nm/onnxruntime-web/dist/`);
-    // The threaded ort build can hang during session init; stay single-threaded.
-    const g = globalThis as { ort?: { env?: { wasm?: { numThreads?: number } } } };
-    if (g.ort?.env?.wasm) g.ort.env.wasm.numThreads = 1;
+    // Thread pool: the old hard-coded numThreads=1 ("threaded build hangs")
+    // left all cores idle but one; the detached-ArrayBuffer hang behind it is
+    // fixed in Rust by pre-growing the heap. Use cores-1, with __rscapsThreads
+    // as the A/B escape hatch.
+    const g = globalThis as { ort?: { env?: { wasm?: { numThreads?: number } } }; __rscapsThreads?: number };
+    if (g.ort?.env?.wasm) {
+      const dbgThreads = g.__rscapsThreads;
+      g.ort.env.wasm.numThreads =
+        typeof dbgThreads === "number" && dbgThreads > 0
+          ? Math.floor(dbgThreads)
+          : Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+    }
 
     // Arch BEFORE the ONNX bytes: the decoder graph shape and mel size depend
     // on it. head_dim is 64 and logits vocab 51865 across every size (large-v3
     // carries a 51866th tokenizer entry but its logits stay 51865).
     const a = MODEL_ARCH[model];
     if (!a) throw new Error(`model "${model}" has no arch config`);
-    mod.set_arch(a.layers, a.decLayers, a.heads, 64, a.dModel, 51865, a.nMels);
+    mod.set_arch(a.layers, a.decLayers, a.heads, 64, a.dModel, 51865, a.nMels, MODEL_CLASSIC[model] ?? false);
 
     onProgress(0.05, "model");
-    // fp16 models hit ORT regression #26717 (SimplifiedLayerNormFusion crash
-    // during session init). Basic level skips the extended fusions that carry
-    // the bug; the patched ort-web now actually applies this level. Other
-    // quantizations stay at All (= onnxruntime-web's old default behaviour).
-    const optLevel = quant === "fp16" ? 1 : 4;
-    console.log(`[DBG] model=${model} quant=${quant} optLevel=${optLevel}`);
-    mod.set_opt_level(optLevel);
+    // fp16-weight models (fp16, q4f16) hit ORT regression #26717
+    // (SimplifiedLayerNormFusion crash during session init). Basic level skips
+    // the extended fusions that carry the bug; the patched ort-web now
+    // actually applies this level. medium/q8 (QDQ) also breaks at All —
+    // instant EOS, empty output — but works at Basic (A/B:
+    // scripts/tmp_runs/ab-medium-q8-opt1.json). Others stay at All.
+    // Escape hatch harness (sama semangatnya dgn env RSCAPS_*): override
+    // opt-level dari console agar A/B per level bisa dijalankan tanpa edit.
+    const dbgLevel = (globalThis as { __rscapsDebugOptLevel?: number }).__rscapsDebugOptLevel;
     const suffix = QUANT_SUFFIX[quant];
     // Fetch sequentially with byte progress so the bar moves smoothly during a
-    // first-run download.
-    const enc = await fetchModelFile(model, quant, `encoder_model${suffix}.onnx`, (f) =>
+    // first-run download. External-data variants (if the local folder carries
+    // the split) are tried first and skip the full-file fetch entirely.
+    let decExt = await fetchModelExt(model, quant, "decoder_model_merged", (f) =>
+      onProgress(0.05 + f * 0.12, "model"),
+    );
+    let encExt: { pb: Uint8Array; data: Uint8Array } | null = null;
+    if (decExt) {
+      encExt = await fetchModelExt(model, quant, `encoder_model${ENCODER_SUFFIX}`, (f) => onProgress(0.17 + f * 0.11, "model"));
+    }
+    let enc: Uint8Array | null = encExt ? null : await fetchModelFile(model, quant, `encoder_model${ENCODER_SUFFIX}.onnx`, (f) =>
       onProgress(0.05 + f * 0.13, "model"),
     );
-    const dec = await fetchModelFile(model, quant, `decoder_model_merged${suffix}.onnx`, (f) =>
+    let dec: Uint8Array | null = decExt ? null : await fetchModelFile(model, quant, `decoder_model_merged${suffix}.onnx`, (f) =>
       onProgress(0.18 + f * 0.1, "model"),
     );
     let tok: string;
@@ -247,8 +350,56 @@ async function loadWhisper(
       )).text();
     }
     onProgress(0.29, "model");
-    await mod.load_encoder(enc);
-    await mod.load_decoder(dec);
+    // Opt level: external-data builds run at Disable — graph transforms copy
+    // the (already huge) weight set once more and bust the 4 GB ceiling
+    // (medium/int8: level 4 = bad_alloc, level 0 = works). Non-ext keeps the
+    // old mapping (fp16/q4f16/medium-q8 → Basic for ORT #26717 & QDQ). QDQ
+    // `_quantized` decoders break at All on small too (A/B scripts/tmp_runs/
+    // small-q8-opt1.json: All = early-stop "Selamat tinggal", Basic = full id).
+    const q8Basic = (model === "medium" || model === "small") && quant === "q8";
+    const optLevel = dbgLevel ?? (decExt || encExt ? 0 : quant === "fp16" || quant === "q4f16" || q8Basic ? 1 : 4);
+    mod.set_opt_level(optLevel);
+    // Escape hatch harness: override the HF avg-logprob quality gate per run.
+    const dbgGate = (globalThis as { __rscapsLogprobGate?: number }).__rscapsLogprobGate;
+    if (typeof dbgGate === "number" && Number.isFinite(dbgGate)) {
+      mod.set_logprob_gate(dbgGate);
+    }
+    const dbgMinNew = (globalThis as { __rscapsMinNewTokens?: number }).__rscapsMinNewTokens;
+    if (typeof dbgMinNew === "number" && Number.isFinite(dbgMinNew)) {
+      mod.set_min_new_tokens(dbgMinNew);
+    }
+    // Load decoder FIRST, encoder last: peak ort-wasm heap = model buffer +
+    // built weights in one shot. Encoder session is the smaller of the two, so
+    // building it last (on top of the decoder session) keeps every peak below
+    // the wasm32 4 GB ceiling — enc-first hit 4.7 GB on large/fp16 (bad_alloc
+    // during decoder build). JS refs are dropped right after each load so the
+    // byte copies can be GC'd while the next session builds.
+    const gExt = globalThis as { __rscapsExternalData?: { path: string; data: Uint8Array }[] };
+    if (decExt) {
+      // Path harus persis = location yang dibake ke pb oleh tmp_split_onnx.mjs.
+      gExt.__rscapsExternalData = [{ path: "decoder_model_merged.weights.data", data: decExt.data }];
+      try {
+        await mod.load_decoder(decExt.pb);
+      } finally {
+        gExt.__rscapsExternalData = undefined;
+      }
+      decExt = null;
+    } else {
+      await mod.load_decoder(dec);
+      dec = null;
+    }
+    if (encExt) {
+      gExt.__rscapsExternalData = [{ path: "encoder_model.weights.data", data: encExt.data }];
+      try {
+        await mod.load_encoder(encExt.pb);
+      } finally {
+        gExt.__rscapsExternalData = undefined;
+      }
+      encExt = null;
+    } else {
+      await mod.load_encoder(enc);
+      enc = null;
+    }
     mod.load_tokenizer(tok);
     cached.set(key, mod);
     return mod;
@@ -290,6 +441,8 @@ export async function transcribeBlob(
   }
 
   const langId = BigInt(langToTokenId(language));
+  // <|transcribe|> per vocab variant (klasik 50359, v3 50360).
+  const taskToken = BigInt(MODEL_CLASSIC[model] ?? false ? 50359 : 50360);
   const segments: TranscribeSegment[] = [];
   const texts: string[] = [];
   const totalChunks = Math.max(1, Math.ceil(totalSamples / CHUNK_SAMPLES));
@@ -305,23 +458,78 @@ export async function transcribeBlob(
     const offsetSec = start / SAMPLE_RATE;
     const windowDur = chunk.length / SAMPLE_RATE;
 
+    let winSegments: TranscribeSegment[] = [];
+    let winText = "";
+
     const hidden = await mod.encode_audio(chunk);
-    const raw = await mod.transcribe(hidden, langId, TRANSCRIBE_TASK, true, MAX_TOKENS, windowDur);
-    const parsed = JSON.parse(raw) as {
+    const raw = await mod.transcribe(hidden, langId, taskToken, true, MAX_TOKENS, windowDur);
+    let parsed = JSON.parse(raw) as {
       text: string;
       segments: { start: number; end: number; text: string }[];
+      quality?: { silent: boolean; avg_logprob: number; no_speech: number };
     };
+    if (parsed.quality) console.log(`quality ${JSON.stringify(parsed.quality)}`);
+
+    // Sparse-decode rescue: a confident end-of-audio prior ("Terima kasih
+    // telah menonton!") on hard audio yields a few words across many seconds
+    // of dense speech (fragile quant exports, verbatim in transformers.js).
+    // Re-decode the window in short slices — short windows escape the
+    // attractor — and keep the result only when it is meaningfully richer.
+    const wordCount = parsed.text.trim() ? parsed.text.trim().split(/\s+/).length : 0;
+    // Degeneracy signal: one word dominating the decode ("I, I, I, I") is a
+    // repetition artifact even when the sparse-word test passes.
+    const wordHist = new Map<string, number>();
+    for (const w of parsed.text.toLowerCase().split(/\s+/)) {
+      if (!w) continue;
+      wordHist.set(w, (wordHist.get(w) ?? 0) + 1);
+    }
+    const topWordFrac = wordCount ? Math.max(...wordHist.values()) / wordCount : 0;
+    if (
+      !parsed.quality?.silent &&
+      windowDur > 8 &&
+      (wordCount < Math.max(2, windowDur * 0.4) || topWordFrac > 0.3) &&
+      hasSpeechEnergy(chunk)
+    ) {
+      const sliceTexts: string[] = [];
+      let sliceWords = 0;
+      let sliceSegments: TranscribeSegment[] = [];
+      const SLICE_SAMPLES = 4 * SAMPLE_RATE;
+      const nSlices = Math.ceil(chunk.length / SLICE_SAMPLES);
+      for (let s = 0; s < nSlices; s++) {
+        const slice = chunk.subarray(
+          s * SLICE_SAMPLES,
+          Math.min((s + 1) * SLICE_SAMPLES, chunk.length),
+        );
+        if (slice.length < SAMPLE_RATE / 2) break;
+        const sliceStartSec = (s * SLICE_SAMPLES) / SAMPLE_RATE;
+        const sliceDur = slice.length / SAMPLE_RATE;
+        const hidden2 = await mod.encode_audio(slice);
+        const raw2 = await mod.transcribe(hidden2, langId, taskToken, true, MAX_TOKENS, sliceDur);
+        const parsed2 = JSON.parse(raw2) as typeof parsed;
+        if (parsed2.quality) console.log(`quality ${JSON.stringify(parsed2.quality)}`);
+        for (const seg of parsed2.segments) {
+          const text = seg.text.trim();
+          if (!text) continue;
+          sliceSegments.push({ start: seg.start + sliceStartSec, end: seg.end + sliceStartSec, text });
+        }
+        if (parsed2.text.trim()) {
+          sliceTexts.push(parsed2.text.trim());
+          sliceWords += parsed2.text.trim().split(/\s+/).length;
+        }
+      }
+      if (sliceWords > wordCount) {
+        parsed = { text: sliceTexts.join(" "), segments: sliceSegments };
+      }
+    }
 
     for (const seg of parsed.segments) {
       const text = seg.text.trim();
       if (!text) continue;
-      segments.push({
-        start: seg.start + offsetSec,
-        end: seg.end + offsetSec,
-        text,
-      });
+      winSegments.push({ start: seg.start + offsetSec, end: seg.end + offsetSec, text });
     }
-    if (parsed.text.trim()) texts.push(parsed.text.trim());
+    if (parsed.text.trim()) winText = parsed.text.trim();
+    segments.push(...winSegments);
+    if (winText) texts.push(winText);
   }
 
   onProgress(1, "done");

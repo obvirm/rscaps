@@ -67,6 +67,12 @@ function staticDirs(): Plugin {
           res.writeHead(200, {
             "content-type": MIME[extname(filePath)] ?? "application/octet-stream",
             "cache-control": "no-store",
+            // COEP require-corp pada dokumen menuntut subresource membawa
+            // CORP/COEP yang kompatibel — tanpa ini import wrapper ort-wasm
+            // gagal net::ERR_BLOCKED_BY_RESPONSE (worker tak pernah terbentuk,
+            // init session hang diam-diam).
+            "cross-origin-resource-policy": "same-origin",
+            "cross-origin-embedder-policy": "require-corp",
           });
           res.end(body);
         } catch {
@@ -128,15 +134,14 @@ export default defineConfig({
   server: {
     port: 5177,
     strictPort: true,
-    // NOTE: COOP/COEP (crossOriginIsolated) enables SharedArrayBuffer for
-    // onnxruntime-web's threaded wasm, but the threaded build hangs during
-    // multi-worker session init under the Vite dev server, and the detached-
-    // ArrayBuffer issue is fixed in Rust by pre-growing the heap (see
-    // whisper-spike transcribe). Kept off for simplicity.
-    // headers: {
-    //   "Cross-Origin-Opener-Policy": "same-origin",
-    //   "Cross-Origin-Embedder-Policy": "require-corp",
-    // },
+    // COOP/COEP → crossOriginIsolated → SharedArrayBuffer → ort-web threaded
+    // wasm (intra-op thread pool). The old "threaded build hangs" note is
+    // obsolete: the detached-ArrayBuffer hang is fixed in Rust by pre-growing
+    // the heap; multi-worker init verified stable under the dev server.
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
   },
   build: {
     outDir: fileURLToPath(new URL("./studio/dist/", import.meta.url)),

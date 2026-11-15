@@ -27,33 +27,36 @@ mod tensor;
 mod util;
 
 pub use self::{
-	session::sync_outputs,
-	tensor::{ImageFormat, ImageNorm, ImageTensorLayout, SyncDirection, TensorFromImage, TensorFromImageOptions, TensorFromUrlOptions, ValueExt}
+    session::sync_outputs,
+    tensor::{
+        ImageFormat, ImageNorm, ImageTensorLayout, SyncDirection, TensorFromImage,
+        TensorFromImageOptions, TensorFromUrlOptions, ValueExt,
+    },
 };
 
 pub type Result<T, E = Error> = core::result::Result<T, E>;
 
 #[derive(Debug, Clone)]
 pub struct Error {
-	msg: String
+    msg: String,
 }
 
 impl Error {
-	pub(crate) fn new(msg: impl Into<String>) -> Self {
-		Self { msg: msg.into() }
-	}
+    pub(crate) fn new(msg: impl Into<String>) -> Self {
+        Self { msg: msg.into() }
+    }
 }
 
 impl From<JsValue> for Error {
-	fn from(value: JsValue) -> Self {
-		Self::new(value_to_string(&value))
-	}
+    fn from(value: JsValue) -> Self {
+        Self::new(value_to_string(&value))
+    }
 }
 
 impl fmt::Display for Error {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		self.msg.fmt(f)
-	}
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.msg.fmt(f)
+    }
 }
 
 impl core::error::Error for Error {}
@@ -106,96 +109,99 @@ pub const FEATURE_WEBNN: u8 = FEATURE_WEBGPU;
 /// }
 /// ```
 pub async fn api<L: Loadable>(config: L) -> Result<ort_sys::OrtApi> {
-	let (features, dist) = config.into_features_and_dist()?;
-	binding::init_runtime(features, dist).await?;
+    let (features, dist) = config.into_features_and_dist()?;
+    binding::init_runtime(features, dist).await?;
 
-	Ok(self::api::api())
+    Ok(self::api::api())
 }
 
 pub trait Loadable {
-	#[doc(hidden)]
-	fn into_features_and_dist(self) -> Result<(u8, JsValue)>;
+    #[doc(hidden)]
+    fn into_features_and_dist(self) -> Result<(u8, JsValue)>;
 }
 
 impl Loadable for u8 {
-	fn into_features_and_dist(self) -> Result<(u8, JsValue)> {
-		Ok((self, JsValue::null()))
-	}
+    fn into_features_and_dist(self) -> Result<(u8, JsValue)> {
+        Ok((self, JsValue::null()))
+    }
 }
 
 impl Loadable for Dist {
-	fn into_features_and_dist(self) -> Result<(u8, JsValue)> {
-		Ok((0, serde_wasm_bindgen::to_value(&self).map_err(|e| Error::new(e.to_string()))?))
-	}
+    fn into_features_and_dist(self) -> Result<(u8, JsValue)> {
+        Ok((
+            0,
+            serde_wasm_bindgen::to_value(&self).map_err(|e| Error::new(e.to_string()))?,
+        ))
+    }
 }
 
 #[derive(Default, Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Integrities {
-	main: Option<String>,
-	wrapper: Option<String>,
-	binary: Option<String>
+    main: Option<String>,
+    wrapper: Option<String>,
+    binary: Option<String>,
 }
 
 impl Integrities {
-	/// Set the SHA-384 SRI hash for the main (entrypoint) script.
-	pub fn set_main(&mut self, hash: impl Into<String>) {
-		self.main = Some(hash.into());
-	}
+    /// Set the SHA-384 SRI hash for the main (entrypoint) script.
+    pub fn set_main(&mut self, hash: impl Into<String>) {
+        self.main = Some(hash.into());
+    }
 
-	/// Set the SHA-384 SRI hash for the Emscripten wrapper script.
-	pub fn set_wrapper(&mut self, hash: impl Into<String>) {
-		self.wrapper = Some(hash.into());
-	}
+    /// Set the SHA-384 SRI hash for the Emscripten wrapper script.
+    pub fn set_wrapper(&mut self, hash: impl Into<String>) {
+        self.wrapper = Some(hash.into());
+    }
 
-	/// Set the SHA-384 SRI hash for the WASM binary.
-	pub fn set_binary(&mut self, hash: impl Into<String>) {
-		self.binary = Some(hash.into());
-	}
+    /// Set the SHA-384 SRI hash for the WASM binary.
+    pub fn set_binary(&mut self, hash: impl Into<String>) {
+        self.binary = Some(hash.into());
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Dist {
-	base_url: String,
-	script_name: String,
-	binary_name: Option<String>,
-	wrapper_name: Option<String>,
-	integrities: Integrities
+    base_url: String,
+    script_name: String,
+    binary_name: Option<String>,
+    wrapper_name: Option<String>,
+    integrities: Integrities,
 }
 
 impl Dist {
-	pub fn new(base_url: impl Into<String>) -> Self {
-		Self {
-			base_url: base_url.into(),
-			script_name: "ort.wasm.min.js".to_string(),
-			binary_name: None,
-			wrapper_name: None,
-			integrities: Integrities::default()
-		}
-	}
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            script_name: "ort.wasm.min.js".to_string(),
+            binary_name: None,
+            wrapper_name: None,
+            integrities: Integrities::default(),
+        }
+    }
 
-	/// Configures the name of the entrypoint script file; defaults to `"ort.wasm.min.js"`.
-	pub fn with_script_name(mut self, name: impl Into<String>) -> Self {
-		self.script_name = name.into();
-		self
-	}
+    /// Configures the name of the entrypoint script file; defaults to `"ort.wasm.min.js"`.
+    pub fn with_script_name(mut self, name: impl Into<String>) -> Self {
+        self.script_name = name.into();
+        self
+    }
 
-	/// Enables preloading the WASM binary loaded by the entrypoint script.
-	pub fn with_binary_name(mut self, name: impl Into<String>) -> Self {
-		self.binary_name = Some(name.into());
-		self
-	}
+    /// Enables preloading the WASM binary loaded by the entrypoint script.
+    pub fn with_binary_name(mut self, name: impl Into<String>) -> Self {
+        self.binary_name = Some(name.into());
+        self
+    }
 
-	/// Configures the name of the Emscripten wrapper script preloaded along with the WASM binary, if preloading is
-	/// enabled. Defaults to the binary name with the `.wasm` extension replaced with `.mjs`.
-	pub fn with_wrapper_name(mut self, name: impl Into<String>) -> Self {
-		self.wrapper_name = Some(name.into());
-		self
-	}
+    /// Configures the name of the Emscripten wrapper script preloaded along with the WASM binary, if preloading is
+    /// enabled. Defaults to the binary name with the `.wasm` extension replaced with `.mjs`.
+    pub fn with_wrapper_name(mut self, name: impl Into<String>) -> Self {
+        self.wrapper_name = Some(name.into());
+        self
+    }
 
-	/// Modify Subresource Integrity (SRI) hashes.
-	pub fn integrities(&mut self) -> &mut Integrities {
-		&mut self.integrities
-	}
+    /// Modify Subresource Integrity (SRI) hashes.
+    pub fn integrities(&mut self) -> &mut Integrities {
+        &mut self.integrities
+    }
 }

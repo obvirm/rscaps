@@ -7,8 +7,16 @@ use std::collections::HashMap;
 
 /// Ids at/above this are "added tokens": 50257.. are specials and timestamps.
 const ADDED_TOKEN_START: usize = 50257;
-/// First timestamp token id; token T maps to (T - TIMESTAMP_BEGIN) * 0.02 s.
-pub const TIMESTAMP_BEGIN: i64 = 50364;
+/// First timestamp token id — set per vocab variant via set_ts_begin()
+/// (v3 = 50365, klasik = 50364; see lib.rs VocabSpec).
+static TS_BEGIN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(50365);
+pub fn set_ts_begin(v: i64) {
+    TS_BEGIN.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+#[inline]
+pub fn ts_begin() -> i64 {
+    TS_BEGIN.load(std::sync::atomic::Ordering::Relaxed)
+}
 /// Number of timestamp tokens (0.00 s .. 30.00 s inclusive at 0.02 s steps).
 pub const TIMESTAMP_COUNT: i64 = 1501;
 
@@ -95,12 +103,13 @@ impl WhisperTokenizer {
 
 #[inline]
 pub fn is_timestamp(id: i64) -> bool {
-    id >= TIMESTAMP_BEGIN && id < TIMESTAMP_BEGIN + TIMESTAMP_COUNT
+    let b = ts_begin();
+    id >= b && id < b + TIMESTAMP_COUNT
 }
 
 #[inline]
 pub fn timestamp_seconds(id: i64) -> f32 {
-    (id - TIMESTAMP_BEGIN) as f32 * 0.02
+    (id - ts_begin()) as f32 * 0.02
 }
 
 /// Special-token ids we care about for building prompts / stopping.
