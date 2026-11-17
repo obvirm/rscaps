@@ -11,11 +11,7 @@ crate-type = ["cdylib", "rlib"]
 ort = { version = "=2.0.0-rc.13", default-features = false, features = [
     "std",
     "ndarray",
-    # api-22+ enables Outlet::make_value_info → SetSymbolicDimensions, which
-    # ort-web does not implement (falls to stub "Unimplemented" → panic).
-    # ort-web and ort-candle both only require api-17.
     "api-17",
-    "alternative-backend",
 ] }
 ndarray = "0.17"
 wasm-bindgen = "0.2"
@@ -29,9 +25,19 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 # wasm32-safe). Used to flag degenerate repetitive attempts (ratio > 2.4).
 miniz_oxide = "0.8"
 
-# Native/desktop backend: pure Rust (candle), proven working with whisper-tiny.
+# Native/desktop backend: ORT penuh (onnxruntime prebuilt) — runtime SAMA
+# dengan jalur web (quants + opt-level + graph identik). candle-onnx
+# (ort-candle) TIDAK dipakai: fp16 graph menghasilkan decode tak sehat
+# (instant-EOS/garbage di audio yang di ORT sempurna) dan ops int8/q4
+# (DynamicQuantizeLinear/MatMulInteger/MatMulNBits) ditolak (uji 2026-11-15).
+# ort-candle dulu "proven tiny" hanya untuk smoke ONNX fp32.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-ort-candle = "0.4.1"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "tls-rustls",
+] }
 
 # Browser backend: bridges to onnxruntime-web (separate Emscripten wasm module).
 # ort-candle/ort-tract do NOT compile on wasm32 (ort-sys declares async
@@ -39,6 +45,11 @@ ort-candle = "0.4.1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ort-web = "0.3.0"
 wasm-bindgen-futures = "0.4"
+# ort-web backend untuk wasm: jalur ort rc.13 memerlukan alternative-backend.
+[target.'cfg(target_arch = "wasm32")'.dependencies.ort]
+version = "=2.0.0-rc.13"
+default-features = false
+features = ["alternative-backend"]
 web-sys = { version = "0.3", features = ["console"] }
 
 [features]

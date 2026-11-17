@@ -1,0 +1,8 @@
+[package]
+name = "transcribe-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+whisper-spike = { path = "../whisper-spike" }
