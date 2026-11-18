@@ -59,3 +59,5 @@ default = []
 gpu-directml = ["ort/directml"]
 # Native CUDA EP (NVIDIA) — prototipe GPU.
 gpu-cuda = ["ort/cuda"]
+# Native WebGPU EP dengan backend Dawn Vulkan — prototipe Vulkan.
+gpu-webgpu = ["ort/webgpu"]

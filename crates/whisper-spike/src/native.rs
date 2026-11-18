@@ -229,6 +229,8 @@ fn gpu_mode() -> &'static str {
         Ok("full") => "full",
         Ok("cuda") => "cuda",
         Ok("cuda-encoder") => "cuda-encoder",
+        Ok("vulkan") => "vulkan",
+        Ok("vulkan-encoder") => "vulkan-encoder",
         _ => "off",
     }
 }
@@ -245,6 +247,13 @@ fn native_builder(
     #[cfg(feature = "gpu-cuda")]
     if ep == "cuda" || ep == "cuda-encoder" {
         b = b.with_execution_providers(&[ort::execution_providers::CUDA::default().into()])?;
+    }
+    #[cfg(feature = "gpu-webgpu")]
+    if ep == "vulkan" || ep == "vulkan-encoder" {
+        use ort::execution_providers::webgpu::{DawnBackendType, WebGPU};
+        b = b.with_execution_providers(&[WebGPU::default()
+            .with_dawn_backend_type(DawnBackendType::Vulkan)
+            .into()])?;
     }
     Ok(b)
 }
@@ -278,8 +287,15 @@ impl NativeEngine {
         } else {
             dir.join("decoder_model_merged.ext.onnx")
         };
-        let decoder = native_builder(level, if mode == "full" || mode == "cuda" { mode } else { "off" })?
-            .commit_from_file(dec_file)?;
+        let decoder = native_builder(
+            level,
+            if mode == "full" || mode == "cuda" || mode == "vulkan" {
+                mode
+            } else {
+                "off"
+            },
+        )?
+        .commit_from_file(dec_file)?;
         let tok_json = std::fs::read_to_string(dir.join("tokenizer.json"))?;
         let tokenizer = WhisperTokenizer::from_json(&tok_json)?;
         Ok(Self {
