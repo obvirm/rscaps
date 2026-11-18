@@ -283,6 +283,94 @@ struct NativeTemplate {
     gallery_order: u32,
 }
 
+// ===== Transkrip native (engine ORT penuh — BUKAN WASM) =====
+
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+/// Progress transkrip per run_id: (fraction 0..1, stage).
+static TRANSCRIBE_PROG: LazyLock<Mutex<HashMap<String, (f64, String)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn set_prog(run_id: &str, frac: f64, stage: &str) {
+    if let Ok(mut m) = TRANSCRIBE_PROG.lock() {
+        m.insert(run_id.to_string(), (frac, stage.to_string()));
+    }
+}
+
+/// Poll progress dari frontend (invoke per ~500 ms).
+#[tauri::command]
+fn transcribe_native_progress(run_id: String) -> (f64, String) {
+    TRANSCRIBE_PROG
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&run_id).cloned())
+        .unwrap_or((0.0, "engine".to_string()))
+}
+
+#[tauri::command]
+async fn transcribe_native(
+    path: String,
+    model: String,
+    quant: String,
+    lang: String,
+    run_id: String,
+    ffmpeg_dir: Option<String>,
+) -> Result<serde_json::Value, String> {
+    // ffmpeg: eksplisit bila diberi, else PATH (tool_bin punya fallback bundel).
+    let ff = rscaps_cli::tool_bin("ffmpeg", ffmpeg_dir.as_deref().map(Path::new)).ok();
+    let ff2 = ff.clone();
+    let handle = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        set_prog(&run_id, 0.05, "audio");
+        let samples = whisper_spike::native::load_audio(Path::new(&path), ff2.as_deref())
+            .map_err(|e| format!("audio: {e}"))?;
+        set_prog(&run_id, 0.12, "audio");
+
+        // models dir: cwd → exe dir → ancestor exe (target/release/... → repo/models).
+        let models_dir = {
+            let cwd = std::path::PathBuf::from("models");
+            if cwd.exists() {
+                cwd
+            } else if let Ok(exe) = std::env::current_exe() {
+                let exe_dir = exe.parent().map(|p| p.join("models"));
+                let anc = exe
+                    .ancestors()
+                    .find_map(|a| {
+                        let p = a.join("models");
+                        p.join(format!("whisper-{model}-q8")).is_dir().then_some(p)
+                    });
+                exe_dir
+                    .filter(|p| p.exists())
+                    .or(anc)
+                    .unwrap_or(cwd)
+            } else {
+                cwd
+            }
+        };
+        let dir = models_dir.join(format!("whisper-{model}-{quant}"));
+        set_prog(&run_id, 0.2, "model");
+        let mut engine = whisper_spike::native::NativeEngine::load(&model, &dir, &quant)
+            .map_err(|e| format!("model {dir:?}: {e}"))?;
+        set_prog(&run_id, 0.4, "transcribe");
+
+        let run_id2 = run_id.clone();
+        let (segments, text) = engine
+            .transcribe_windows(&samples, &lang, &mut |f, stage| {
+                set_prog(&run_id2, f, stage);
+            })
+            .map_err(|e| format!("transkripsi: {e}"))?;
+
+        let segs: Vec<serde_json::Value> = segments
+            .iter()
+            .map(|s| serde_json::json!({"start": s.start, "end": s.end, "text": s.text}))
+            .collect();
+        Ok(serde_json::json!({ "text": text, "segments": segs }))
+    });
+    handle
+        .await
+        .map_err(|e| format!("join: {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -306,6 +394,8 @@ pub fn run() {
             native_render_video,
             native_list_templates,
             native_render_preview_svg,
+            transcribe_native,
+            transcribe_native_progress,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");

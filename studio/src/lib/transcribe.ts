@@ -1,6 +1,7 @@
 import { decodeAudioTo16kMono } from "./audio";
 import type { WhisperModel, WhisperQuant } from "./types";
 import { langToTokenId, DEFAULT_QUANT } from "./types";
+import { invoke, isTauri } from "./tauri";
 
 export interface TranscribeSegment {
   start: number; // seconds
@@ -413,6 +414,56 @@ async function loadWhisper(
 }
 
 /**
+ * Jalur shell desktop: engine NATIVE (Rust, ORT penuh). Blob media ditulis
+ * chunked ke file temp (pattern save_export), lalu command `transcribe_native`
+ * men-decode audio (ffmpeg) + transkrip (window 30s + rescue) — progress di-
+ * poll dari state Rust tiap 500 ms.
+ */
+async function transcribeNative(
+  blob: Blob,
+  model: WhisperModel,
+  quant: WhisperQuant,
+  language: string,
+  onProgress: ProgressFn,
+): Promise<TranscribeResult> {
+  onProgress(0.02, "audio");
+  const tmpDir = await invoke<string>("native_get_temp_dir");
+  const ext = (blob.name?.match(/\.([a-z0-9]{1,5})$/i)?.[1] ?? "mp4").toLowerCase();
+  const path = `${tmpDir}\\rscaps-transcribe-${Date.now()}.${ext}`;
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const CHUNK = 4 * 1024 * 1024;
+  for (let off = 0; off < buf.length; off += CHUNK) {
+    const slice = buf.subarray(off, Math.min(off + CHUNK, buf.length));
+    if (off === 0) await invoke("native_write_file", { path, data: Array.from(slice) });
+    else await invoke("save_export_append", { path, data: Array.from(slice) });
+  }
+
+  const runId = `t${Date.now()}`;
+  const poll = setInterval(() => {
+    invoke<[number, string]>("transcribe_native_progress", { runId })
+      .then(([f, stage]) => {
+        if (f > 0) onProgress(Math.min(f, 0.99) as number, stage as TranscribeStage);
+      })
+      .catch(() => {});
+  }, 500);
+
+  try {
+    onProgress(0.05, "audio");
+    const result = await invoke<{ text: string; segments: { start: number; end: number; text: string }[] }>(
+      "transcribe_native",
+      { path, model, quant, lang: language, runId, ffmpegDir: null },
+    );
+    onProgress(1, "done");
+    const segments: TranscribeSegment[] = result.segments
+      .map((s) => ({ start: s.start, end: s.end, text: s.text.trim() }))
+      .filter((s) => s.text);
+    return { segments, text: result.text.trim() };
+  } finally {
+    clearInterval(poll);
+  }
+}
+
+/**
  * Transcribe a media blob (audio or video container). Decodes to mono 16 kHz,
  * then runs the whisper engine in 30 s windows, offsetting each window's
  * timestamps back to the absolute timeline and concatenating the results.
@@ -428,6 +479,12 @@ export async function transcribeBlob(
     throw new Error(
       `model "${model}" is not supported by this engine build yet (supported: ${[...SUPPORTED_MODELS].join(", ")}).`,
     );
+  }
+  // Shell desktop (Tauri): transkrip = engine NATIVE (ORT penuh) di Rust,
+  // BUKAN wasm. Audio ditulis ke temp file → command transcribe_native
+  // (ffmpeg decode + window 30s + rescue di Rust) → JSON sama skema.
+  if (isTauri()) {
+    return transcribeNative(blob, model, quant, language, onProgress);
   }
   const mod = await loadWhisper(model, quant, onProgress);
 

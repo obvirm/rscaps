@@ -23,6 +23,126 @@ fn trace_enabled() -> bool {
     std::env::var("RSCAPS_NATIVE_TRACE").is_ok()
 }
 
+/// Segmen absolut (detik) hasil transkrip satu file audio.
+pub struct NativeSegment {
+    pub start: f32,
+    pub end: f32,
+    pub text: String,
+}
+
+/// Baca audio apapun → mono 16 kHz f32. WAV PCM16/f32 16k mono dibaca
+/// langsung; format lain didekode via ffmpeg (biner eksplisit bila diberi,
+/// else "ffmpeg" di PATH) ke WAV.
+pub fn load_audio(path: &Path, ffmpeg_bin: Option<&Path>) -> Result<Vec<f32>, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    if let Some(f) = parse_wav(&bytes) {
+        return Ok(f);
+    }
+    let tmp = std::env::temp_dir().join(format!("rscaps-native-{}.wav", std::process::id()));
+    let status = std::process::Command::new(
+        ffmpeg_bin.map(Path::to_path_buf).as_deref().unwrap_or(Path::new("ffmpeg")),
+    )
+    .args([
+        "-y",
+        "-i",
+        path.to_str().ok_or("path audio")?,
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        tmp.to_str().unwrap(),
+    ])
+    .output()
+    .map_err(|e| format!("ffmpeg tidak ditemukan/erro: {e}"))?;
+    if !status.status.success() {
+        return Err(format!(
+            "ffmpeg gagal: {}",
+            String::from_utf8_lossy(&status.stderr).chars().take(300).collect::<String>()
+        ));
+    }
+    let b = std::fs::read(&tmp).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&tmp);
+    parse_wav(&b).ok_or_else(|| "WAV hasil ffmpeg tak terbaca".into())
+}
+
+fn parse_wav(b: &[u8]) -> Option<Vec<f32>> {
+    if b.len() < 12 || &b[0..4] != b"RIFF" || &b[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut i = 12;
+    let (mut fmt, mut data): (Option<(u16, u16, u32, u16)>, &[u8]) = (None, &[]);
+    while i + 8 <= b.len() {
+        let tag = &b[i..i + 4];
+        let size = u32::from_le_bytes([b[i+4], b[i+5], b[i+6], b[i+7]]) as usize;
+        let body = &b[i + 8..(i + 8 + size).min(b.len())];
+        if tag == b"fmt " && body.len() >= 16 {
+            fmt = Some((
+                u16::from_le_bytes([body[0], body[1]]),
+                u16::from_le_bytes([body[2], body[3]]),
+                u32::from_le_bytes([body[4], body[5], body[6], body[7]]),
+                u16::from_le_bytes([body[14], body[15]]),
+            ));
+        } else if tag == b"data" {
+            data = body;
+        }
+        i += 8 + size + (size & 1);
+    }
+    let (_fmt_tag, channels, rate, bits) = fmt?;
+    if channels != 1 || rate != 16000 {
+        return None;
+    }
+    Some(match bits {
+        16 => data
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+            .collect(),
+        32 => data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+        _ => return None,
+    })
+}
+
+/// VAD-lite: puncak RMS per frame 100 ms > 0.01 (sama dengan hasSpeechEnergy
+/// di transcribe.ts).
+fn has_speech_energy(samples: &[f32]) -> bool {
+    let frame = 1600; // 100 ms @ 16 kHz
+    let mut peak = 0.0f32;
+    let mut i = 0;
+    while i + frame <= samples.len() {
+        let sum: f32 = samples[i..i + frame].iter().map(|s| s * s).sum();
+        let rms = (sum / frame as f32).sqrt();
+        if rms > peak {
+            peak = rms;
+        }
+        i += frame;
+    }
+    peak > 0.01
+}
+
+fn word_count(text: &str) -> usize {
+    text.trim().split_whitespace().count()
+}
+
+/// Fraksi kata terbanyak (sinyal degradasi repetisi).
+fn top_word_frac(text: &str) -> f32 {
+    let mut hist: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let words = text
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .count();
+    if words == 0 {
+        return 0.0;
+    }
+    for w in text.to_lowercase().split_whitespace() {
+        *hist.entry(w.to_string()).or_default() += 1;
+    }
+    let max = hist.values().copied().max().unwrap_or(0);
+    max as f32 / words as f32
+}
+
 pub struct NativeEngine {
     pub encoder: Session,
     pub decoder: Session,
@@ -69,12 +189,19 @@ pub fn lang_token(lang: &str) -> i64 {
 }
 
 impl NativeEngine {
-    pub fn load(model: &str, dir: &Path) -> Result<Self, Box<dyn Error>> {
+    pub fn load(model: &str, dir: &Path, quant: &str) -> Result<Self, Box<dyn Error>> {
         let (layers, dec_layers, heads, d_model, n_mels, classic) = arch_table(model);
         engine::set_arch_value(layers, dec_layers, heads, 64, d_model, 51865, n_mels, classic);
         // Mapping opt-level SAMA dengan transcribe.ts (ort-web fork):
-        // fp16/q4f16 = Basic (fusion ORT #26717), lainnya = All.
-        let level = GraphOptimizationLevel::Level1;
+        // fp16/q4f16 + small|medium-q8 = Basic (fusion ORT #26717), lainnya = All.
+        let level = if quant == "fp16"
+            || quant == "q4f16"
+            || ((model == "small" || model == "medium") && quant == "q8")
+        {
+            GraphOptimizationLevel::Level1
+        } else {
+            GraphOptimizationLevel::Level3
+        };
         let encoder = Session::builder()?
             .with_optimization_level(level)?
             .commit_from_file(dir.join("encoder_model.onnx"))?;
@@ -418,5 +545,109 @@ impl NativeEngine {
             }
         });
         Ok(doc.to_string())
+    }
+
+    /// Transkrip file penuh: loop jendela 30 s + rescue slice sparse-decode
+    /// (port 1:1 dari transcribeBlob di studio/src/lib/transcribe.ts —
+    /// sumber tunggal perilaku transkrip kedua host). Mengembalikan segmen
+    /// ABSOLUT (detik) + teks gabungan.
+    pub fn transcribe_windows(
+        &mut self,
+        samples: &[f32],
+        lang: &str,
+        progress: &mut dyn FnMut(f64, &str),
+    ) -> Result<(Vec<NativeSegment>, String), Box<dyn Error>> {
+        const CHUNK_SAMPLES: usize = 30 * 16000;
+        const SAMPLE_RATE: usize = 16000;
+        let lang_id = lang_token(lang);
+        let total = samples.len();
+        if total == 0 {
+            return Ok((Vec::new(), String::new()));
+        }
+        let n_windows = total.div_ceil(CHUNK_SAMPLES);
+        let mut out: Vec<NativeSegment> = Vec::new();
+        let mut texts: Vec<String> = Vec::new();
+
+        for i in 0..n_windows {
+            let start = i * CHUNK_SAMPLES;
+            let end = (start + CHUNK_SAMPLES).min(total);
+            let chunk = &samples[start..end];
+            let offset = (start / SAMPLE_RATE) as f32;
+            let window_dur = chunk.len() as f32 / SAMPLE_RATE as f32;
+
+            progress(
+                0.4 + (i as f64) / n_windows as f64 * 0.58,
+                "transcribe",
+            );
+            let mut parsed: serde_json::Value =
+                serde_json::from_str(&self.transcribe(chunk, lang_id, true, 448)?)?;
+
+            // Rescue sparse-decode: prior akhir-audio yang percaya diri pada
+            // audio sulit → beberapa kata di banyak detik. Dekode ulang
+            // jendela dalam irisan ~4 s — jendela pendek lolos attractor —
+            // dan hanya dipakai bila hasilnya lebih kaya kata.
+            let wcount = word_count(parsed["text"].as_str().unwrap_or(""));
+            let top_frac = top_word_frac(parsed["text"].as_str().unwrap_or(""));
+            if parsed["quality"]["silent"] != serde_json::Value::Bool(true)
+                && window_dur > 8.0
+                && (wcount < (window_dur * 0.4).max(2.0) as usize || top_frac > 0.3)
+                && has_speech_energy(chunk)
+            {
+                let slice_n = chunk.len().div_ceil(4 * SAMPLE_RATE);
+                let mut slice_segments: Vec<NativeSegment> = Vec::new();
+                let mut slice_texts: Vec<String> = Vec::new();
+                for s in 0..slice_n {
+                    let s_start = s * 4 * SAMPLE_RATE;
+                    let slice = &chunk[s_start..((s_start + 4 * SAMPLE_RATE).min(chunk.len()))];
+                    if slice.len() < SAMPLE_RATE / 2 {
+                        break;
+                    }
+                    let slice_start = (s_start / SAMPLE_RATE) as f32;
+                    let raw = self.transcribe(slice, lang_id, true, 448)?;
+                    let p2: serde_json::Value = serde_json::from_str(&raw)?;
+                    for seg in p2["segments"].as_array().unwrap_or(&vec![]) {
+                        let text = seg["text"].as_str().unwrap_or("").trim().to_string();
+                        if text.is_empty() {
+                            continue;
+                        }
+                        slice_segments.push(NativeSegment {
+                            start: seg["start"].as_f64().unwrap_or(0.0) as f32 + slice_start,
+                            end: seg["end"].as_f64().unwrap_or(0.0) as f32 + slice_start,
+                            text,
+                        });
+                    }
+                    let t = p2["text"].as_str().unwrap_or("").trim();
+                    if !t.is_empty() {
+                        slice_texts.push(t.to_string());
+                    }
+                }
+                if word_count(&slice_texts.join(" ")) > wcount {
+                    parsed["text"] = serde_json::Value::String(slice_texts.join(" "));
+                    let arr: Vec<serde_json::Value> = slice_segments
+                        .iter()
+                        .map(|s| serde_json::json!({"start": s.start, "end": s.end, "text": s.text}))
+                        .collect();
+                    parsed["segments"] = serde_json::Value::Array(arr);
+                }
+            }
+
+            for seg in parsed["segments"].as_array().unwrap_or(&vec![]) {
+                let text = seg["text"].as_str().unwrap_or("").trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                out.push(NativeSegment {
+                    start: seg["start"].as_f64().unwrap_or(0.0) as f32 + offset,
+                    end: seg["end"].as_f64().unwrap_or(0.0) as f32 + offset,
+                    text,
+                });
+            }
+            let t = parsed["text"].as_str().unwrap_or("").trim();
+            if !t.is_empty() {
+                texts.push(t.to_string());
+            }
+        }
+        progress(1.0, "done");
+        Ok((out, texts.join(" ")))
     }
 }

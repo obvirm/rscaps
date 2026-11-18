@@ -26,6 +26,8 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 # Native render pipeline (CLI engines: cpu, skia, fframes + ffmpeg)
 rscaps-cli = { path = "../crates/rscaps-cli", features = ["gpu-skia"] }
+# Engine transkrip native (ORT penuh) untuk command transcribe_native
+whisper-spike = { path = "../crates/whisper-spike" }
 caption-core = { path = "../crates/caption-core" }
 # For font manifest
 caption-bridge = { path = "../crates/caption-bridge" }
@@ -39,4 +41,6 @@ tempfile = "3"
 [features]
 # Enable gpu-skia for Skia GPU renderer (requires Vulkan)
 gpu-skia = ["rscaps-cli/gpu-skia"]
+# Embed studio/dist (frontendDist) — tanpa ini cargo build = mode dev (devUrl 5177)
+custom-protocol = ["tauri/custom-protocol"]
 
