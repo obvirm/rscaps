@@ -105,6 +105,7 @@ const CHUNK_SAMPLES = 30 * SAMPLE_RATE;
 interface WhisperModule {
   default: (wasmUrl?: string) => Promise<unknown>;
   init: (distUrl?: string) => Promise<void>;
+  init_webgpu?: (distUrl?: string) => Promise<void>;
   set_arch: (
     layers: number,
     decLayers: number,
@@ -271,8 +272,9 @@ async function loadWhisper(
   model: WhisperModel,
   quant: WhisperQuant,
   onProgress: ProgressFn,
+  backend: "cpu" | "webgpu" = "cpu",
 ): Promise<WhisperModule> {
-  const key = `${model}:${quant}`;
+  const key = `${model}:${quant}:${backend}`;
   const hit = cached.get(key);
   if (hit) return hit;
   const inflight = loading.get(key);
@@ -284,8 +286,11 @@ async function loadWhisper(
     await mod.default("/wpkg/whisper_spike_bg.wasm");
     // ort-web dist self-host; jangan pakai default Rust (hardcoded port dev
     // lama) — ikuti origin halaman supaya port dev berganti pun tetap jalan.
-    await mod.init(`${location.origin}/nm/onnxruntime-web/dist/`);
-    // Thread pool: the old hard-coded numThreads=1 ("threaded build hangs")
+    if (backend === "webgpu" && mod.init_webgpu) {
+      await mod.init_webgpu(`${location.origin}/nm/onnxruntime-web/dist/`);
+    } else {
+      await mod.init(`${location.origin}/nm/onnxruntime-web/dist/`);
+    }    // Thread pool: the old hard-coded numThreads=1 ("threaded build hangs")
     // left all cores idle but one; the detached-ArrayBuffer hang behind it is
     // fixed in Rust by pre-growing the heap. Use cores-1, with __rscapsThreads
     // as the A/B escape hatch.
@@ -486,7 +491,10 @@ export async function transcribeBlob(
   if (isTauri()) {
     return transcribeNative(blob, model, quant, language, onProgress);
   }
-  const mod = await loadWhisper(model, quant, onProgress);
+  const backend = ((globalThis as { __rscapsBackend?: string }).__rscapsBackend === "webgpu"
+    ? "webgpu"
+    : "cpu") as "cpu" | "webgpu";
+  const mod = await loadWhisper(model, quant, onProgress, backend);
 
   onProgress(0.32, "audio");
   const audio = await decodeAudioTo16kMono(blob);

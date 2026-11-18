@@ -17,7 +17,7 @@ use crate::engine;
 use crate::mel;
 use crate::tokenizer::{self, WhisperTokenizer};
 
-type SV = ort::session::SessionInputValue<'static>;
+type KVTensor = ort::value::Tensor<f32>;
 
 fn trace_enabled() -> bool {
     std::env::var("RSCAPS_NATIVE_TRACE").is_ok()
@@ -188,6 +188,29 @@ pub fn lang_token(lang: &str) -> i64 {
     }
 }
 
+/// Mode GPU saat binary di-build dengan feature `gpu-directml`:
+/// off (default) = CPU semua, encoder = encoder DML + decoder CPU,
+/// full = DML di dua-duanya. Env RSCAPS_GPU_MODE untuk A/B tanpa rebuild.
+fn gpu_mode() -> &'static str {
+    match std::env::var("RSCAPS_GPU_MODE").as_deref() {
+        Ok("encoder") => "encoder",
+        Ok("full") => "full",
+        _ => "off",
+    }
+}
+
+fn native_builder(
+    level: ort::session::builder::GraphOptimizationLevel,
+    use_gpu: bool,
+) -> Result<ort::session::builder::SessionBuilder, Box<dyn Error>> {
+    let mut b = Session::builder()?.with_optimization_level(level)?;
+    #[cfg(feature = "gpu-directml")]
+    if use_gpu {
+        b = b.with_execution_providers(&[ort::execution_providers::DirectML::default().into()])?;
+    }
+    Ok(b)
+}
+
 impl NativeEngine {
     pub fn load(model: &str, dir: &Path, quant: &str) -> Result<Self, Box<dyn Error>> {
         let (layers, dec_layers, heads, d_model, n_mels, classic) = arch_table(model);
@@ -202,8 +225,8 @@ impl NativeEngine {
         } else {
             GraphOptimizationLevel::Level3
         };
-        let encoder = Session::builder()?
-            .with_optimization_level(level)?
+        let mode = gpu_mode();
+        let encoder = native_builder(level, mode != "off")?
             .commit_from_file(dir.join("encoder_model.onnx"))?;
         // Folder large-fp16 hanya menyimpan decoder versi split ext-data
         // (decoder_model_merged.ext.onnx + .ext.data) — ORT memuat data
@@ -213,9 +236,7 @@ impl NativeEngine {
         } else {
             dir.join("decoder_model_merged.ext.onnx")
         };
-        let decoder = Session::builder()?
-            .with_optimization_level(level)?
-            .commit_from_file(dec_file)?;
+        let decoder = native_builder(level, mode == "full")?.commit_from_file(dec_file)?;
         let tok_json = std::fs::read_to_string(dir.join("tokenizer.json"))?;
         let tokenizer = WhisperTokenizer::from_json(&tok_json)?;
         Ok(Self {
@@ -252,6 +273,7 @@ impl NativeEngine {
             data
         };
         let enc = Array3::from_shape_vec((1, engine::ENC_LEN, a.d_model), hidden)?;
+        let enc_value = ort::value::Tensor::from_array(enc.clone())?;
 
         let empty = || Array4::zeros((1, a.heads, 0, a.head_dim));
         let mut passes: Vec<(bool, i64, f32)> = vec![(false, lang_id, 0.0)];
@@ -270,10 +292,12 @@ impl NativeEngine {
             if pass_lang == lang_id && pass_i == passes.len() - 1 {
                 continue;
             }
-            let mut past_dec: Vec<(Array4<f32>, Array4<f32>)> =
-                (0..a.dec_layers).map(|_| (empty(), empty())).collect();
-            let mut past_enc: Vec<(Array4<f32>, Array4<f32>)> =
-                (0..a.dec_layers).map(|_| (empty(), empty())).collect();
+            let mut past_dec: Vec<(KVTensor, KVTensor)> = (0..a.dec_layers)
+                .map(|_| Ok((Value::from_array(empty())?, Value::from_array(empty())?)))
+                .collect::<Result<_, Box<dyn Error>>>()?;
+            let mut past_enc: Vec<(KVTensor, KVTensor)> = (0..a.dec_layers)
+                .map(|_| Ok((Value::from_array(empty())?, Value::from_array(empty())?)))
+                .collect::<Result<_, Box<dyn Error>>>()?;
             let ts = return_timestamps && !suppress_eos;
             let mut prompt: Vec<i64> = vec![tokenizer::SOT, pass_lang, task_id];
             if !ts {
@@ -296,12 +320,9 @@ impl NativeEngine {
                 iter += 1;
                 let ids_arr =
                     Array2::from_shape_vec((1, input_ids.len()), input_ids.clone())?;
-                let mut inputs: Vec<(String, SV)> = Vec::new();
+                let mut inputs: Vec<(String, ort::session::SessionInputValue<'_>)> = Vec::new();
                 inputs.push(("input_ids".into(), Value::from_array(ids_arr)?.into()));
-                inputs.push((
-                    "encoder_hidden_states".into(),
-                    Value::from_array(enc.clone())?.into(),
-                ));
+                inputs.push(("encoder_hidden_states".into(), enc_value.view().into()));
                 inputs.push((
                     "use_cache_branch".into(),
                     Value::from_array(Array1::from_vec(vec![use_cache]))?.into(),
@@ -309,25 +330,25 @@ impl NativeEngine {
                 for i in 0..a.dec_layers {
                     inputs.push((
                         format!("past_key_values.{i}.decoder.key"),
-                        Value::from_array(past_dec[i].0.clone())?.into(),
+                        past_dec[i].0.view().into(),
                     ));
                     inputs.push((
                         format!("past_key_values.{i}.decoder.value"),
-                        Value::from_array(past_dec[i].1.clone())?.into(),
+                        past_dec[i].1.view().into(),
                     ));
                     inputs.push((
                         format!("past_key_values.{i}.encoder.key"),
-                        Value::from_array(past_enc[i].0.clone())?.into(),
+                        past_enc[i].0.view().into(),
                     ));
                     inputs.push((
                         format!("past_key_values.{i}.encoder.value"),
-                        Value::from_array(past_enc[i].1.clone())?.into(),
+                        past_enc[i].1.view().into(),
                     ));
                 }
 
                 // Outputs diekstrak OWNED dalam block ini; SessionOutputs
                 // meminjam &mut session sampai dibuang.
-                let (lg_seq, mut logits, present_dec, present_enc) = {
+                let (lg_seq, mut logits, mut pd, mut pe) = {
                     let out = self.decoder.run(inputs)?;
                     let (lg_sh, lg) = out["logits"].try_extract_tensor::<f32>()?;
                     let seq = *lg_sh.get(1).unwrap_or(&1) as usize;
@@ -339,8 +360,8 @@ impl NativeEngine {
                         ).into());
                     }
                     let logits = lg[(seq - 1) * vocab..seq * vocab].to_vec();
-                    let mut pd: Vec<(Array4<f32>, Array4<f32>)> = Vec::new();
-                    let mut pe: Vec<(Array4<f32>, Array4<f32>)> = Vec::new();
+                    let mut pd: Vec<(KVTensor, KVTensor)> = Vec::new();
+                    let mut pe: Vec<(KVTensor, KVTensor)> = Vec::new();
                     for i in 0..a.dec_layers {
                         let (k_sh, k) = out[format!("present.{i}.decoder.key").as_str()]
                             .try_extract_tensor::<f32>()?;
@@ -356,8 +377,8 @@ impl NativeEngine {
                             .into());
                         }
                         pd.push((
-                            Array4::from_shape_vec((1, a.heads, ds, a.head_dim), k.to_vec())?,
-                            Array4::from_shape_vec((1, a.heads, ds, a.head_dim), v.to_vec())?,
+                            Value::from_array(Array4::from_shape_vec((1, a.heads, ds, a.head_dim), k.to_vec())?)?,
+                            Value::from_array(Array4::from_shape_vec((1, a.heads, ds, a.head_dim), v.to_vec())?)?,
                         ));
                         if !use_cache {
                             let (e_sh, e_k) = out[format!("present.{i}.encoder.key").as_str()]
@@ -374,8 +395,8 @@ impl NativeEngine {
                                 .into());
                             }
                             pe.push((
-                                Array4::from_shape_vec((1, a.heads, es, a.head_dim), e_k.to_vec())?,
-                                Array4::from_shape_vec((1, a.heads, es, a.head_dim), e_v.to_vec())?,
+                                Value::from_array(Array4::from_shape_vec((1, a.heads, es, a.head_dim), e_k.to_vec())?)?,
+                                Value::from_array(Array4::from_shape_vec((1, a.heads, es, a.head_dim), e_v.to_vec())?)?,
                             ));
                         }
                     }
@@ -446,9 +467,9 @@ impl NativeEngine {
                 // Advance KV cache. Decoder grows each step; encoder KV is
                 // refilled only on prefill (use_cache=false) and stays after.
                 if !use_cache {
-                    past_enc = present_enc;
+                    past_enc = std::mem::take(&mut pe);
                 }
-                past_dec = present_dec;
+                past_dec = std::mem::take(&mut pd);
 
                 if ts
                     && audio_duration > 0.0

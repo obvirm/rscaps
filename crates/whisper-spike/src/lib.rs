@@ -13,6 +13,7 @@ pub mod wasm {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use ndarray::{Array1, Array2, Array3, Array4};
+    use ort::execution_providers::WebGPU;
     use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
     use ort::session::{RunOptions, Session, SessionInputValue};
     use ort::value::Value;
@@ -473,6 +474,29 @@ pub mod wasm {
         Ok(())
     }
 
+    /// WebGPU backend prototype: memuat bundle ort.webgpu.min.js dari `dist_url`
+    /// dan mendaftarkan EP WebGPU untuk encoder/decoder. Fallback CPU sengaja
+    /// TIDAK ditambahkan supaya A/B memperlihatkan kalau graph butuh op yang
+    /// belum didukung EP ini.
+    #[wasm_bindgen]
+    pub async fn init_webgpu(dist_url: Option<String>) -> Result<(), JsValue> {
+        USE_WEBGPU.store(true, Ordering::Relaxed);
+        std::panic::set_hook(Box::new(|info| {
+            let bt = std::backtrace::Backtrace::force_capture();
+            web_sys::console::error_1(&format!("PANIC: {info}\nBT: {bt}").as_str().into());
+        }));
+        let dist = ort_web::Dist::new(
+            dist_url
+                .as_deref()
+                .unwrap_or("http://localhost:5177/nm/onnxruntime-web/dist/"),
+        )
+        .with_script_name("ort.webgpu.min.js");
+        let api = ort_web::api(dist).await.map_err(js)?;
+        ort::set_api(api);
+        ort::init().with_telemetry(false).commit();
+        Ok(())
+    }
+
     /// Select the model architecture BEFORE load_encoder/load_decoder (the
     /// decoder graph shape and mel size depend on it). Defaults to whisper-base.
     /// `layers` = encoder layer count (kept for completeness), `dec_layers` =
@@ -534,6 +558,9 @@ pub mod wasm {
         *MIN_NEW.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    // A/B backend: true bila init_webgpu() dipakai (lihat init_webgpu).
+    static USE_WEBGPU: AtomicBool = AtomicBool::new(false);
+
     fn session_builder() -> Result<SessionBuilder, JsValue> {
         let level = *OPT_LEVEL.lock().map_err(js)?;
         let g = match level {
@@ -543,10 +570,16 @@ pub mod wasm {
             3 => GraphOptimizationLevel::Level3,
             _ => GraphOptimizationLevel::All,
         };
-        Session::builder()
+        let mut builder = Session::builder()
             .map_err(js)?
             .with_optimization_level(g)
-            .map_err(js)
+            .map_err(js)?;
+        if USE_WEBGPU.load(Ordering::Relaxed) {
+            builder = builder
+                .with_execution_providers(&[WebGPU::default().into()])
+                .map_err(js)?;
+        }
+        Ok(builder)
     }
 
     /// Load the whisper encoder ONNX model into memory.
