@@ -143,10 +143,42 @@ fn top_word_frac(text: &str) -> f32 {
     max as f32 / words as f32
 }
 
+/// Cakupan waktu (detik) dari segmen hasil decode relatif terhadap durasi
+/// jendela. Decode yang terpotong/early-EOS punya coverage sangat kecil.
+fn coverage_sec(parsed: &serde_json::Value) -> f32 {
+    parsed["segments"]
+        .as_array()
+        .and_then(|a| a.iter().map(|s| s["end"].as_f64().unwrap_or(0.0)).fold(0.0f64, f64::max).into())
+        .unwrap_or(0.0) as f32
+}
+
+/// Buang ekor halu: segmen sangat pendek (<0,25 s) yang mengulang teks
+/// segmen sebelumnya (kasus "Thank you for watching / Please subscribe"
+/// berulang di ekor audio sulit). Kembalikan juga teks gabungan baru.
+fn trim_duplicate_tail(segs: &mut Vec<NativeSegment>) {
+    let tail_start = segs.len().saturating_sub(6);
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for s in &segs[tail_start..] {
+        if s.end - s.start < 0.3 {
+            *counts.entry(s.text.to_lowercase()).or_default() += 1;
+        }
+    }
+    let first_bad = (tail_start..segs.len()).find(|&i| {
+        segs[i].end - segs[i].start < 0.3
+            && counts.get(&segs[i].text.to_lowercase()).copied().unwrap_or(0) >= 2
+    });
+    if let Some(i) = first_bad {
+        segs.truncate(i);
+    }
+}
+
 pub struct NativeEngine {
     pub encoder: Session,
     pub decoder: Session,
     pub tokenizer: WhisperTokenizer,
+    model: String,
+    quant: String,
+    dir: std::path::PathBuf,
 }
 
 /// (layers, dec_layers, heads, d_model, n_mels, classic) per model —
@@ -195,24 +227,34 @@ fn gpu_mode() -> &'static str {
     match std::env::var("RSCAPS_GPU_MODE").as_deref() {
         Ok("encoder") => "encoder",
         Ok("full") => "full",
+        Ok("cuda") => "cuda",
+        Ok("cuda-encoder") => "cuda-encoder",
         _ => "off",
     }
 }
 
 fn native_builder(
     level: ort::session::builder::GraphOptimizationLevel,
-    use_gpu: bool,
+    ep: &str,
 ) -> Result<ort::session::builder::SessionBuilder, Box<dyn Error>> {
     let mut b = Session::builder()?.with_optimization_level(level)?;
     #[cfg(feature = "gpu-directml")]
-    if use_gpu {
+    if ep == "encoder" || ep == "full" {
         b = b.with_execution_providers(&[ort::execution_providers::DirectML::default().into()])?;
+    }
+    #[cfg(feature = "gpu-cuda")]
+    if ep == "cuda" || ep == "cuda-encoder" {
+        b = b.with_execution_providers(&[ort::execution_providers::CUDA::default().into()])?;
     }
     Ok(b)
 }
 
 impl NativeEngine {
     pub fn load(model: &str, dir: &Path, quant: &str) -> Result<Self, Box<dyn Error>> {
+        Self::load_mode(model, dir, quant, gpu_mode())
+    }
+
+    fn load_mode(model: &str, dir: &Path, quant: &str, mode: &str) -> Result<Self, Box<dyn Error>> {
         let (layers, dec_layers, heads, d_model, n_mels, classic) = arch_table(model);
         engine::set_arch_value(layers, dec_layers, heads, 64, d_model, 51865, n_mels, classic);
         // Mapping opt-level SAMA dengan transcribe.ts (ort-web fork):
@@ -225,8 +267,8 @@ impl NativeEngine {
         } else {
             GraphOptimizationLevel::Level3
         };
-        let mode = gpu_mode();
-        let encoder = native_builder(level, mode != "off")?
+        let mode = mode;
+        let encoder = native_builder(level, mode)?
             .commit_from_file(dir.join("encoder_model.onnx"))?;
         // Folder large-fp16 hanya menyimpan decoder versi split ext-data
         // (decoder_model_merged.ext.onnx + .ext.data) — ORT memuat data
@@ -236,13 +278,17 @@ impl NativeEngine {
         } else {
             dir.join("decoder_model_merged.ext.onnx")
         };
-        let decoder = native_builder(level, mode == "full")?.commit_from_file(dec_file)?;
+        let decoder = native_builder(level, if mode == "full" || mode == "cuda" { mode } else { "off" })?
+            .commit_from_file(dec_file)?;
         let tok_json = std::fs::read_to_string(dir.join("tokenizer.json"))?;
         let tokenizer = WhisperTokenizer::from_json(&tok_json)?;
         Ok(Self {
             encoder,
             decoder,
             tokenizer,
+            model: model.to_string(),
+            quant: quant.to_string(),
+            dir: dir.to_path_buf(),
         })
     }
 
@@ -603,6 +649,22 @@ impl NativeEngine {
             let mut parsed: serde_json::Value =
                 serde_json::from_str(&self.transcribe(chunk, lang_id, true, 448)?)?;
 
+            // GPU (khususnya encoder DML) kadang menghasilkan early-EOS: teks
+            // pendek tapi percaya diri, coverage timestamp ≈ 0. Kalau audio
+            // punya energi suara, decode ulang dengan CPU dan pakai CPU bila
+            // cakupannya lebih bagus.
+            if coverage_sec(&parsed) < window_dur * 0.5 && has_speech_energy(chunk) {
+                if let Ok(mut cpu) = NativeEngine::load_mode(&self.model, &self.dir, &self.quant, "off") {
+                    if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, 448) {
+                        if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            if coverage_sec(&p) > coverage_sec(&parsed) {
+                                parsed = p;
+                            }
+                        }
+                    }
+                }
+            }
+
             // Rescue sparse-decode: prior akhir-audio yang percaya diri pada
             // audio sulit → beberapa kata di banyak detik. Dekode ulang
             // jendela dalam irisan ~4 s — jendela pendek lolos attractor —
@@ -652,21 +714,27 @@ impl NativeEngine {
                 }
             }
 
+            let mut win_segs: Vec<NativeSegment> = Vec::new();
             for seg in parsed["segments"].as_array().unwrap_or(&vec![]) {
                 let text = seg["text"].as_str().unwrap_or("").trim().to_string();
                 if text.is_empty() {
                     continue;
                 }
-                out.push(NativeSegment {
+                win_segs.push(NativeSegment {
                     start: seg["start"].as_f64().unwrap_or(0.0) as f32 + offset,
                     end: seg["end"].as_f64().unwrap_or(0.0) as f32 + offset,
                     text,
                 });
             }
-            let t = parsed["text"].as_str().unwrap_or("").trim();
-            if !t.is_empty() {
-                texts.push(t.to_string());
-            }
+            trim_duplicate_tail(&mut win_segs);
+            texts.push(
+                win_segs
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            out.extend(win_segs);
         }
         progress(1.0, "done");
         Ok((out, texts.join(" ")))

@@ -57,3 +57,5 @@ web-sys = { version = "0.3", features = ["console"] }
 default = []
 # Native DirectML EP (Windows, prebuilt ort-sys +directml) — prototipe GPU.
 gpu-directml = ["ort/directml"]
+# Native CUDA EP (NVIDIA) — prototipe GPU.
+gpu-cuda = ["ort/cuda"]
