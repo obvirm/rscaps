@@ -4173,6 +4173,7 @@ dependencies = [
  "tauri-plugin-log",
  "tempfile",
  "tokio",
+ "whisper-spike",
 ]
 
 [[package]]
@@ -5739,6 +5740,7 @@ dependencies = [
 name = "transcribe-cli"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "whisper-spike",
 ]
 
