@@ -286,6 +286,15 @@ fn native_builder(
         if graph {
             cuda = cuda.with_cuda_graph(true);
         }
+        if std::env::var("RSCAPS_ATTN").is_ok() {
+            use ort::ep::cuda::AttentionBackend;
+            cuda = cuda.with_attention_backend(
+                AttentionBackend::FLASH_ATTENTION
+                    | AttentionBackend::EFFICIENT_ATTENTION
+                    | AttentionBackend::CUDNN_FLASH_ATTENTION
+                    | AttentionBackend::MATH,
+            );
+        }
         b = b.with_execution_providers(&[cuda.into()])?;
     }
     #[cfg(feature = "gpu-webgpu")]
