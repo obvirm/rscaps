@@ -17,7 +17,7 @@ use crate::engine;
 use crate::mel;
 use crate::tokenizer::{self, WhisperTokenizer};
 
-type KVTensor = ort::value::Tensor<f32>;
+type KVTensor = ort::value::DynValue;
 
 fn trace_enabled() -> bool {
     std::env::var("RSCAPS_NATIVE_TRACE").is_ok()
@@ -343,7 +343,10 @@ impl NativeEngine {
         let enc = Array3::from_shape_vec((1, engine::ENC_LEN, a.d_model), hidden)?;
         let enc_value = ort::value::Tensor::from_array(enc.clone())?;
 
-        let empty = || Array4::zeros((1, a.heads, 0, a.head_dim));
+        let empty = || -> Array4<f32> { Array4::zeros((1, a.heads, 0, a.head_dim)) };
+        let empty_kv = || -> Result<KVTensor, Box<dyn Error>> {
+            Ok(Value::from_array(empty())?.into_dyn())
+        };
         let mut passes: Vec<(bool, i64, f32)> = vec![(false, lang_id, 0.0)];
         for &t in engine::TEMPERATURE_LADDER {
             passes.push((false, lang_id, t));
@@ -361,10 +364,10 @@ impl NativeEngine {
                 continue;
             }
             let mut past_dec: Vec<(KVTensor, KVTensor)> = (0..a.dec_layers)
-                .map(|_| Ok((Value::from_array(empty())?, Value::from_array(empty())?)))
+                .map(|_| Ok((empty_kv()?, empty_kv()?)))
                 .collect::<Result<_, Box<dyn Error>>>()?;
             let mut past_enc: Vec<(KVTensor, KVTensor)> = (0..a.dec_layers)
-                .map(|_| Ok((Value::from_array(empty())?, Value::from_array(empty())?)))
+                .map(|_| Ok((empty_kv()?, empty_kv()?)))
                 .collect::<Result<_, Box<dyn Error>>>()?;
             let ts = return_timestamps && !suppress_eos;
             let mut prompt: Vec<i64> = vec![tokenizer::SOT, pass_lang, task_id];
@@ -417,7 +420,7 @@ impl NativeEngine {
                 // Outputs diekstrak OWNED dalam block ini; SessionOutputs
                 // meminjam &mut session sampai dibuang.
                 let (lg_seq, mut logits, mut pd, mut pe) = {
-                    let out = self.decoder.run(inputs)?;
+                    let mut out = self.decoder.run(inputs)?;
                     let (lg_sh, lg) = out["logits"].try_extract_tensor::<f32>()?;
                     let seq = *lg_sh.get(1).unwrap_or(&1) as usize;
                     let vocab = *lg_sh.get(2).unwrap_or(&1) as usize;
@@ -431,41 +434,43 @@ impl NativeEngine {
                     let mut pd: Vec<(KVTensor, KVTensor)> = Vec::new();
                     let mut pe: Vec<(KVTensor, KVTensor)> = Vec::new();
                     for i in 0..a.dec_layers {
-                        let (k_sh, k) = out[format!("present.{i}.decoder.key").as_str()]
-                            .try_extract_tensor::<f32>()?;
-                        let (_, v) = out[format!("present.{i}.decoder.value").as_str()]
-                            .try_extract_tensor::<f32>()?;
-                        let ds = *k_sh.get(2).unwrap_or(&1) as usize;
+                        // Ambil tensor KV sebagai MILIK (remove), jangan
+                        // try_extract_tensor → to_vec → from_array: itu
+                        // memaksa device→host→device copy tiap step dan
+                        // membuat GPU idle di antara kernel.
+                        let k = out.remove(format!("present.{i}.decoder.key")).ok_or("missing dec K")?;
+                        let v = out.remove(format!("present.{i}.decoder.value")).ok_or("missing dec V")?;
+                        let ds = k.shape().get(2).copied().unwrap_or(1) as usize;
                         let expected = a.heads * ds * a.head_dim;
-                        if k.len() != expected || v.len() != expected {
+                        if k.shape().iter().map(|&d| d as usize).product::<usize>() != expected
+                            || v.shape().iter().map(|&d| d as usize).product::<usize>() != expected
+                        {
                             return Err(format!(
-                                "present.{i}.decoder shape: {k_sh:?} k_len={} expected={expected}",
-                                k.len()
+                                "present.{i}.decoder shape: {:?} expected={expected}",
+                                k.shape()
                             )
                             .into());
                         }
-                        pd.push((
-                            Value::from_array(Array4::from_shape_vec((1, a.heads, ds, a.head_dim), k.to_vec())?)?,
-                            Value::from_array(Array4::from_shape_vec((1, a.heads, ds, a.head_dim), v.to_vec())?)?,
-                        ));
+                        pd.push((k, v));
                         if !use_cache {
-                            let (e_sh, e_k) = out[format!("present.{i}.encoder.key").as_str()]
-                                .try_extract_tensor::<f32>()?;
-                            let (_, e_v) = out[format!("present.{i}.encoder.value").as_str()]
-                                .try_extract_tensor::<f32>()?;
-                            let es = *e_sh.get(2).unwrap_or(&1) as usize;
+                            let e_k = out
+                                .remove(format!("present.{i}.encoder.key"))
+                                .ok_or("missing enc K")?;
+                            let e_v = out
+                                .remove(format!("present.{i}.encoder.value"))
+                                .ok_or("missing enc V")?;
+                            let es = e_k.shape().get(2).copied().unwrap_or(1) as usize;
                             let expected_e = a.heads * es * a.head_dim;
-                            if e_k.len() != expected_e || e_v.len() != expected_e {
+                            if e_k.shape().iter().map(|&d| d as usize).product::<usize>() != expected_e
+                                || e_v.shape().iter().map(|&d| d as usize).product::<usize>() != expected_e
+                            {
                                 return Err(format!(
-                                    "present.{i}.encoder shape: {e_sh:?} k_len={} expected={expected_e}",
-                                    e_k.len()
+                                    "present.{i}.encoder shape: {:?} expected={expected_e}",
+                                    e_k.shape()
                                 )
                                 .into());
                             }
-                            pe.push((
-                                Value::from_array(Array4::from_shape_vec((1, a.heads, es, a.head_dim), e_k.to_vec())?)?,
-                                Value::from_array(Array4::from_shape_vec((1, a.heads, es, a.head_dim), e_v.to_vec())?)?,
-                            ));
+                            pe.push((e_k, e_v));
                         }
                     }
                     drop(out);
