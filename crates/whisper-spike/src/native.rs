@@ -836,15 +836,17 @@ impl NativeEngine {
         for chunk in chunks {
             let features = mel::log_mel(chunk, a.n_mels);
             let mel_arr = Array3::from_shape_vec((1, a.n_mels, mel::N_FRAMES), features)?;
-            let input_name = self.encoder.inputs()[0].name().to_string();
-            let value = Value::from_array(mel_arr)?;
-            let out = self.encoder.run(ort::inputs![input_name.as_str() => value])?;
-            let (_, hid) = out["last_hidden_state"].try_extract_tensor::<f32>()?;
-            hiddens.extend_from_slice(hid);
+            let enc_name = self.encoder.inputs()[0].name().to_string();
+            let out = self.encoder.run(ort::inputs![enc_name.as_str() => Value::from_array(mel_arr)?])?;
+            let (_, hidden) = out["last_hidden_state"].try_extract_tensor::<f32>()?;
+            hiddens.extend_from_slice(hidden);
             durations.push(chunk.len() as f32 / 16000.0);
         }
-        let enc = Array3::from_shape_vec((n, engine::ENC_LEN, a.d_model), hiddens)?;
-        let enc_value = ort::value::Tensor::from_array(enc.clone())?.into_dyn();
+        let enc_value: KVTensor = Value::from_array(Array3::from_shape_vec(
+            (n, engine::ENC_LEN, a.d_model),
+            hiddens,
+        )?)?
+        .into_dyn();
 
         let prompt = vec![tokenizer::SOT, lang_id, task_id];
         let mut input_ids: Vec<i64> = (0..n).flat_map(|_| prompt.iter().copied()).collect();
