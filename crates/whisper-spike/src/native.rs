@@ -225,6 +225,10 @@ pub fn lang_token(lang: &str) -> i64 {
 /// off (default) = CPU semua, encoder = encoder DML + decoder CPU,
 /// full = DML di dua-duanya. Env RSCAPS_GPU_MODE untuk A/B tanpa rebuild.
 fn gpu_mode() -> &'static str {
+    #[cfg(feature = "gpu-directml")]
+    if std::env::var("RSCAPS_GPU_BOOST").as_deref() == Ok("1") {
+        return "full";
+    }
     if let Ok(v) = std::env::var("RSCAPS_GPU_MODE") {
         return match v.as_str() {
             "encoder" => "encoder",
@@ -778,6 +782,45 @@ impl NativeEngine {
                     for (k, result) in out.into_inner().unwrap().into_iter().enumerate() {
                         for (j, row) in result.ok_or("batch pool gagal")??.into_iter().enumerate() {
                             slots[group_start + k + j * pool] = Some(row);
+                        }
+                    }
+                }
+            }
+            // GPU boost (DML) package quality guard: bila teks sangat
+            // repetitif (halu pengulangan), hitung ulang seluruh jendela
+            // dengan EP CUDA yang bersih. Audio normal tetap di DML.
+            if gpu_mode() == "full"
+                && std::env::var("RSCAPS_GPU_BOOST").as_deref() == Ok("1")
+            {
+                let mut counts: std::collections::HashMap<String, usize> =
+                    std::collections::HashMap::new();
+                for (_, t) in slots.iter().flatten() {
+                    for seg in t.split_whitespace().collect::<Vec<_>>().windows(4) {
+                        *counts.entry(seg.join(" ")).or_default() += 1;
+                    }
+                }
+                let repetitive = counts.values().copied().max().unwrap_or(0) >= 4;
+                if repetitive {
+                    if let Ok(mut cuda) =
+                        NativeEngine::load_mode(&self.model, &self.dir, &self.quant, "cuda")
+                    {
+                        let mut ok = true;
+                        for gs in (0..n_slice).step_by(max_batch) {
+                            let ge = (gs + max_batch).min(n_slice);
+                            match cuda.transcribe_batch(&chunks[gs..ge], lang_id) {
+                                Ok(rows) => {
+                                    for (j, row) in rows.into_iter().enumerate() {
+                                        slots[gs + j] = Some(row);
+                                    }
+                                }
+                                Err(_) => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok {
+                            eprintln!("gpu-boost: repetisi terdeteksi, dihitung ulang dengan CUDA");
                         }
                     }
                 }

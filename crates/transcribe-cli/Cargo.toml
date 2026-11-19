@@ -13,3 +13,5 @@ default = ["gpu-cuda"]
 gpu-directml = ["whisper-spike/gpu-directml"]
 gpu-cuda = ["whisper-spike/gpu-cuda"]
 gpu-webgpu = ["whisper-spike/gpu-webgpu"]
+# DML full (GPU meter lebih tinggi) + fallback CUDA bila hasil repetitif
+gpu-boost = ["whisper-spike/gpu-cuda", "whisper-spike/gpu-directml"]
