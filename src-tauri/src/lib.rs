@@ -317,18 +317,6 @@ async fn transcribe_native(
     run_id: String,
     ffmpeg_dir: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    // Backend ggml (whisper.cpp CUDA) — GPU-native, CPU orkestrasi ringan.
-    if std::env::var("RSCAPS_BACKEND").as_deref() == Ok("ggml") {
-        let out = whisper_spike::native::transcribe_ggml(Path::new(&path), &model, &lang)
-            .map_err(|e| format!("ggml: {e}"))?;
-        let segs: Vec<serde_json::Value> = out
-            .0
-            .iter()
-            .map(|s| serde_json::json!({"start": s.start, "end": s.end, "text": s.text}))
-            .collect();
-        set_prog(&run_id, 1.0, "done");
-        return Ok(serde_json::json!({ "text": out.1, "segments": segs }));
-    }
     // ffmpeg: eksplisit bila diberi, else PATH (tool_bin punya fallback bundel).
     let ff = rscaps_cli::tool_bin("ffmpeg", ffmpeg_dir.as_deref().map(Path::new)).ok();
     let ff2 = ff.clone();
