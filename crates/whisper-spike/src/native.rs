@@ -965,6 +965,17 @@ impl NativeEngine {
                 .into_iter()
                 .map(|(s, e, t)| NativeSegment { start: s, end: e, text: t })
                 .collect();
+            let coverage = out.iter().map(|s| s.end).fold(0.0f32, f32::max);
+            if coverage < durations[r] * 0.5 && has_speech_energy(chunks[r]) {
+                if let Ok((better, better_text)) =
+                    self.transcribe_window(chunks[r], lang_id, 0.0, durations[r])
+                {
+                    if better.iter().map(|s| s.end).fold(0.0f32, f32::max) > coverage {
+                        out = better;
+                        let _ = better_text;
+                    }
+                }
+            }
             trim_duplicate_tail(&mut out);
             // Decode batch greedy menghasilkan lebih banyak pasangan timestamp
             // daripada jalur quality-ladder. Gabungkan cue yang jaraknya
