@@ -734,42 +734,51 @@ impl NativeEngine {
             let chunks: Vec<&[f32]> = (0..n_slice)
                 .map(|i| &samples[i * slice..((i + 1) * slice).min(total)])
                 .collect();
-            let pool = std::env::var("RSCAPS_GPU_POOL")
+            let max_batch = std::env::var("RSCAPS_BATCH_SIZE")
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(1)
-                .clamp(1, 8)
-                .min(n_slice);
+                .unwrap_or(if self.model == "large" { 4 } else { 8 })
+                .clamp(1, 16);
             let mut slots: Vec<Option<(Vec<NativeSegment>, String)>> =
                 (0..n_slice).map(|_| None).collect();
-            if pool == 1 {
-                for (i, row) in self.transcribe_batch(&chunks, lang_id)?.into_iter().enumerate() {
-                    slots[i] = Some(row);
-                }
-            } else {
-                let mut extras: Vec<NativeEngine> = Vec::new();
-                for _ in 1..pool {
-                    extras.push(NativeEngine::load(&self.model, &self.dir, &self.quant)?);
-                }
-                let mut engines: Vec<&mut NativeEngine> = vec![self];
-                engines.extend(extras.iter_mut());
-                let out: std::sync::Mutex<Vec<Option<Result<Vec<(Vec<NativeSegment>, String)>, String>>>> =
-                    std::sync::Mutex::new((0..pool).map(|_| None).collect());
-                std::thread::scope(|scope| {
-                    for (k, eng) in engines.iter_mut().enumerate() {
-                        let out = &out;
-                        let chunks = &chunks;
-                        scope.spawn(move || {
-                            let idx: Vec<usize> = (k..n_slice).step_by(pool).collect();
-                            let group: Vec<&[f32]> = idx.iter().map(|&i| chunks[i]).collect();
-                            let r = eng.transcribe_batch(&group, lang_id).map_err(|e| e.to_string());
-                            out.lock().unwrap()[k] = Some(r);
-                        });
+            for group_start in (0..n_slice).step_by(max_batch) {
+                let group_end = (group_start + max_batch).min(n_slice);
+                let group: Vec<&[f32]> = chunks[group_start..group_end].to_vec();
+                let pool = std::env::var("RSCAPS_GPU_POOL")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 8)
+                    .min(group.len());
+                if pool == 1 {
+                    for (j, row) in self.transcribe_batch(&group, lang_id)?.into_iter().enumerate() {
+                        slots[group_start + j] = Some(row);
                     }
-                });
-                for (k, result) in out.into_inner().unwrap().into_iter().enumerate() {
-                    for (j, row) in result.ok_or("batch pool gagal")??.into_iter().enumerate() {
-                        slots[k + j * pool] = Some(row);
+                } else {
+                    let mut extras: Vec<NativeEngine> = Vec::new();
+                    for _ in 1..pool {
+                        extras.push(NativeEngine::load(&self.model, &self.dir, &self.quant)?);
+                    }
+                    let mut engines: Vec<&mut NativeEngine> = vec![self];
+                    engines.extend(extras.iter_mut());
+                    let out: std::sync::Mutex<Vec<Option<Result<Vec<(Vec<NativeSegment>, String)>, String>>>> =
+                        std::sync::Mutex::new((0..pool).map(|_| None).collect());
+                    std::thread::scope(|scope| {
+                        for (k, eng) in engines.iter_mut().enumerate() {
+                            let out = &out;
+                            let group = &group;
+                            scope.spawn(move || {
+                                let idx: Vec<usize> = (k..group.len()).step_by(pool).collect();
+                                let part: Vec<&[f32]> = idx.iter().map(|&i| group[i]).collect();
+                                let r = eng.transcribe_batch(&part, lang_id).map_err(|e| e.to_string());
+                                out.lock().unwrap()[k] = Some(r);
+                            });
+                        }
+                    });
+                    for (k, result) in out.into_inner().unwrap().into_iter().enumerate() {
+                        for (j, row) in result.ok_or("batch pool gagal")??.into_iter().enumerate() {
+                            slots[group_start + k + j * pool] = Some(row);
+                        }
                     }
                 }
             }
