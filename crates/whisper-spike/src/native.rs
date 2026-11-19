@@ -240,6 +240,7 @@ fn gpu_mode() -> &'static str {
             "full" => "full",
             "cuda" => "cuda",
             "cuda-encoder" => "cuda-encoder",
+            "cuda-dml" => "cuda-dml",
             "vulkan" => "vulkan",
             "vulkan-encoder" => "vulkan-encoder",
             "off" => "off",
@@ -316,6 +317,14 @@ fn native_builder(
         let dispatch: ort::ep::ExecutionProviderDispatch = cuda.into();
         b = b.with_execution_providers(&[dispatch.error_on_failure()])?;
     }
+    #[cfg(all(feature = "gpu-cuda", feature = "gpu-directml"))]
+    if ep == "cuda-dml" {
+        let cuda: ort::ep::ExecutionProviderDispatch =
+            ort::execution_providers::CUDA::default().into();
+        let dml: ort::ep::ExecutionProviderDispatch =
+            ort::execution_providers::DirectML::default().into();
+        b = b.with_execution_providers(&[cuda, dml])?;
+    }
     #[cfg(feature = "gpu-webgpu")]
     if ep == "vulkan" || ep == "vulkan-encoder" {
         use ort::execution_providers::webgpu::{DawnBackendType, WebGPU};
@@ -362,9 +371,16 @@ impl NativeEngine {
             dir.join("decoder_model_merged.ext.onnx")
         };
         let make_sessions = |m: &str| -> Result<(Session, Session), Box<dyn Error>> {
+            let enc_dir = if let Ok(q) = std::env::var("RSCAPS_ENC_QUANT") {
+                dir.parent()
+                    .map(|p| p.join(format!("whisper-{model}-{q}")))
+                    .unwrap_or_else(|| dir.to_path_buf())
+            } else {
+                dir.to_path_buf()
+            };
             let encoder = native_builder(level, m, "enc")?
-                .commit_from_file(dir.join("encoder_model.onnx"))?;
-            let decoder = native_builder(level, if m == "full" || m == "cuda" || m == "vulkan" { m } else { "off" }, "dec")?
+                .commit_from_file(enc_dir.join("encoder_model.onnx"))?;
+            let decoder = native_builder(level, if m == "full" || m == "cuda" || m == "vulkan" || m == "cuda-dml" { m } else { "off" }, "dec")?
                 .commit_from_file(&dec_file)?;
             Ok((encoder, decoder))
         };
