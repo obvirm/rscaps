@@ -936,7 +936,13 @@ impl NativeEngine {
         chunks: &[&[f32]],
         lang_id: i64,
     ) -> Result<Vec<(Vec<NativeSegment>, String)>, Box<dyn Error>> {
-        let n = chunks.len();
+        let n_windows = chunks.len();
+        let best_of = std::env::var("RSCAPS_BEST_OF")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, 8);
+        let n = n_windows * best_of;
         let a = engine::arch();
         let task_id = engine::vocab().transcribe;
         let mut hiddens: Vec<f32> = Vec::with_capacity(n * engine::ENC_LEN * a.d_model);
@@ -948,8 +954,11 @@ impl NativeEngine {
             let enc_name = self.encoder.inputs()[0].name().to_string();
             let out = self.encoder.run(ort::inputs![enc_name.as_str() => Value::from_array(mel_arr)?])?;
             let (_, hidden) = out["last_hidden_state"].try_extract_tensor::<f32>()?;
-            hiddens.extend_from_slice(hidden);
-            durations.push(chunk.len() as f32 / 16000.0);
+            let dur = chunk.len() as f32 / 16000.0;
+            for _ in 0..best_of {
+                hiddens.extend_from_slice(hidden);
+                durations.push(dur);
+            }
         }
         let enc_value: KVTensor = Value::from_array(Array3::from_shape_vec(
             (n, engine::ENC_LEN, a.d_model),
@@ -978,6 +987,8 @@ impl NativeEngine {
         let mut t_run_total = std::time::Duration::ZERO;
         let mut t_copy_total = std::time::Duration::ZERO;
         let mut t_sample_total = std::time::Duration::ZERO;
+        let mut scores: Vec<f32> = vec![0.0; n];
+        let mut nsteps: Vec<usize> = vec![0; n];
         while step < 448 && done.iter().any(|&d| !d) {
             step += 1;
             let ids = Array2::from_shape_vec((n, input_ids.len() / n), input_ids.clone())?;
@@ -1074,15 +1085,30 @@ impl NativeEngine {
                     next.push(tokenizer::EOS);
                     continue;
                 }
+                let pass = r % best_of;
                 let row = &mut logits[r];
                 engine::apply_logits_processors(row, &generated[r], true, durations[r]);
-                let mut id = 0i64;
-                let mut score = f32::NEG_INFINITY;
-                for (k, v) in row.iter().copied().enumerate() {
-                    if v > score {
-                        score = v;
-                        id = k as i64;
+                let mut id = if pass == 0 {
+                    let mut best_id = 0i64;
+                    let mut best_score = f32::NEG_INFINITY;
+                    for (k, v) in row.iter().copied().enumerate() {
+                        if v > best_score {
+                            best_score = v;
+                            best_id = k as i64;
+                        }
                     }
+                    best_id
+                } else {
+                    let mut prng = (step as u64)
+                        .wrapping_mul(0x9E3779B97F4A7C15)
+                        .wrapping_add((r as u64 + 1) << 32)
+                        | 1;
+                    engine::sample_token(row, 0.2 * pass as f32, &mut prng) as i64
+                };
+                let lse = engine::log_sum_exp(row);
+                if lse.is_finite() {
+                    scores[r] += row[id as usize] - lse;
+                    nsteps[r] += 1;
                 }
                 if id == tokenizer::EOS {
                     done[r] = true;
@@ -1113,8 +1139,22 @@ impl NativeEngine {
             use_cache = true;
         }
 
-        let mut results = Vec::with_capacity(n);
-        for r in 0..n {
+        let mut results = Vec::with_capacity(n_windows);
+        for w in 0..n_windows {
+            let mut r = w * best_of;
+            let mut best_avg = f32::NEG_INFINITY;
+            for k in 0..best_of {
+                let cand = w * best_of + k;
+                let avg = if nsteps[cand] > 0 {
+                    scores[cand] / nsteps[cand] as f32
+                } else {
+                    f32::NEG_INFINITY
+                };
+                if avg > best_avg {
+                    best_avg = avg;
+                    r = cand;
+                }
+            }
             let (text, segs) = engine::parse_segments(&self.tokenizer, &generated[r], true);
             let mut out: Vec<NativeSegment> = segs
                 .into_iter()
@@ -1123,10 +1163,10 @@ impl NativeEngine {
             let coverage = out.iter().map(|s| s.end).fold(0.0f32, f32::max);
             if word_count(&text) < 3
                 && coverage < durations[r] * 0.5
-                && has_speech_energy(chunks[r])
+                && has_speech_energy(chunks[w])
             {
                 if let Ok((better, better_text)) =
-                    self.transcribe_window(chunks[r], lang_id, 0.0, durations[r])
+                    self.transcribe_window(chunks[w], lang_id, 0.0, durations[r])
                 {
                     if better.iter().map(|s| s.end).fold(0.0f32, f32::max) > coverage {
                         out = better;
