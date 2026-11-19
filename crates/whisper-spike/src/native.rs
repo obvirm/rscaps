@@ -709,7 +709,10 @@ impl NativeEngine {
         let n_windows = total.div_ceil(CHUNK_SAMPLES);
         // Prototipe batch: N jendela dalam SATU run decoder per step —
         // matmul GPU jauh lebih besar daripada N stream batch-1.
-        if std::env::var("RSCAPS_BATCH").is_ok() && n_windows > 1 {
+        if n_windows > 1
+            && gpu_mode() != "off"
+            && std::env::var("RSCAPS_BATCH").as_deref() != Ok("0")
+        {
             progress(0.4, "transcribe");
             let chunks: Vec<&[f32]> = (0..n_windows)
                 .map(|i| &samples[i * CHUNK_SAMPLES..((i + 1) * CHUNK_SAMPLES).min(total)])
@@ -944,7 +947,9 @@ impl NativeEngine {
                 }
                 next.push(id);
             }
-            if done.iter().all(|&d| d) {
+            if done.iter().all(|&d| d)
+                || prompt_len + generated.iter().map(|g| g.len()).max().unwrap_or(0) >= 448
+            {
                 break;
             }
             input_ids = next;
@@ -959,8 +964,23 @@ impl NativeEngine {
                 .map(|(s, e, t)| NativeSegment { start: s, end: e, text: t })
                 .collect();
             trim_duplicate_tail(&mut out);
-            let text = out.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
-            results.push((out, text));
+            // Decode batch greedy menghasilkan lebih banyak pasangan timestamp
+            // daripada jalur quality-ladder. Gabungkan cue yang jaraknya
+            // sangat rapat supaya segmentasi setara jalur sequential.
+            let mut merged: Vec<NativeSegment> = Vec::new();
+            for seg in out {
+                if let Some(last) = merged.last_mut() {
+                    if seg.start - last.end < 0.5 {
+                        last.end = last.end.max(seg.end);
+                        last.text.push(' ');
+                        last.text.push_str(&seg.text);
+                        continue;
+                    }
+                }
+                merged.push(seg);
+            }
+            let text = merged.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+            results.push((merged, text));
         }
         Ok(results)
     }
