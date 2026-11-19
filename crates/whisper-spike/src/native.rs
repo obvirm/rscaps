@@ -279,6 +279,9 @@ fn native_builder(
     if std::env::var("RSCAPS_SPIN").is_ok() {
         b = b.with_intra_op_spinning(true)?;
     }
+    if ep != "off" && std::env::var("RSCAPS_NO_FALLBACK").as_deref() != Ok("0") {
+        b = b.with_disable_cpu_fallback()?;
+    }
     #[cfg(feature = "gpu-directml")]
     if ep == "encoder" || ep == "full" {
         b = b.with_execution_providers(&[ort::execution_providers::DirectML::default().into()])?;
