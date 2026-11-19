@@ -240,6 +240,12 @@ fn native_builder(
     ep: &str,
 ) -> Result<ort::session::builder::SessionBuilder, Box<dyn Error>> {
     let mut b = Session::builder()?.with_optimization_level(level)?;
+    if let Some(n) = std::env::var("RSCAPS_THREADS").ok().and_then(|s| s.parse::<usize>().ok()) {
+        b = b.with_intra_threads(n)?.with_inter_threads(1)?;
+    }
+    if std::env::var("RSCAPS_SPIN").is_ok() {
+        b = b.with_intra_op_spinning(true)?;
+    }
     #[cfg(feature = "gpu-directml")]
     if ep == "encoder" || ep == "full" {
         b = b.with_execution_providers(&[ort::execution_providers::DirectML::default().into()])?;
@@ -648,6 +654,70 @@ impl NativeEngine {
             return Ok((Vec::new(), String::new()));
         }
         let n_windows = total.div_ceil(CHUNK_SAMPLES);
+        // GPU full: beberapa jendela didekode paralel supaya kernel GPU cukup
+        // besar untuk saturasi (decode satu token terlalu kecil). Env = A/B.
+        let want_parallel = gpu_mode() == "full"
+            && std::env::var("RSCAPS_WINDOWS_PAR").is_ok()
+            && n_windows > 1;
+        let mut extras: Vec<NativeEngine> = Vec::new();
+        let pool_size = std::env::var("RSCAPS_GPU_POOL")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(3)
+            .clamp(1, 8);
+        if want_parallel {
+            for _ in 1..n_windows.min(pool_size) {
+                match NativeEngine::load(&self.model, &self.dir, &self.quant) {
+                    Ok(e) => extras.push(e),
+                    Err(_) => {
+                        extras.clear();
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !extras.is_empty() {
+            progress(0.4, "transcribe");
+            let n_threads = extras.len() + 1;
+            let mut engines: Vec<&mut NativeEngine> = vec![self];            engines.extend(extras.iter_mut());
+            let results: std::sync::Mutex<Vec<Option<Result<(Vec<NativeSegment>, String), String>>>> =
+                std::sync::Mutex::new((0..n_windows).map(|_| None).collect());
+            std::thread::scope(|scope| {
+                for (k, eng) in engines.iter_mut().enumerate() {
+                    let results = &results;
+                    scope.spawn(move || {
+                        let mut i = k;
+                        while i < n_windows {
+                            let start = i * CHUNK_SAMPLES;
+                            let end = (start + CHUNK_SAMPLES).min(total);
+                            let chunk = &samples[start..end];
+                            let r = eng
+                                .transcribe_window(
+                                    chunk,
+                                    lang_id,
+                                    (start / SAMPLE_RATE) as f32,
+                                    chunk.len() as f32 / SAMPLE_RATE as f32,
+                                )
+                                .map_err(|e| e.to_string());
+                            results.lock().unwrap()[i] = Some(r);
+                            i += n_threads;
+                        }
+                    });
+                }
+            });
+            let mut out: Vec<NativeSegment> = Vec::new();
+            let mut texts: Vec<String> = Vec::new();
+            for r in results.into_inner().unwrap() {
+                let (segs, text) = r.ok_or("parallel window tidak selesai")??;
+                out.extend(segs);
+                texts.push(text);
+            }
+            out.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+            progress(1.0, "done");
+            return Ok((out, texts.join(" ")));
+        }
+
         let mut out: Vec<NativeSegment> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
 
@@ -662,97 +732,103 @@ impl NativeEngine {
                 0.4 + (i as f64) / n_windows as f64 * 0.58,
                 "transcribe",
             );
-            let mut parsed: serde_json::Value =
-                serde_json::from_str(&self.transcribe(chunk, lang_id, true, 448)?)?;
-
-            // GPU (khususnya encoder DML) kadang menghasilkan early-EOS: teks
-            // pendek tapi percaya diri, coverage timestamp ≈ 0. Kalau audio
-            // punya energi suara, decode ulang dengan CPU dan pakai CPU bila
-            // cakupannya lebih bagus.
-            if coverage_sec(&parsed) < window_dur * 0.5 && has_speech_energy(chunk) {
-                if let Ok(mut cpu) = NativeEngine::load_mode(&self.model, &self.dir, &self.quant, "off") {
-                    if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, 448) {
-                        if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
-                            if coverage_sec(&p) > coverage_sec(&parsed) {
-                                parsed = p;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Rescue sparse-decode: prior akhir-audio yang percaya diri pada
-            // audio sulit → beberapa kata di banyak detik. Dekode ulang
-            // jendela dalam irisan ~4 s — jendela pendek lolos attractor —
-            // dan hanya dipakai bila hasilnya lebih kaya kata.
-            let wcount = word_count(parsed["text"].as_str().unwrap_or(""));
-            let top_frac = top_word_frac(parsed["text"].as_str().unwrap_or(""));
-            if parsed["quality"]["silent"] != serde_json::Value::Bool(true)
-                && window_dur > 8.0
-                && (wcount < (window_dur * 0.4).max(2.0) as usize || top_frac > 0.3)
-                && has_speech_energy(chunk)
-            {
-                let slice_n = chunk.len().div_ceil(4 * SAMPLE_RATE);
-                let mut slice_segments: Vec<NativeSegment> = Vec::new();
-                let mut slice_texts: Vec<String> = Vec::new();
-                for s in 0..slice_n {
-                    let s_start = s * 4 * SAMPLE_RATE;
-                    let slice = &chunk[s_start..((s_start + 4 * SAMPLE_RATE).min(chunk.len()))];
-                    if slice.len() < SAMPLE_RATE / 2 {
-                        break;
-                    }
-                    let slice_start = (s_start / SAMPLE_RATE) as f32;
-                    let raw = self.transcribe(slice, lang_id, true, 448)?;
-                    let p2: serde_json::Value = serde_json::from_str(&raw)?;
-                    for seg in p2["segments"].as_array().unwrap_or(&vec![]) {
-                        let text = seg["text"].as_str().unwrap_or("").trim().to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        slice_segments.push(NativeSegment {
-                            start: seg["start"].as_f64().unwrap_or(0.0) as f32 + slice_start,
-                            end: seg["end"].as_f64().unwrap_or(0.0) as f32 + slice_start,
-                            text,
-                        });
-                    }
-                    let t = p2["text"].as_str().unwrap_or("").trim();
-                    if !t.is_empty() {
-                        slice_texts.push(t.to_string());
-                    }
-                }
-                if word_count(&slice_texts.join(" ")) > wcount {
-                    parsed["text"] = serde_json::Value::String(slice_texts.join(" "));
-                    let arr: Vec<serde_json::Value> = slice_segments
-                        .iter()
-                        .map(|s| serde_json::json!({"start": s.start, "end": s.end, "text": s.text}))
-                        .collect();
-                    parsed["segments"] = serde_json::Value::Array(arr);
-                }
-            }
-
-            let mut win_segs: Vec<NativeSegment> = Vec::new();
-            for seg in parsed["segments"].as_array().unwrap_or(&vec![]) {
-                let text = seg["text"].as_str().unwrap_or("").trim().to_string();
-                if text.is_empty() {
-                    continue;
-                }
-                win_segs.push(NativeSegment {
-                    start: seg["start"].as_f64().unwrap_or(0.0) as f32 + offset,
-                    end: seg["end"].as_f64().unwrap_or(0.0) as f32 + offset,
-                    text,
-                });
-            }
-            trim_duplicate_tail(&mut win_segs);
-            texts.push(
-                win_segs
-                    .iter()
-                    .map(|s| s.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
+            let (win_segs, win_text) =
+                self.transcribe_window(chunk, lang_id, offset, window_dur)?;
+            texts.push(win_text);
             out.extend(win_segs);
         }
         progress(1.0, "done");
         Ok((out, texts.join(" ")))
+    }
+
+    /// Satu jendela 30 s: decode + early-EOS fallback + rescue slice + anti-halu.
+    /// Sumber tunggal dipakai jalur sequential dan paralel (GPU pool).
+    fn transcribe_window(
+        &mut self,
+        chunk: &[f32],
+        lang_id: i64,
+        offset: f32,
+        window_dur: f32,
+    ) -> Result<(Vec<NativeSegment>, String), Box<dyn Error>> {
+        const SAMPLE_RATE: usize = 16000;
+        let mut parsed: serde_json::Value =
+            serde_json::from_str(&self.transcribe(chunk, lang_id, true, 448)?)?;
+
+        if coverage_sec(&parsed) < window_dur * 0.5 && has_speech_energy(chunk) {
+            if let Ok(mut cpu) = NativeEngine::load_mode(&self.model, &self.dir, &self.quant, "off") {
+                if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, 448) {
+                    if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if coverage_sec(&p) > coverage_sec(&parsed) {
+                            parsed = p;
+                        }
+                    }
+                }
+            }
+        }
+
+        let wcount = word_count(parsed["text"].as_str().unwrap_or(""));
+        let top_frac = top_word_frac(parsed["text"].as_str().unwrap_or(""));
+        if parsed["quality"]["silent"] != serde_json::Value::Bool(true)
+            && window_dur > 8.0
+            && (wcount < (window_dur * 0.4).max(2.0) as usize || top_frac > 0.3)
+            && has_speech_energy(chunk)
+        {
+            let slice_n = chunk.len().div_ceil(4 * SAMPLE_RATE);
+            let mut slice_segments: Vec<NativeSegment> = Vec::new();
+            let mut slice_texts: Vec<String> = Vec::new();
+            for s in 0..slice_n {
+                let s_start = s * 4 * SAMPLE_RATE;
+                let slice = &chunk[s_start..((s_start + 4 * SAMPLE_RATE).min(chunk.len()))];
+                if slice.len() < SAMPLE_RATE / 2 {
+                    break;
+                }
+                let slice_start = (s_start / SAMPLE_RATE) as f32;
+                let raw = self.transcribe(slice, lang_id, true, 448)?;
+                let p2: serde_json::Value = serde_json::from_str(&raw)?;
+                for seg in p2["segments"].as_array().unwrap_or(&vec![]) {
+                    let text = seg["text"].as_str().unwrap_or("").trim().to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    slice_segments.push(NativeSegment {
+                        start: seg["start"].as_f64().unwrap_or(0.0) as f32 + slice_start,
+                        end: seg["end"].as_f64().unwrap_or(0.0) as f32 + slice_start,
+                        text,
+                    });
+                }
+                let t = p2["text"].as_str().unwrap_or("").trim();
+                if !t.is_empty() {
+                    slice_texts.push(t.to_string());
+                }
+            }
+            if word_count(&slice_texts.join(" ")) > wcount {
+                parsed["text"] = serde_json::Value::String(slice_texts.join(" "));
+                let arr: Vec<serde_json::Value> = slice_segments
+                    .iter()
+                    .map(|s| serde_json::json!({"start": s.start, "end": s.end, "text": s.text}))
+                    .collect();
+                parsed["segments"] = serde_json::Value::Array(arr);
+            }
+        }
+
+        let mut win_segs: Vec<NativeSegment> = Vec::new();
+        for seg in parsed["segments"].as_array().unwrap_or(&vec![]) {
+            let text = seg["text"].as_str().unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            win_segs.push(NativeSegment {
+                start: seg["start"].as_f64().unwrap_or(0.0) as f32 + offset,
+                end: seg["end"].as_f64().unwrap_or(0.0) as f32 + offset,
+                text,
+            });
+        }
+        trim_duplicate_tail(&mut win_segs);
+        let text = win_segs
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok((win_segs, text))
     }
 }
