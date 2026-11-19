@@ -224,14 +224,42 @@ pub fn lang_token(lang: &str) -> i64 {
 /// off (default) = CPU semua, encoder = encoder DML + decoder CPU,
 /// full = DML di dua-duanya. Env RSCAPS_GPU_MODE untuk A/B tanpa rebuild.
 fn gpu_mode() -> &'static str {
-    match std::env::var("RSCAPS_GPU_MODE").as_deref() {
-        Ok("encoder") => "encoder",
-        Ok("full") => "full",
-        Ok("cuda") => "cuda",
-        Ok("cuda-encoder") => "cuda-encoder",
-        Ok("vulkan") => "vulkan",
-        Ok("vulkan-encoder") => "vulkan-encoder",
-        _ => "off",
+    if let Ok(v) = std::env::var("RSCAPS_GPU_MODE") {
+        return match v.as_str() {
+            "encoder" => "encoder",
+            "full" => "full",
+            "cuda" => "cuda",
+            "cuda-encoder" => "cuda-encoder",
+            "vulkan" => "vulkan",
+            "vulkan-encoder" => "vulkan-encoder",
+            "off" => "off",
+            _ => default_gpu_mode(),
+        };
+    }
+    default_gpu_mode()
+}
+
+/// GPU dipakai secara default bila binary di-build dengan fitur GPU.
+fn default_gpu_mode() -> &'static str {
+    #[cfg(feature = "gpu-cuda")]
+    {
+        "cuda"
+    }
+    #[cfg(all(not(feature = "gpu-cuda"), feature = "gpu-directml"))]
+    {
+        "full"
+    }
+    #[cfg(all(not(feature = "gpu-cuda"), not(feature = "gpu-directml"), feature = "gpu-webgpu"))]
+    {
+        "vulkan"
+    }
+    #[cfg(all(
+        not(feature = "gpu-cuda"),
+        not(feature = "gpu-directml"),
+        not(feature = "gpu-webgpu")
+    ))]
+    {
+        "off"
     }
 }
 
@@ -252,7 +280,12 @@ fn native_builder(
     }
     #[cfg(feature = "gpu-cuda")]
     if ep == "cuda" || ep == "cuda-encoder" {
-        b = b.with_execution_providers(&[ort::execution_providers::CUDA::default().into()])?;
+        let mut cuda = ort::execution_providers::CUDA::default();
+        let graph = std::env::var("RSCAPS_CUDA_GRAPH").as_deref() != Ok("0");
+        if graph {
+            cuda = cuda.with_cuda_graph(true);
+        }
+        b = b.with_execution_providers(&[cuda.into()])?;
     }
     #[cfg(feature = "gpu-webgpu")]
     if ep == "vulkan" || ep == "vulkan-encoder" {
@@ -282,9 +315,6 @@ impl NativeEngine {
         } else {
             GraphOptimizationLevel::Level3
         };
-        let mode = mode;
-        let encoder = native_builder(level, mode)?
-            .commit_from_file(dir.join("encoder_model.onnx"))?;
         // Folder large-fp16 hanya menyimpan decoder versi split ext-data
         // (decoder_model_merged.ext.onnx + .ext.data) — ORT memuat data
         // eksternal otomatis dari referensi path di proto.
@@ -293,15 +323,33 @@ impl NativeEngine {
         } else {
             dir.join("decoder_model_merged.ext.onnx")
         };
-        let decoder = native_builder(
-            level,
-            if mode == "full" || mode == "cuda" || mode == "vulkan" {
-                mode
-            } else {
-                "off"
-            },
-        )?
-        .commit_from_file(dec_file)?;
+        let make_sessions = |m: &str| -> Result<(Session, Session), Box<dyn Error>> {
+            let encoder = native_builder(level, m)?
+                .commit_from_file(dir.join("encoder_model.onnx"))?;
+            let decoder = native_builder(
+                level,
+                if m == "full" || m == "cuda" || m == "vulkan" {
+                    m
+                } else {
+                    "off"
+                },
+            )?
+            .commit_from_file(&dec_file)?;
+            Ok((encoder, decoder))
+        };
+        let (encoder, decoder) = match make_sessions(mode) {
+            Ok(pair) => pair,
+            Err(e) if mode != "off" => {
+                eprintln!("GPU session gagal ({e}) — fallback CPU");
+                make_sessions("off")?
+            }
+            Err(e) => return Err(e),
+        };
+        if std::env::var("RSCAPS_DEBUG_IO").is_ok() {
+            eprintln!("encoder inputs: {:?}", encoder.inputs().iter().map(|v| v.name()).collect::<Vec<_>>());
+            eprintln!("decoder inputs: {:?}", decoder.inputs().iter().map(|v| v.name()).collect::<Vec<_>>());
+            eprintln!("decoder outputs: {:?}", decoder.outputs().iter().map(|v| v.name()).collect::<Vec<_>>());
+        }
         let tok_json = std::fs::read_to_string(dir.join("tokenizer.json"))?;
         let tokenizer = WhisperTokenizer::from_json(&tok_json)?;
         Ok(Self {
@@ -659,6 +707,29 @@ impl NativeEngine {
             return Ok((Vec::new(), String::new()));
         }
         let n_windows = total.div_ceil(CHUNK_SAMPLES);
+        // Prototipe batch: N jendela dalam SATU run decoder per step —
+        // matmul GPU jauh lebih besar daripada N stream batch-1.
+        if std::env::var("RSCAPS_BATCH").is_ok() && n_windows > 1 {
+            progress(0.4, "transcribe");
+            let chunks: Vec<&[f32]> = (0..n_windows)
+                .map(|i| &samples[i * CHUNK_SAMPLES..((i + 1) * CHUNK_SAMPLES).min(total)])
+                .collect();
+            let results = self.transcribe_batch(&chunks, lang_id)?;
+            progress(1.0, "done");
+            let mut out: Vec<NativeSegment> = Vec::new();
+            let mut texts: Vec<String> = Vec::new();
+            for (i, (segs, text)) in results.into_iter().enumerate() {
+                let offset = (i * CHUNK_SAMPLES / SAMPLE_RATE) as f32;
+                out.extend(segs.into_iter().map(|mut s| {
+                    s.start += offset;
+                    s.end += offset;
+                    s
+                }));
+                texts.push(text);
+            }
+            out.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+            return Ok((out, texts.join(" ")));
+        }
         // GPU full: beberapa jendela didekode paralel supaya kernel GPU cukup
         // besar untuk saturasi (decode satu token terlalu kecil). Env = A/B.
         let want_parallel = gpu_mode() == "full"
@@ -744,6 +815,154 @@ impl NativeEngine {
         }
         progress(1.0, "done");
         Ok((out, texts.join(" ")))
+    }
+
+    /// Prototipe decode BATCH: N jendela berjalan lockstep dalam satu run()
+    /// decoder → GPU melihat matmul batch N (bukan N stream kecil). Hanya
+    /// pass greedy; fallback/rescue tetap ditangani pemanggil.
+    fn transcribe_batch(
+        &mut self,
+        chunks: &[&[f32]],
+        lang_id: i64,
+    ) -> Result<Vec<(Vec<NativeSegment>, String)>, Box<dyn Error>> {
+        let n = chunks.len();
+        let a = engine::arch();
+        let task_id = engine::vocab().transcribe;
+        let mut hiddens: Vec<f32> = Vec::with_capacity(n * engine::ENC_LEN * a.d_model);
+        let mut durations: Vec<f32> = Vec::with_capacity(n);
+        for chunk in chunks {
+            let features = mel::log_mel(chunk, a.n_mels);
+            let mel_arr = Array3::from_shape_vec((1, a.n_mels, mel::N_FRAMES), features)?;
+            let input_name = self.encoder.inputs()[0].name().to_string();
+            let value = Value::from_array(mel_arr)?;
+            let out = self.encoder.run(ort::inputs![input_name.as_str() => value])?;
+            let (_, hid) = out["last_hidden_state"].try_extract_tensor::<f32>()?;
+            hiddens.extend_from_slice(hid);
+            durations.push(chunk.len() as f32 / 16000.0);
+        }
+        let enc = Array3::from_shape_vec((n, engine::ENC_LEN, a.d_model), hiddens)?;
+        let enc_value = ort::value::Tensor::from_array(enc.clone())?.into_dyn();
+
+        let prompt = vec![tokenizer::SOT, lang_id, task_id];
+        let mut input_ids: Vec<i64> = (0..n).flat_map(|_| prompt.iter().copied()).collect();
+        let prompt_len = prompt.len();
+        let mut generated: Vec<Vec<i64>> = vec![Vec::new(); n];
+        let mut done = vec![false; n];
+        let mut use_cache = false;
+        let empty = || -> Result<KVTensor, Box<dyn Error>> {
+            Ok(Value::from_array(Array4::<f32>::zeros((n, a.heads, 0, a.head_dim)))?.into_dyn())
+        };
+        let mut past_dec: Vec<(KVTensor, KVTensor)> = (0..a.dec_layers)
+            .map(|_| Ok((empty()?, empty()?)))
+            .collect::<Result<_, Box<dyn Error>>>()?;
+        let mut past_enc: Vec<(KVTensor, KVTensor)> = (0..a.dec_layers)
+            .map(|_| Ok((empty()?, empty()?)))
+            .collect::<Result<_, Box<dyn Error>>>()?;
+
+        let mut step = 0usize;
+        while step < 448 && done.iter().any(|&d| !d) {
+            step += 1;
+            let ids = Array2::from_shape_vec((n, input_ids.len() / n), input_ids.clone())?;
+            let mut inputs: Vec<(String, ort::session::SessionInputValue<'_>)> = Vec::new();
+            inputs.push(("input_ids".into(), Value::from_array(ids)?.into()));
+            inputs.push(("encoder_hidden_states".into(), enc_value.view().into()));
+            inputs.push((
+                "use_cache_branch".into(),
+                Value::from_array(Array1::from_vec(vec![use_cache]))?.into(),
+            ));
+            for i in 0..a.dec_layers {
+                inputs.push((format!("past_key_values.{i}.decoder.key"), past_dec[i].0.view().into()));
+                inputs.push((format!("past_key_values.{i}.decoder.value"), past_dec[i].1.view().into()));
+                inputs.push((format!("past_key_values.{i}.encoder.key"), past_enc[i].0.view().into()));
+                inputs.push((format!("past_key_values.{i}.encoder.value"), past_enc[i].1.view().into()));
+            }
+            let (mut logits, mut pd, mut pe) = {
+                let mut out = self.decoder.run(inputs)?;
+                let (sh, lg) = out["logits"].try_extract_tensor::<f32>()?;
+                let seq = sh.get(1).copied().unwrap_or(1) as usize;
+                let vocab = sh.get(2).copied().unwrap_or(1) as usize;
+                let mut rows: Vec<Vec<f32>> = Vec::with_capacity(n);
+                let mut pd: Vec<(KVTensor, KVTensor)> = Vec::with_capacity(a.dec_layers);
+                let mut pe: Vec<(KVTensor, KVTensor)> = Vec::with_capacity(a.dec_layers);
+                for r in 0..n {
+                    rows.push(lg[r * seq * vocab + (seq - 1) * vocab
+                        ..r * seq * vocab + seq * vocab]
+                        .to_vec());
+                }
+                for i in 0..a.dec_layers {
+                    pd.push((
+                        out.remove(format!("present.{i}.decoder.key")).ok_or("missing dec K")?,
+                        out.remove(format!("present.{i}.decoder.value")).ok_or("missing dec V")?,
+                    ));
+                    if !use_cache {
+                        pe.push((
+                            out.remove(format!("present.{i}.encoder.key")).ok_or("missing enc K")?,
+                            out.remove(format!("present.{i}.encoder.value")).ok_or("missing enc V")?,
+                        ));
+                    }
+                }
+                drop(out);
+                (rows, pd, pe)
+            };
+            if !use_cache {
+                past_enc = std::mem::take(&mut pe);
+            }
+            past_dec = std::mem::take(&mut pd);
+
+            let mut next: Vec<i64> = Vec::with_capacity(n);
+            for r in 0..n {
+                if done[r] {
+                    next.push(tokenizer::EOS);
+                    continue;
+                }
+                let row = &mut logits[r];
+                engine::apply_logits_processors(row, &generated[r], true, durations[r]);
+                let mut id = 0i64;
+                let mut score = f32::NEG_INFINITY;
+                for (k, v) in row.iter().copied().enumerate() {
+                    if v > score {
+                        score = v;
+                        id = k as i64;
+                    }
+                }
+                if id == tokenizer::EOS {
+                    done[r] = true;
+                } else if tokenizer::is_timestamp(id) {
+                    if let Some(&prev) = generated[r].last() {
+                        if tokenizer::is_timestamp(prev) {
+                            let frames = (durations[r] / 0.02).round() as i64;
+                            if id - engine::vocab().ts_begin >= frames {
+                                done[r] = true;
+                            }
+                        }
+                    }
+                    if !done[r] {
+                        generated[r].push(id);
+                    }
+                } else {
+                    generated[r].push(id);
+                }
+                next.push(id);
+            }
+            if done.iter().all(|&d| d) {
+                break;
+            }
+            input_ids = next;
+            use_cache = true;
+        }
+
+        let mut results = Vec::with_capacity(n);
+        for r in 0..n {
+            let (text, segs) = engine::parse_segments(&self.tokenizer, &generated[r], true);
+            let mut out: Vec<NativeSegment> = segs
+                .into_iter()
+                .map(|(s, e, t)| NativeSegment { start: s, end: e, text: t })
+                .collect();
+            trim_duplicate_tail(&mut out);
+            let text = out.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+            results.push((out, text));
+        }
+        Ok(results)
     }
 
     /// Satu jendela 30 s: decode + early-EOS fallback + rescue slice + anti-halu.

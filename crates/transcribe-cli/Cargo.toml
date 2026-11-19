@@ -9,6 +9,7 @@ whisper-spike = { path = "../whisper-spike" }
 serde_json = "1"
 
 [features]
+default = ["gpu-cuda"]
 gpu-directml = ["whisper-spike/gpu-directml"]
 gpu-cuda = ["whisper-spike/gpu-cuda"]
 gpu-webgpu = ["whisper-spike/gpu-webgpu"]
