@@ -9,6 +9,7 @@ use std::error::Error;
 use std::path::Path;
 
 use ndarray::{Array1, Array2, Array3, Array4};
+use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Value;
@@ -709,20 +710,27 @@ impl NativeEngine {
         let n_windows = total.div_ceil(CHUNK_SAMPLES);
         // Prototipe batch: N jendela dalam SATU run decoder per step —
         // matmul GPU jauh lebih besar daripada N stream batch-1.
-        if n_windows > 1
+        let batch_slice = std::env::var("RSCAPS_BATCH_SLICE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .map(|s| (s * 16000).clamp(16000, CHUNK_SAMPLES))
+            .unwrap_or(CHUNK_SAMPLES);
+        let n_slice = total.div_ceil(batch_slice);
+        if n_slice > 1
             && gpu_mode() != "off"
             && std::env::var("RSCAPS_BATCH").as_deref() != Ok("0")
         {
             progress(0.4, "transcribe");
-            let chunks: Vec<&[f32]> = (0..n_windows)
-                .map(|i| &samples[i * CHUNK_SAMPLES..((i + 1) * CHUNK_SAMPLES).min(total)])
+            let slice = batch_slice;
+            let chunks: Vec<&[f32]> = (0..n_slice)
+                .map(|i| &samples[i * slice..((i + 1) * slice).min(total)])
                 .collect();
             let results = self.transcribe_batch(&chunks, lang_id)?;
             progress(1.0, "done");
             let mut out: Vec<NativeSegment> = Vec::new();
             let mut texts: Vec<String> = Vec::new();
             for (i, (segs, text)) in results.into_iter().enumerate() {
-                let offset = (i * CHUNK_SAMPLES / SAMPLE_RATE) as f32;
+                let offset = (i * slice / SAMPLE_RATE) as f32;
                 out.extend(segs.into_iter().map(|mut s| {
                     s.start += offset;
                     s.end += offset;
@@ -882,7 +890,43 @@ impl NativeEngine {
                 inputs.push((format!("past_key_values.{i}.encoder.value"), past_enc[i].1.view().into()));
             }
             let (mut logits, mut pd, mut pe) = {
-                let mut out = self.decoder.run(inputs)?;
+                let iobind = std::env::var("RSCAPS_IOBIND").is_ok();
+                let pinned = if iobind {
+                    Some((
+                        MemoryInfo::new(
+                            AllocationDevice::CUDA_PINNED,
+                            0,
+                            AllocatorType::Device,
+                            MemoryType::CPUOutput,
+                        )?,
+                        MemoryInfo::new(
+                            AllocationDevice::CUDA,
+                            0,
+                            AllocatorType::Arena,
+                            MemoryType::Default,
+                        )?,
+                    ))
+                } else {
+                    None
+                };
+                let mut binding = if let Some((ref host_mem, ref dev_mem)) = pinned {
+                    let mut b = self.decoder.create_binding()?;
+                    for (name, val) in &inputs {
+                        b.bind_input(name.as_str(), &*val)?;
+                    }
+                    for out in self.decoder.outputs() {
+                        let mem = if out.name() == "logits" { host_mem } else { dev_mem };
+                        b.bind_output_to_device(out.name(), mem)?;
+                    }
+                    Some(b)
+                } else {
+                    None
+                };
+                let mut out = if let Some(ref b) = binding {
+                    self.decoder.run_binding(b)?
+                } else {
+                    self.decoder.run(inputs)?
+                };
                 let (sh, lg) = out["logits"].try_extract_tensor::<f32>()?;
                 let seq = sh.get(1).copied().unwrap_or(1) as usize;
                 let vocab = sh.get(2).copied().unwrap_or(1) as usize;
