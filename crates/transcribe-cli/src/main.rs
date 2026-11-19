@@ -64,6 +64,7 @@ fn main() {
             eprintln!("[{stage} {win} {f:.2}]");
         },
     );
+    engine.flush_profile();
     let out = match res {
         Ok((segments, text)) => {
             let segs: Vec<serde_json::Value> = segments

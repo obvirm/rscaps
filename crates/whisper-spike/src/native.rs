@@ -157,16 +157,21 @@ fn coverage_sec(parsed: &serde_json::Value) -> f32 {
 /// segmen sebelumnya (kasus "Thank you for watching / Please subscribe"
 /// berulang di ekor audio sulit). Kembalikan juga teks gabungan baru.
 fn trim_duplicate_tail(segs: &mut Vec<NativeSegment>) {
+    let norm = |t: &str| {
+        t.to_lowercase()
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_string()
+    };
     let tail_start = segs.len().saturating_sub(6);
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for s in &segs[tail_start..] {
         if s.end - s.start < 0.3 {
-            *counts.entry(s.text.to_lowercase()).or_default() += 1;
+            *counts.entry(norm(&s.text)).or_default() += 1;
         }
     }
     let first_bad = (tail_start..segs.len()).find(|&i| {
         segs[i].end - segs[i].start < 0.3
-            && counts.get(&segs[i].text.to_lowercase()).copied().unwrap_or(0) >= 2
+            && counts.get(&norm(&segs[i].text)).copied().unwrap_or(0) >= 2
     });
     if let Some(i) = first_bad {
         segs.truncate(i);
@@ -271,25 +276,31 @@ fn default_gpu_mode() -> &'static str {
 fn native_builder(
     level: ort::session::builder::GraphOptimizationLevel,
     ep: &str,
+    kind: &str,
 ) -> Result<ort::session::builder::SessionBuilder, Box<dyn Error>> {
     let mut b = Session::builder()?.with_optimization_level(level)?;
+    if let Ok(prefix) = std::env::var("RSCAPS_PROFILE") {
+        b = b.with_profiling(format!("{prefix}_{kind}_{}.json", std::process::id()))?;
+    }
     if let Some(n) = std::env::var("RSCAPS_THREADS").ok().and_then(|s| s.parse::<usize>().ok()) {
         b = b.with_intra_threads(n)?.with_inter_threads(1)?;
     }
     if std::env::var("RSCAPS_SPIN").is_ok() {
         b = b.with_intra_op_spinning(true)?;
     }
-    if ep != "off" && std::env::var("RSCAPS_NO_FALLBACK").as_deref() != Ok("0") {
+    if ep != "off" && std::env::var("RSCAPS_NO_FALLBACK").as_deref() == Ok("1") {
         b = b.with_disable_cpu_fallback()?;
     }
     #[cfg(feature = "gpu-directml")]
     if ep == "encoder" || ep == "full" {
-        b = b.with_execution_providers(&[ort::execution_providers::DirectML::default().into()])?;
+        let dml: ort::ep::ExecutionProviderDispatch =
+            ort::execution_providers::DirectML::default().into();
+        b = b.with_execution_providers(&[dml.error_on_failure()])?;
     }
     #[cfg(feature = "gpu-cuda")]
     if ep == "cuda" || ep == "cuda-encoder" {
         let mut cuda = ort::execution_providers::CUDA::default();
-        let graph = std::env::var("RSCAPS_CUDA_GRAPH").as_deref() != Ok("0");
+        let graph = std::env::var("RSCAPS_CUDA_GRAPH").as_deref() == Ok("1");
         if graph {
             cuda = cuda.with_cuda_graph(true);
         }
@@ -302,19 +313,29 @@ fn native_builder(
                     | AttentionBackend::MATH,
             );
         }
-        b = b.with_execution_providers(&[cuda.into()])?;
+        let dispatch: ort::ep::ExecutionProviderDispatch = cuda.into();
+        b = b.with_execution_providers(&[dispatch.error_on_failure()])?;
     }
     #[cfg(feature = "gpu-webgpu")]
     if ep == "vulkan" || ep == "vulkan-encoder" {
         use ort::execution_providers::webgpu::{DawnBackendType, WebGPU};
-        b = b.with_execution_providers(&[WebGPU::default()
+        let webgpu: ort::ep::ExecutionProviderDispatch = WebGPU::default()
             .with_dawn_backend_type(DawnBackendType::Vulkan)
-            .into()])?;
+            .into();
+        b = b.with_execution_providers(&[webgpu.error_on_failure()])?;
     }
     Ok(b)
 }
 
 impl NativeEngine {
+    /// Tulis file profiling ORT (provider per node) kalau RSCAPS_PROFILE aktif.
+    pub fn flush_profile(&mut self) {
+        if std::env::var("RSCAPS_PROFILE").is_ok() {
+            let _ = self.encoder.end_profiling();
+            let _ = self.decoder.end_profiling();
+        }
+    }
+
     pub fn load(model: &str, dir: &Path, quant: &str) -> Result<Self, Box<dyn Error>> {
         Self::load_mode(model, dir, quant, gpu_mode())
     }
@@ -341,17 +362,10 @@ impl NativeEngine {
             dir.join("decoder_model_merged.ext.onnx")
         };
         let make_sessions = |m: &str| -> Result<(Session, Session), Box<dyn Error>> {
-            let encoder = native_builder(level, m)?
+            let encoder = native_builder(level, m, "enc")?
                 .commit_from_file(dir.join("encoder_model.onnx"))?;
-            let decoder = native_builder(
-                level,
-                if m == "full" || m == "cuda" || m == "vulkan" {
-                    m
-                } else {
-                    "off"
-                },
-            )?
-            .commit_from_file(&dec_file)?;
+            let decoder = native_builder(level, if m == "full" || m == "cuda" || m == "vulkan" { m } else { "off" }, "dec")?
+                .commit_from_file(&dec_file)?;
             Ok((encoder, decoder))
         };
         let (encoder, decoder) = match make_sessions(mode) {
@@ -362,6 +376,9 @@ impl NativeEngine {
             }
             Err(e) => return Err(e),
         };
+        if std::env::var("RSCAPS_DEBUG_IO").is_ok() {
+            eprintln!("gpu features: cuda={} dml={} webgpu={} ep={}", cfg!(feature = "gpu-cuda"), cfg!(feature = "gpu-directml"), cfg!(feature = "gpu-webgpu"), mode);
+        }
         if std::env::var("RSCAPS_DEBUG_IO").is_ok() {
             eprintln!("encoder inputs: {:?}", encoder.inputs().iter().map(|v| v.name()).collect::<Vec<_>>());
             eprintln!("decoder inputs: {:?}", decoder.inputs().iter().map(|v| v.name()).collect::<Vec<_>>());
