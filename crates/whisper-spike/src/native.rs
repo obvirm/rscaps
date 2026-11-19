@@ -725,11 +725,50 @@ impl NativeEngine {
             let chunks: Vec<&[f32]> = (0..n_slice)
                 .map(|i| &samples[i * slice..((i + 1) * slice).min(total)])
                 .collect();
-            let results = self.transcribe_batch(&chunks, lang_id)?;
+            let pool = std::env::var("RSCAPS_GPU_POOL")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1)
+                .clamp(1, 8)
+                .min(n_slice);
+            let mut slots: Vec<Option<(Vec<NativeSegment>, String)>> =
+                (0..n_slice).map(|_| None).collect();
+            if pool == 1 {
+                for (i, row) in self.transcribe_batch(&chunks, lang_id)?.into_iter().enumerate() {
+                    slots[i] = Some(row);
+                }
+            } else {
+                let mut extras: Vec<NativeEngine> = Vec::new();
+                for _ in 1..pool {
+                    extras.push(NativeEngine::load(&self.model, &self.dir, &self.quant)?);
+                }
+                let mut engines: Vec<&mut NativeEngine> = vec![self];
+                engines.extend(extras.iter_mut());
+                let out: std::sync::Mutex<Vec<Option<Result<Vec<(Vec<NativeSegment>, String)>, String>>>> =
+                    std::sync::Mutex::new((0..pool).map(|_| None).collect());
+                std::thread::scope(|scope| {
+                    for (k, eng) in engines.iter_mut().enumerate() {
+                        let out = &out;
+                        let chunks = &chunks;
+                        scope.spawn(move || {
+                            let idx: Vec<usize> = (k..n_slice).step_by(pool).collect();
+                            let group: Vec<&[f32]> = idx.iter().map(|&i| chunks[i]).collect();
+                            let r = eng.transcribe_batch(&group, lang_id).map_err(|e| e.to_string());
+                            out.lock().unwrap()[k] = Some(r);
+                        });
+                    }
+                });
+                for (k, result) in out.into_inner().unwrap().into_iter().enumerate() {
+                    for (j, row) in result.ok_or("batch pool gagal")??.into_iter().enumerate() {
+                        slots[k + j * pool] = Some(row);
+                    }
+                }
+            }
             progress(1.0, "done");
             let mut out: Vec<NativeSegment> = Vec::new();
             let mut texts: Vec<String> = Vec::new();
-            for (i, (segs, text)) in results.into_iter().enumerate() {
+            for (i, slot) in slots.into_iter().enumerate() {
+                let (segs, text) = slot.ok_or("batch window tidak selesai")?;
                 let offset = (i * slice / SAMPLE_RATE) as f32;
                 out.extend(segs.into_iter().map(|mut s| {
                     s.start += offset;
@@ -841,6 +880,7 @@ impl NativeEngine {
         let task_id = engine::vocab().transcribe;
         let mut hiddens: Vec<f32> = Vec::with_capacity(n * engine::ENC_LEN * a.d_model);
         let mut durations: Vec<f32> = Vec::with_capacity(n);
+        let t_enc_start = std::time::Instant::now();
         for chunk in chunks {
             let features = mel::log_mel(chunk, a.n_mels);
             let mel_arr = Array3::from_shape_vec((1, a.n_mels, mel::N_FRAMES), features)?;
@@ -855,6 +895,7 @@ impl NativeEngine {
             hiddens,
         )?)?
         .into_dyn();
+        let t_enc = t_enc_start.elapsed();
 
         let prompt = vec![tokenizer::SOT, lang_id, task_id];
         let mut input_ids: Vec<i64> = (0..n).flat_map(|_| prompt.iter().copied()).collect();
@@ -873,6 +914,9 @@ impl NativeEngine {
             .collect::<Result<_, Box<dyn Error>>>()?;
 
         let mut step = 0usize;
+        let mut t_run_total = std::time::Duration::ZERO;
+        let mut t_copy_total = std::time::Duration::ZERO;
+        let mut t_sample_total = std::time::Duration::ZERO;
         while step < 448 && done.iter().any(|&d| !d) {
             step += 1;
             let ids = Array2::from_shape_vec((n, input_ids.len() / n), input_ids.clone())?;
@@ -889,6 +933,7 @@ impl NativeEngine {
                 inputs.push((format!("past_key_values.{i}.encoder.key"), past_enc[i].0.view().into()));
                 inputs.push((format!("past_key_values.{i}.encoder.value"), past_enc[i].1.view().into()));
             }
+            let t_run = std::time::Instant::now();
             let (mut logits, mut pd, mut pe) = {
                 let iobind = std::env::var("RSCAPS_IOBIND").is_ok();
                 let pinned = if iobind {
@@ -953,11 +998,15 @@ impl NativeEngine {
                 drop(out);
                 (rows, pd, pe)
             };
+            t_run_total += t_run.elapsed();
+            let t_copy = std::time::Instant::now();
             if !use_cache {
                 past_enc = std::mem::take(&mut pe);
             }
             past_dec = std::mem::take(&mut pd);
+            t_copy_total += t_copy.elapsed();
 
+            let t_sample = std::time::Instant::now();
             let mut next: Vec<i64> = Vec::with_capacity(n);
             for r in 0..n {
                 if done[r] {
@@ -993,6 +1042,7 @@ impl NativeEngine {
                 }
                 next.push(id);
             }
+            t_sample_total += t_sample.elapsed();
             if done.iter().all(|&d| d)
                 || prompt_len + generated.iter().map(|g| g.len()).max().unwrap_or(0) >= 448
             {
@@ -1010,7 +1060,10 @@ impl NativeEngine {
                 .map(|(s, e, t)| NativeSegment { start: s, end: e, text: t })
                 .collect();
             let coverage = out.iter().map(|s| s.end).fold(0.0f32, f32::max);
-            if coverage < durations[r] * 0.5 && has_speech_energy(chunks[r]) {
+            if word_count(&text) < 3
+                && coverage < durations[r] * 0.5
+                && has_speech_energy(chunks[r])
+            {
                 if let Ok((better, better_text)) =
                     self.transcribe_window(chunks[r], lang_id, 0.0, durations[r])
                 {
@@ -1038,6 +1091,15 @@ impl NativeEngine {
             }
             let text = merged.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
             results.push((merged, text));
+        }
+        if std::env::var("RSCAPS_DEBUG_TIMING").is_ok() {
+            eprintln!(
+                "batch timing: steps={step} enc={:.1}s run={:.1}s copy={:.1}s sample={:.1}s",
+                t_enc.as_secs_f32(),
+                t_run_total.as_secs_f32(),
+                t_copy_total.as_secs_f32(),
+                t_sample_total.as_secs_f32()
+            );
         }
         Ok(results)
     }
