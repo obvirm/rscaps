@@ -32,6 +32,26 @@ fn main() {
         }
     };
 
+    // Backend ggml (whisper.cpp): GPU-native, CPU hanya orkestrasi.
+    if std::env::var("RSCAPS_BACKEND").as_deref() == Ok("ggml") {
+        let t = std::time::Instant::now();
+        let (segments, text) =
+            match whisper_spike::native::transcribe_ggml(Path::new(&audio), &model, &lang) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("ggml gagal: {e}");
+                    std::process::exit(1);
+                }
+            };
+        let segs: Vec<serde_json::Value> = segments
+            .iter()
+            .map(|s| serde_json::json!({"start": s.start, "end": s.end, "text": s.text}))
+            .collect();
+        eprintln!("ggml decode {:.1}s", t.elapsed().as_secs_f32());
+        println!("{}", serde_json::json!({"text": text, "segments": segs}));
+        return;
+    }
+
     let t0 = std::time::Instant::now();
     let samples = match whisper_spike::native::load_audio(Path::new(&audio), None) {
         Ok(s) => s,
