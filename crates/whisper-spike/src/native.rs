@@ -295,10 +295,13 @@ fn native_builder(
     mut level: ort::session::builder::GraphOptimizationLevel,
     ep: &str,
     kind: &str,
+    quant: &str,
 ) -> Result<ort::session::builder::SessionBuilder, Box<dyn Error>> {
-    if kind == "dec" && ep == "cuda" {
-        // Decoder merged (If/KV) + CUDA: graph optimization menghasilkan
-        // logits salah untuk q8 (dan rapuh untuk fp16). Disable = benar.
+    let quantized = matches!(quant, "q8" | "q4" | "q4f16" | "int8" | "uint8" | "bnb4");
+    let decoder_graph_bad = ep == "cuda" || (ep == "full" && quantized);
+    if kind == "dec" && decoder_graph_bad {
+        // Decoder merged (If/KV) + GPU: graph optimization menghasilkan
+        // logits salah (CUDA q8) / ekor halu (DirectML). Disable = benar.
         level = GraphOptimizationLevel::Disable;
         if let Ok(v) = std::env::var("RSCAPS_DEC_OPT") {
             level = match v.as_str() {
@@ -441,9 +444,9 @@ impl NativeEngine {
             } else {
                 dir.to_path_buf()
             };
-            let encoder = native_builder(level, m, "enc")?
+            let encoder = native_builder(level, m, "enc", quant)?
                 .commit_from_file(enc_dir.join("encoder_model.onnx"))?;
-            let decoder = native_builder(level, if m == "full" || m == "cuda" || m == "vulkan" || m == "cuda-dml" { m } else { "off" }, "dec")?
+            let decoder = native_builder(level, if m == "full" || m == "cuda" || m == "vulkan" || m == "cuda-dml" { m } else { "off" }, "dec", quant)?
                 .commit_from_file(&dec_file)?;
             Ok((encoder, decoder))
         };
@@ -1396,9 +1399,16 @@ impl NativeEngine {
             if text.is_empty() {
                 continue;
             }
+            let start = seg["start"].as_f64().unwrap_or(0.0) as f32 + offset;
+            let end = seg["end"].as_f64().unwrap_or(0.0) as f32 + offset;
+            // Whisper kadang mengarang segmen ekor dengan end jauh melewati
+            // durasi audio (mis. "Terima kasih." end=42s di window 14.5s).
+            if end > offset + window_dur + 1.0 {
+                continue;
+            }
             win_segs.push(NativeSegment {
-                start: seg["start"].as_f64().unwrap_or(0.0) as f32 + offset,
-                end: seg["end"].as_f64().unwrap_or(0.0) as f32 + offset,
+                start,
+                end: end.min(offset + window_dur),
                 text,
             });
         }
