@@ -384,7 +384,7 @@ class StudioState {
         this.transcribeFraction = fraction;
         this.transcribeStage = stage;
         this.setStatus(STAGE_STATUS[stage] ?? stage);
-      });
+      }, this.backend);
       const cues: Cue[] = result.segments
         .map((s) => ({
           start_ms: Math.max(0, Math.round(s.start * 1000)),

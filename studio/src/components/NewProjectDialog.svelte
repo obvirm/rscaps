@@ -162,7 +162,7 @@
           <p class="hint">
             {backend === "cpu"
               ? "Default — works on every device."
-              : "Faster on supported GPUs. Falls back to CPU when unavailable."}
+              : "Stable for base + q8. Other model/quant combinations fall back to CPU."}
           </p>
         </div>
 

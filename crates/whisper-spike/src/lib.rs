@@ -13,7 +13,8 @@ pub mod wasm {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use ndarray::{Array1, Array2, Array3, Array4};
-    use ort::execution_providers::WebGPU;
+    use ort::execution_providers::{WASM, WebGPU};
+    use ort::ep::webgpu::PreferredLayout;
     use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
     use ort::session::{RunOptions, Session, SessionInputValue};
     use ort::value::Value;
@@ -479,8 +480,28 @@ pub mod wasm {
     /// TIDAK ditambahkan supaya A/B memperlihatkan kalau graph butuh op yang
     /// belum didukung EP ini.
     #[wasm_bindgen]
-    pub async fn init_webgpu(dist_url: Option<String>) -> Result<(), JsValue> {
+    pub async fn init_webgpu(
+        dist_url: Option<String>,
+        preferred_layout: Option<String>,
+        scope: Option<String>,
+    ) -> Result<(), JsValue> {
         USE_WEBGPU.store(true, Ordering::Relaxed);
+        WEBGPU_SCOPE.store(
+            match scope.as_deref() {
+                Some("encoder") => 1,
+                Some("decoder") => 2,
+                _ => 0,
+            },
+            Ordering::Relaxed,
+        );
+        WEBGPU_LAYOUT.store(
+            match preferred_layout.as_deref() {
+                Some("NCHW") => 1,
+                Some("NHWC") => 2,
+                _ => 0,
+            },
+            Ordering::Relaxed,
+        );
         std::panic::set_hook(Box::new(|info| {
             let bt = std::backtrace::Backtrace::force_capture();
             web_sys::console::error_1(&format!("PANIC: {info}\nBT: {bt}").as_str().into());
@@ -560,8 +581,12 @@ pub mod wasm {
 
     // A/B backend: true bila init_webgpu() dipakai (lihat init_webgpu).
     static USE_WEBGPU: AtomicBool = AtomicBool::new(false);
+    // 0 = default EP, 1 = NCHW, 2 = NHWC.
+    static WEBGPU_LAYOUT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    // 0 = encoder+decoder, 1 = encoder only, 2 = decoder only (CPU for the other).
+    static WEBGPU_SCOPE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-    fn session_builder() -> Result<SessionBuilder, JsValue> {
+    fn session_builder(encoder: bool) -> Result<SessionBuilder, JsValue> {
         let level = *OPT_LEVEL.lock().map_err(js)?;
         let g = match level {
             0 => GraphOptimizationLevel::Disable,
@@ -574,9 +599,18 @@ pub mod wasm {
             .map_err(js)?
             .with_optimization_level(g)
             .map_err(js)?;
-        if USE_WEBGPU.load(Ordering::Relaxed) {
+        let scope = WEBGPU_SCOPE.load(Ordering::Relaxed);
+        let use_gpu = USE_WEBGPU.load(Ordering::Relaxed)
+            && (scope == 0 || (scope == 1 && encoder) || (scope == 2 && !encoder));
+        if use_gpu {
+            let mut webgpu = WebGPU::default();
+            webgpu = match WEBGPU_LAYOUT.load(Ordering::Relaxed) {
+                1 => webgpu.with_preferred_layout(PreferredLayout::NCHW),
+                2 => webgpu.with_preferred_layout(PreferredLayout::NHWC),
+                _ => webgpu,
+            };
             builder = builder
-                .with_execution_providers(&[WebGPU::default().into()])
+                .with_execution_providers(&[webgpu.into(), WASM::default().into()])
                 .map_err(js)?;
         }
         Ok(builder)
@@ -585,7 +619,7 @@ pub mod wasm {
     /// Load the whisper encoder ONNX model into memory.
     #[wasm_bindgen]
     pub async fn load_encoder(bytes: &[u8]) -> Result<(), JsValue> {
-        let session = session_builder()?
+        let session = session_builder(true)?
             .commit_from_memory(bytes)
             .await
             .map_err(js)?;
@@ -596,7 +630,7 @@ pub mod wasm {
     /// Load the whisper merged decoder ONNX model into memory.
     #[wasm_bindgen]
     pub async fn load_decoder(bytes: &[u8]) -> Result<(), JsValue> {
-        let session = session_builder()?
+        let session = session_builder(false)?
             .commit_from_memory(bytes)
             .await
             .map_err(js)?;

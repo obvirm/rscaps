@@ -41,6 +41,9 @@ tempfile = "3"
 [features]
 default = ["gpu-cuda"]
 gpu-cuda = ["whisper-spike/gpu-cuda"]
+# GPU universal Windows (NVIDIA/AMD/Intel) via DirectML: build with
+# --no-default-features --features gpu-directml.
+gpu-directml = ["whisper-spike/gpu-directml"]
 # Enable gpu-skia for Skia GPU renderer (requires Vulkan)
 gpu-skia = ["rscaps-cli/gpu-skia"]
 # Embed studio/dist (frontendDist) — tanpa ini cargo build = mode dev (devUrl 5177)

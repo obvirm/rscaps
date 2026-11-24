@@ -144,6 +144,29 @@ fn top_word_frac(text: &str) -> f32 {
     max as f32 / words as f32
 }
 
+/// Ekor mengulang teks yang sama >=3x (mis. "DATIL SAHAR DATIL SAHAR") —
+/// sinyal decoder GPU melantur di akhir audio. Dipakai untuk fallback CPU.
+fn tail_repeats(parsed: &serde_json::Value) -> bool {
+    let segs = match parsed["segments"].as_array() {
+        Some(v) => v,
+        None => return false,
+    };
+    let tail_start = segs.len().saturating_sub(8);
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for s in &segs[tail_start..] {
+        let t = s["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_string();
+        if !t.is_empty() {
+            *counts.entry(t).or_default() += 1;
+        }
+    }
+    counts.values().any(|&c| c >= 3)
+}
+
 /// Cakupan waktu (detik) dari segmen hasil decode relatif terhadap durasi
 /// jendela. Decode yang terpotong/early-EOS punya coverage sangat kecil.
 fn coverage_sec(parsed: &serde_json::Value) -> f32 {
@@ -254,7 +277,11 @@ fn gpu_mode() -> &'static str {
 fn default_gpu_mode() -> &'static str {
     #[cfg(feature = "gpu-cuda")]
     {
-        "cuda"
+        // Encoder saja: CUDA decoder (merged If/KV graph) masih salah untuk
+        // fp16/q8 di ort-cuda (terbukti: full GPU → teks kacau), sedangkan
+        // encoder CUDA benar dan decoder CPU justru lebih cepat (autoregresif
+        // kecil). Mode "cuda"/"full" tetap opt-in untuk eksperimen.
+        "cuda-encoder"
     }
     #[cfg(all(not(feature = "gpu-cuda"), feature = "gpu-directml"))]
     {
@@ -1259,6 +1286,20 @@ impl NativeEngine {
                 if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, 448) {
                     if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
                         if coverage_sec(&p) > coverage_sec(&parsed) {
+                            parsed = p;
+                        }
+                    }
+                }
+            }
+        }
+
+        if tail_repeats(&parsed) {
+            if let Ok(mut cpu) = NativeEngine::load_mode(&self.model, &self.dir, &self.quant, "off") {
+                if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, 448) {
+                    if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if !tail_repeats(&p)
+                            && coverage_sec(&p) >= coverage_sec(&parsed) * 0.6
+                        {
                             parsed = p;
                         }
                     }
