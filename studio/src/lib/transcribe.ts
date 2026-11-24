@@ -2,6 +2,7 @@ import { decodeAudioTo16kMono } from "./audio";
 import type { WhisperModel, WhisperQuant } from "./types";
 import { langToTokenId, DEFAULT_QUANT } from "./types";
 import { invoke, isTauri } from "./tauri";
+import whisperModels from "../../../config/whisper-models.json";
 
 export interface TranscribeSegment {
   start: number; // seconds
@@ -20,29 +21,22 @@ export type ProgressFn = (fraction: number, stage: TranscribeStage) => void;
 // its title/subtext. `fraction` is the overall 0→1 progress across all phases.
 export type TranscribeStage = "engine" | "model" | "audio" | "transcribe" | "done";
 
-// The spike engine serves every model size through a runtime arch config that
-// JS passes via set_arch() before the ONNX bytes are loaded (layers/heads/
-// d_model/n_mels differ per size; encoder len 1500, head_dim 64 and the token
-// layout are shared). Keep in sync with each Xenova/whisper-* config.json.
+// Satu sumber metadata model: config/whisper-models.json (dipakai juga oleh
+// crate whisper-spike lewat policy.rs). File ini menentukan arch runtime yang
+// dikirim via set_arch(), repo HuggingFace, sufiks quant, dan kombinasi
+// WebGPU yang sudah terbukti benar.
 interface ArchConfig {
-  layers: number; // encoder layer count
-  decLayers: number; // decoder layer count (≠ layers hanya pada turbo: 32/4)
+  layers: number;
+  decLayers: number;
   heads: number;
   dModel: number;
   nMels: number;
 }
-const MODEL_ARCH: Partial<Record<WhisperModel, ArchConfig>> = {
-  // onnx-community exports use a uniform head_dim of 64, so heads = d_model / 64
-  // (tiny's original config is 4 heads x 96, but the graph is 6 heads x 64).
-  tiny: { layers: 4, decLayers: 4, heads: 6, dModel: 384, nMels: 80 },
-  base: { layers: 6, decLayers: 6, heads: 8, dModel: 512, nMels: 80 },
-  small: { layers: 12, decLayers: 12, heads: 12, dModel: 768, nMels: 80 },
-  medium: { layers: 24, decLayers: 24, heads: 16, dModel: 1024, nMels: 80 },
-  // n_mels 128 khas v3 (bukan 80).
-  large: { layers: 32, decLayers: 32, heads: 20, dModel: 1280, nMels: 128 },
-  // turbo: encoder 32 layer, decoder hanya 4 layer (distilasi large-v3).
-  turbo: { layers: 32, decLayers: 4, heads: 20, dModel: 1280, nMels: 128 },
-};
+interface ModelSpec extends ArchConfig {
+  classic: boolean;
+  repo: string;
+}
+const MODEL_ARCH = whisperModels.models as Partial<Record<WhisperModel, ModelSpec>>;
 
 const SUPPORTED_MODELS: ReadonlySet<WhisperModel> = new Set(
   Object.keys(MODEL_ARCH) as WhisperModel[],
@@ -51,34 +45,18 @@ const SUPPORTED_MODELS: ReadonlySet<WhisperModel> = new Set(
 // onnx-community repos per model (sama dengan mapping tscaps). File diunduh
 // langsung dari HuggingFace on-demand dan di-cache di browser (CacheStorage);
 // folder lokal /models/whisper-<model>-<quant>/ tetap jadi fast-path dev.
-const MODEL_REPO: Record<WhisperModel, string> = {
-  tiny: "onnx-community/whisper-tiny_timestamped",
-  base: "onnx-community/whisper-base_timestamped",
-  small: "onnx-community/whisper-small_timestamped",
-  medium: "onnx-community/whisper-medium_timestamped",
-  large: "onnx-community/whisper-large-v3-ONNX",
-  turbo: "onnx-community/whisper-large-v3-turbo_timestamped",
-};
+const MODEL_REPO = Object.fromEntries(
+  Object.entries(MODEL_ARCH).map(([id, spec]) => [id, spec!.repo]),
+) as Record<WhisperModel, string>;
 
 // Suffix nama file ONNX per varian kuantisasi di repo onnx-community
 // ("" = fp32 polos). q8 memakai nama *_quantized.
-const QUANT_SUFFIX: Record<WhisperQuant, string> = {
-  fp32: "",
-  fp16: "_fp16",
-  int8: "_int8",
-  uint8: "_uint8",
-  q8: "_quantized",
-  q4: "_q4",
-  q4f16: "_q4f16",
-  bnb4: "_bnb4",
-};
+const QUANT_SUFFIX = whisperModels.quantSuffix as Record<WhisperQuant, string>;
 
-// Encoder: A/B cross-load (large) membuktikan encoder kuant (_quantized/uint8)
-// membuat decoder memilih tail-hallucination, sementara decoder kuant relatif
-// baik; encoder int8 stabil di semua ukuran. Encoder SELALU diambil varian
-// int8 — decoder tetap mengikuti quant yang dipilih user. (Fast-path folder
-// lokal bisa beda asal file-nya int8/fp16 non-kuant — sama-sama stabil.)
-const ENCODER_SUFFIX = "_int8";
+// Encoder SELALU varian int8 (stabil di semua ukuran); decoder mengikuti
+// quant pilihan user.
+const ENCODER_SUFFIX = whisperModels.encoderSuffix;
+const WEBGPU_SAFE = new Set(whisperModels.webgpuSafe);
 
 export function isModelSupported(model: WhisperModel): boolean {
   return SUPPORTED_MODELS.has(model);
@@ -133,19 +111,12 @@ interface WhisperModule {
   ) => Promise<string>;
 }
 
-// Vocab variant per repo (ground truth generation_config.json, 2026-11):
-// repo *_timestamped tiny/base/small/medium = klasik (transcribe=50359,
-// notimestamps=50363, ts_begin=50364); large-v3-ONNX & turbo_timestamped =
-// v3 (transcribe=50360, notimestamps=50364, ts_begin=50365). Bahasa &
-// decoder_start sama di keduanya.
-const MODEL_CLASSIC: Partial<Record<WhisperModel, boolean>> = {
-  tiny: true,
-  base: true,
-  small: true,
-  medium: true,
-  large: false,
-  turbo: false,
-};
+// Vocab variant per repo (ground truth generation_config.json): klasik
+// (transcribe=50359) untuk tiny/base/small/medium; v3 (50360) untuk
+// large-v3/turbo. Diturunkan dari config yang sama dengan Rust.
+const MODEL_CLASSIC = Object.fromEntries(
+  Object.entries(MODEL_ARCH).map(([id, spec]) => [id, spec!.classic]),
+) as Partial<Record<WhisperModel, boolean>>;
 const MAX_TOKENS = 448;
 
 // One module instance per model: the wasm holds that model's encoder/decoder
@@ -500,7 +471,6 @@ export async function transcribeBlob(
   // (small/medium/large/turbo) dan varian fp16/q4/int8 menghasilkan teks
   // menyimpang di EP WebGPU walau op-nya "didukung" — jadi turunkan ke CPU
   // daripada mengembalikan transkrip rusak.
-  const WEBGPU_SAFE = new Set(["base:q8"]);
   let backend = (backendOverride ??
     ((globalThis as { __rscapsBackend?: string }).__rscapsBackend === "webgpu" ? "webgpu" : "cpu")) as
     | "cpu"

@@ -2,6 +2,7 @@ pub fn placeholder() {}
 
 mod engine;
 mod mel;
+pub mod policy;
 mod tokenizer;
 
 #[cfg(not(target_arch = "wasm32"))]

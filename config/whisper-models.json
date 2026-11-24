@@ -1,0 +1,74 @@
+{
+  "encoderSuffix": "_int8",
+  "dirTemplate": "whisper-{model}-{quant}",
+  "headDim": 64,
+  "vocab": 51865,
+  "maxTokens": 448,
+  "quantSuffix": {
+    "fp32": "",
+    "fp16": "_fp16",
+    "int8": "_int8",
+    "uint8": "_uint8",
+    "q8": "_quantized",
+    "q4": "_q4",
+    "q4f16": "_q4f16",
+    "bnb4": "_bnb4"
+  },
+  "webgpuSafe": ["base:q8"],
+  "models": {
+    "tiny": {
+      "layers": 4,
+      "decLayers": 4,
+      "heads": 6,
+      "dModel": 384,
+      "nMels": 80,
+      "classic": true,
+      "repo": "onnx-community/whisper-tiny_timestamped"
+    },
+    "base": {
+      "layers": 6,
+      "decLayers": 6,
+      "heads": 8,
+      "dModel": 512,
+      "nMels": 80,
+      "classic": true,
+      "repo": "onnx-community/whisper-base_timestamped"
+    },
+    "small": {
+      "layers": 12,
+      "decLayers": 12,
+      "heads": 12,
+      "dModel": 768,
+      "nMels": 80,
+      "classic": true,
+      "repo": "onnx-community/whisper-small_timestamped"
+    },
+    "medium": {
+      "layers": 24,
+      "decLayers": 24,
+      "heads": 16,
+      "dModel": 1024,
+      "nMels": 80,
+      "classic": true,
+      "repo": "onnx-community/whisper-medium_timestamped"
+    },
+    "large": {
+      "layers": 32,
+      "decLayers": 32,
+      "heads": 20,
+      "dModel": 1280,
+      "nMels": 128,
+      "classic": false,
+      "repo": "onnx-community/whisper-large-v3-ONNX"
+    },
+    "turbo": {
+      "layers": 32,
+      "decLayers": 4,
+      "heads": 20,
+      "dModel": 1280,
+      "nMels": 128,
+      "classic": false,
+      "repo": "onnx-community/whisper-large-v3-turbo_timestamped"
+    }
+  }
+}

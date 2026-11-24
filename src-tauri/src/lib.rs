@@ -337,7 +337,7 @@ async fn transcribe_native(
                     .ancestors()
                     .find_map(|a| {
                         let p = a.join("models");
-                        p.join(format!("whisper-{model}-q8")).is_dir().then_some(p)
+                        p.join(whisper_spike::policy::model_dir(&model, "q8")).is_dir().then_some(p)
                     });
                 exe_dir
                     .filter(|p| p.exists())
@@ -347,7 +347,7 @@ async fn transcribe_native(
                 cwd
             }
         };
-        let dir = models_dir.join(format!("whisper-{model}-{quant}"));
+        let dir = models_dir.join(whisper_spike::policy::model_dir(&model, &quant));
         set_prog(&run_id, 0.2, "model");
         let mut engine = whisper_spike::native::NativeEngine::load(&model, &dir, &quant)
             .map_err(|e| format!("model {dir:?}: {e}"))?;

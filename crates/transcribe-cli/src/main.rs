@@ -42,7 +42,7 @@ fn main() {
     };
     let load_ms = t0.elapsed().as_millis();
 
-    let dir = models_dir.join(format!("whisper-{model}-{quant}"));
+    let dir = models_dir.join(whisper_spike::policy::model_dir(&model, &quant));
     let t1 = std::time::Instant::now();
     let mut engine =
         match whisper_spike::native::NativeEngine::load(&model, &dir, &quant) {

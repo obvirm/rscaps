@@ -210,18 +210,10 @@ pub struct NativeEngine {
     dir: std::path::PathBuf,
 }
 
-/// (layers, dec_layers, heads, d_model, n_mels, classic) per model —
-/// ground truth config.json onnx-community (sama dengan tabel transcribe.ts).
+/// (layers, dec_layers, heads, d_model, n_mels, classic) per model.
+/// Sumber tunggal: `config/whisper-models.json` (lihat `crate::policy`).
 pub fn arch_table(model: &str) -> (u32, u32, u32, u32, u32, bool) {
-    match model {
-        "tiny" => (4, 4, 6, 384, 80, true),
-        "base" => (6, 6, 8, 512, 80, true),
-        "small" => (12, 12, 12, 768, 80, true),
-        "medium" => (24, 24, 16, 1024, 80, true),
-        "large" => (32, 32, 20, 1280, 128, false),
-        "turbo" => (32, 4, 20, 1280, 128, false),
-        _ => (6, 6, 8, 512, 80, true),
-    }
+    crate::policy::arch_table(model)
 }
 
 /// Token id bahasa (urutan alfabetis whisper, en=50259; id=50275).
@@ -277,11 +269,9 @@ fn gpu_mode() -> &'static str {
 fn default_gpu_mode() -> &'static str {
     #[cfg(feature = "gpu-cuda")]
     {
-        // Encoder saja: CUDA decoder (merged If/KV graph) masih salah untuk
-        // fp16/q8 di ort-cuda (terbukti: full GPU → teks kacau), sedangkan
-        // encoder CUDA benar dan decoder CPU justru lebih cepat (autoregresif
-        // kecil). Mode "cuda"/"full" tetap opt-in untuk eksperimen.
-        "cuda-encoder"
+        // Full CUDA: decoder memakai graph-opt Disable + attention MATH
+        // (lihat native_builder) supaya merged If/KV benar untuk semua quant.
+        "cuda"
     }
     #[cfg(all(not(feature = "gpu-cuda"), feature = "gpu-directml"))]
     {
@@ -302,10 +292,23 @@ fn default_gpu_mode() -> &'static str {
 }
 
 fn native_builder(
-    level: ort::session::builder::GraphOptimizationLevel,
+    mut level: ort::session::builder::GraphOptimizationLevel,
     ep: &str,
     kind: &str,
 ) -> Result<ort::session::builder::SessionBuilder, Box<dyn Error>> {
+    if kind == "dec" && ep == "cuda" {
+        // Decoder merged (If/KV) + CUDA: graph optimization menghasilkan
+        // logits salah untuk q8 (dan rapuh untuk fp16). Disable = benar.
+        level = GraphOptimizationLevel::Disable;
+        if let Ok(v) = std::env::var("RSCAPS_DEC_OPT") {
+            level = match v.as_str() {
+                "disable" => GraphOptimizationLevel::Disable,
+                "basic" => GraphOptimizationLevel::Level1,
+                "extended" => GraphOptimizationLevel::Level2,
+                _ => GraphOptimizationLevel::Level3,
+            };
+        }
+    }
     let mut b = Session::builder()?.with_optimization_level(level)?;
     if let Ok(prefix) = std::env::var("RSCAPS_PROFILE") {
         b = b.with_profiling(format!("{prefix}_{kind}_{}.json", std::process::id()))?;
@@ -332,14 +335,25 @@ fn native_builder(
         if graph {
             cuda = cuda.with_cuda_graph(true);
         }
-        if std::env::var("RSCAPS_ATTN").is_ok() {
+        let attn = std::env::var("RSCAPS_ATTN").ok();
+        // Decoder CUDA default MATH: backend flash/cudnn bawaan menghasilkan
+        // logits salah untuk graph merged Whisper. Encoder tidak disentuh
+        // kecuali RSCAPS_ATTN diberikan eksplisit.
+        if attn.is_some() || kind == "dec" {
             use ort::ep::cuda::AttentionBackend;
-            cuda = cuda.with_attention_backend(
-                AttentionBackend::FLASH_ATTENTION
-                    | AttentionBackend::EFFICIENT_ATTENTION
-                    | AttentionBackend::CUDNN_FLASH_ATTENTION
-                    | AttentionBackend::MATH,
-            );
+            let v = attn.as_deref().unwrap_or("math");
+            if v != "off" {
+                // "math" = jalur aman; "1"/lain = semua flag.
+                let backends = if v == "math" {
+                    AttentionBackend::MATH
+                } else {
+                    AttentionBackend::FLASH_ATTENTION
+                        | AttentionBackend::EFFICIENT_ATTENTION
+                        | AttentionBackend::CUDNN_FLASH_ATTENTION
+                        | AttentionBackend::MATH
+                };
+                cuda = cuda.with_attention_backend(backends);
+            }
         }
         let dispatch: ort::ep::ExecutionProviderDispatch = cuda.into();
         b = b.with_execution_providers(&[dispatch.error_on_failure()])?;
@@ -373,12 +387,34 @@ impl NativeEngine {
     }
 
     pub fn load(model: &str, dir: &Path, quant: &str) -> Result<Self, Box<dyn Error>> {
-        Self::load_mode(model, dir, quant, gpu_mode())
+        // Full CUDA (encoder+decoder) untuk semua quant; decoder CUDA memakai
+        // RSCAPS_DEC_OPT=disable default (lihat native_builder) agar benar.
+        #[cfg(feature = "gpu-cuda")]
+        let mode = if std::env::var("RSCAPS_GPU_MODE").is_err()
+            && std::env::var("RSCAPS_GPU_BOOST").as_deref() != Ok("1")
+        {
+            let _ = quant;
+            "cuda"
+        } else {
+            gpu_mode()
+        };
+        #[cfg(not(feature = "gpu-cuda"))]
+        let mode = gpu_mode();
+        Self::load_mode(model, dir, quant, mode)
     }
 
     fn load_mode(model: &str, dir: &Path, quant: &str, mode: &str) -> Result<Self, Box<dyn Error>> {
         let (layers, dec_layers, heads, d_model, n_mels, classic) = arch_table(model);
-        engine::set_arch_value(layers, dec_layers, heads, 64, d_model, 51865, n_mels, classic);
+        engine::set_arch_value(
+            layers,
+            dec_layers,
+            heads,
+            crate::policy::head_dim(),
+            d_model,
+            crate::policy::vocab(),
+            n_mels,
+            classic,
+        );
         // Mapping opt-level SAMA dengan transcribe.ts (ort-web fork):
         // fp16/q4f16 + small|medium-q8 = Basic (fusion ORT #26717), lainnya = All.
         let level = if quant == "fp16"
@@ -1052,7 +1088,8 @@ impl NativeEngine {
         let mut t_sample_total = std::time::Duration::ZERO;
         let mut scores: Vec<f32> = vec![0.0; n];
         let mut nsteps: Vec<usize> = vec![0; n];
-        while step < 448 && done.iter().any(|&d| !d) {
+        let max_tokens = crate::policy::max_tokens() as usize;
+        while step < max_tokens && done.iter().any(|&d| !d) {
             step += 1;
             let ids = Array2::from_shape_vec((n, input_ids.len() / n), input_ids.clone())?;
             let mut inputs: Vec<(String, ort::session::SessionInputValue<'_>)> = Vec::new();
@@ -1194,7 +1231,8 @@ impl NativeEngine {
             }
             t_sample_total += t_sample.elapsed();
             if done.iter().all(|&d| d)
-                || prompt_len + generated.iter().map(|g| g.len()).max().unwrap_or(0) >= 448
+                || prompt_len + generated.iter().map(|g| g.len()).max().unwrap_or(0)
+                    >= crate::policy::max_tokens() as usize
             {
                 break;
             }
@@ -1279,11 +1317,11 @@ impl NativeEngine {
     ) -> Result<(Vec<NativeSegment>, String), Box<dyn Error>> {
         const SAMPLE_RATE: usize = 16000;
         let mut parsed: serde_json::Value =
-            serde_json::from_str(&self.transcribe(chunk, lang_id, true, 448)?)?;
+            serde_json::from_str(&self.transcribe(chunk, lang_id, true, crate::policy::max_tokens() as usize)?)?;
 
         if coverage_sec(&parsed) < window_dur * 0.5 && has_speech_energy(chunk) {
             if let Ok(mut cpu) = NativeEngine::load_mode(&self.model, &self.dir, &self.quant, "off") {
-                if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, 448) {
+                if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, crate::policy::max_tokens() as usize) {
                     if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
                         if coverage_sec(&p) > coverage_sec(&parsed) {
                             parsed = p;
@@ -1295,7 +1333,7 @@ impl NativeEngine {
 
         if tail_repeats(&parsed) {
             if let Ok(mut cpu) = NativeEngine::load_mode(&self.model, &self.dir, &self.quant, "off") {
-                if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, 448) {
+                if let Ok(raw) = cpu.transcribe(chunk, lang_id, true, crate::policy::max_tokens() as usize) {
                     if let Ok(p) = serde_json::from_str::<serde_json::Value>(&raw) {
                         if !tail_repeats(&p)
                             && coverage_sec(&p) >= coverage_sec(&parsed) * 0.6
@@ -1324,7 +1362,7 @@ impl NativeEngine {
                     break;
                 }
                 let slice_start = (s_start / SAMPLE_RATE) as f32;
-                let raw = self.transcribe(slice, lang_id, true, 448)?;
+                let raw = self.transcribe(slice, lang_id, true, crate::policy::max_tokens() as usize)?;
                 let p2: serde_json::Value = serde_json::from_str(&raw)?;
                 for seg in p2["segments"].as_array().unwrap_or(&vec![]) {
                     let text = seg["text"].as_str().unwrap_or("").trim().to_string();
