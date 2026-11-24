@@ -326,27 +326,7 @@ async fn transcribe_native(
             .map_err(|e| format!("audio: {e}"))?;
         set_prog(&run_id, 0.12, "audio");
 
-        // models dir: cwd → exe dir → ancestor exe (target/release/... → repo/models).
-        let models_dir = {
-            let cwd = std::path::PathBuf::from("models");
-            if cwd.exists() {
-                cwd
-            } else if let Ok(exe) = std::env::current_exe() {
-                let exe_dir = exe.parent().map(|p| p.join("models"));
-                let anc = exe
-                    .ancestors()
-                    .find_map(|a| {
-                        let p = a.join("models");
-                        p.join(whisper_spike::policy::model_dir(&model, "q8")).is_dir().then_some(p)
-                    });
-                exe_dir
-                    .filter(|p| p.exists())
-                    .or(anc)
-                    .unwrap_or(cwd)
-            } else {
-                cwd
-            }
-        };
+        let models_dir = whisper_spike::policy::models_dir_for(&model, &quant);
         let dir = models_dir.join(whisper_spike::policy::model_dir(&model, &quant));
         set_prog(&run_id, 0.2, "model");
         let mut engine = whisper_spike::native::NativeEngine::load(&model, &dir, &quant)

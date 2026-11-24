@@ -51,6 +51,22 @@ pub fn model_dir(model: &str, quant: &str) -> String {
         .replace("{quant}", quant)
 }
 
+/// Cari folder `models/` yang benar: cwd dulu, lalu di sekitar executable
+/// (target/release/... → repo/models). Satu logika untuk CLI dan Tauri.
+pub fn models_dir_for(model: &str, quant: &str) -> std::path::PathBuf {
+    let sub = model_dir(model, quant);
+    let mut candidates = vec![std::path::PathBuf::from("models")];
+    if let Ok(exe) = std::env::current_exe() {
+        for a in exe.ancestors() {
+            candidates.push(a.join("models"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.join(&sub).is_dir())
+        .unwrap_or_else(|| std::path::PathBuf::from("models"))
+}
+
 pub fn head_dim() -> u32 {
     u32_field(policy(), "headDim", 64)
 }

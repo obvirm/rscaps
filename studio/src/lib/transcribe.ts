@@ -57,6 +57,11 @@ const QUANT_SUFFIX = whisperModels.quantSuffix as Record<WhisperQuant, string>;
 // quant pilihan user.
 const ENCODER_SUFFIX = whisperModels.encoderSuffix;
 const WEBGPU_SAFE = new Set(whisperModels.webgpuSafe);
+const MODEL_DIR_TEMPLATE = whisperModels.dirTemplate;
+
+function modelDir(model: WhisperModel, quant: WhisperQuant): string {
+  return `/models/${MODEL_DIR_TEMPLATE.replace("{model}", model).replace("{quant}", quant)}`;
+}
 
 export function isModelSupported(model: WhisperModel): boolean {
   return SUPPORTED_MODELS.has(model);
@@ -183,7 +188,7 @@ async function fetchModelExt(
   base: string,
   onFrac: (frac: number) => void,
 ): Promise<{ pb: Uint8Array; data: Uint8Array } | null> {
-  const dir = `/models/whisper-${model}-${quant}`;
+  const dir = modelDir(model, quant);
   try {
     const res = await fetch(`${dir}/${base}.ext.onnx`);
     if (!res.ok || !(res.headers.get("content-type") || "").includes("octet-stream")) return null;
@@ -205,7 +210,7 @@ async function fetchModelFile(
 ): Promise<Uint8Array> {
   // Fast-path dev: folder lokal /models/whisper-<model>-<quant>/ (nama file
   // selalu polos encoder_model.onnx / decoder_model_merged.onnx).
-  const local = `/models/whisper-${model}-${quant}/${file.replace(/_quantized|_q4f16|_q4|_fp16|_int8|_uint8|_bnb4/, "")}`;
+  const local = `${modelDir(model, quant)}/${file.replace(/_quantized|_q4f16|_q4|_fp16|_int8|_uint8|_bnb4/, "")}`;
   try {
     const res = await fetch(local);
     if (res.ok && (res.headers.get("content-type") || "").includes("octet-stream")) {
@@ -315,7 +320,7 @@ async function loadWhisper(
     let tok: string;
     if (quant === DEFAULT_QUANT[model]) {
       // fast-path lokal sudah menyediakan tokenizer di folder default
-      const tokRes = await fetch(`/models/whisper-${model}-${quant}/tokenizer.json`);
+      const tokRes = await fetch(`${modelDir(model, quant)}/tokenizer.json`);
       if (tokRes.ok) {
         tok = await tokRes.text();
       } else {

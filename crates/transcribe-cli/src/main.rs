@@ -10,13 +10,13 @@ fn main() {
     let mut model = "base".to_string();
     let mut lang = "id".to_string();
     let mut quant = "fp16".to_string();
-    let mut models_dir = default_models_dir();
+    let mut models_dir: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--model" => model = args.next().unwrap_or(model),
             "--lang" => lang = args.next().unwrap_or(lang),
             "--quant" => quant = args.next().unwrap_or(quant),
-            "--models-dir" => models_dir = PathBuf::from(args.next().unwrap_or_default()),
+            "--models-dir" => models_dir = Some(PathBuf::from(args.next().unwrap_or_default())),
             "--lang-help" => {
                 println!("id zh de es ru ko ja it fr pt hi th vi pl ar ms tr nl (default en)");
                 return;
@@ -42,6 +42,8 @@ fn main() {
     };
     let load_ms = t0.elapsed().as_millis();
 
+    let models_dir =
+        models_dir.unwrap_or_else(|| whisper_spike::policy::models_dir_for(&model, &quant));
     let dir = models_dir.join(whisper_spike::policy::model_dir(&model, &quant));
     let t1 = std::time::Instant::now();
     let mut engine =
@@ -86,17 +88,4 @@ fn main() {
         load_ms
     );
     println!("{out}");
-}
-
-fn default_models_dir() -> PathBuf {
-    // cwd dulu, lalu relative ke exe (target/... → repo/models).
-    let cwd = PathBuf::from("models");
-    if cwd.exists() {
-        return cwd;
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.ancestors().nth(4).map(|r| r.join("models")))
-        .filter(|p| p.exists())
-        .unwrap_or(cwd)
 }
