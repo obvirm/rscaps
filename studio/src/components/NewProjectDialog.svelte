@@ -15,6 +15,7 @@
     type WhisperQuant,
   } from "../lib/types";
   import { isModelSupported } from "../lib/transcribe";
+  import { isTauri } from "../lib/tauri";
   import type { VideoProbe } from "../lib/video";
 
   let {
@@ -71,9 +72,11 @@
       store.language = language;
       store.quant = quant;
       try {
-        const { preloadWebGpu } = await import("../lib/whisper/webgpu");
-        store.setStatus("Memuat model Whisper...");
-        await preloadWebGpu(model, backend, language);
+        if (!isTauri()) {
+          const { preloadWebGpu } = await import("../lib/whisper/webgpu");
+          store.setStatus("Memuat model Whisper...");
+          await preloadWebGpu(model, backend, language);
+        }
       } catch (err) {
         store.setStatus(String(err), true);
         creating = false;
