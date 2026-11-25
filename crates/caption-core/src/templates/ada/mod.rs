@@ -250,7 +250,7 @@ mod tests {
             cues: texts
                 .iter()
                 .enumerate()
-                .map(|(i, text)| crate::Cue {
+                .map(|(i, text)| crate::Cue { words: None,
                     start_ms: i as u32 * 2000,
                     end_ms: i as u32 * 2000 + 1500,
                     text: (*text).into(),

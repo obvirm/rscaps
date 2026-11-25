@@ -541,7 +541,7 @@ mod tests {
 
     fn doc(text: &str) -> CaptionDocument {
         CaptionDocument {
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: text.into(),

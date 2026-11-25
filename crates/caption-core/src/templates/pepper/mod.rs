@@ -382,7 +382,7 @@ mod tests {
     fn splits_by_sentence_and_eighteen_chars_on_a_single_line() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "this is way more than eighteen characters, right.".into(),

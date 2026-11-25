@@ -13,6 +13,8 @@ export interface TranscribeSegment {
 export interface TranscribeResult {
   segments: TranscribeSegment[];
   text: string;
+  /** Word-level timings from the hybrid DTW path (ms, absolute timeline). */
+  words?: { text: string; start_ms: number; end_ms: number }[];
 }
 
 export type ProgressFn = (fraction: number, stage: TranscribeStage) => void;
@@ -56,7 +58,7 @@ const QUANT_SUFFIX = whisperModels.quantSuffix as Record<WhisperQuant, string>;
 // Encoder SELALU varian int8 (stabil di semua ukuran); decoder mengikuti
 // quant pilihan user.
 const ENCODER_SUFFIX = whisperModels.encoderSuffix;
-const WEBGPU_SAFE = new Set(whisperModels.webgpuSafe);
+const WEBGPU_FULL = new Set(whisperModels.webgpuSafe);
 const MODEL_DIR_TEMPLATE = whisperModels.dirTemplate;
 
 function modelDir(model: WhisperModel, quant: WhisperQuant): string {
@@ -82,6 +84,49 @@ function hasSpeechEnergy(samples: Float32Array): boolean {
   }
   return peak > 0.01;
 }
+
+// Buang ekor halu: kata yang mengulang kata terakhir segmen sebelumnya,
+// segmen kembar beruntun, outro khas Whisper ("Terima kasih.", "Bye."), dan
+// ekor berdensitas rendah (1–2 kata membentang >=2,5 detik). Frasa normal
+// seperti "Let's go." (2 kata/1s) tidak tersentuh.
+function trimLowDensityTail(
+  segments: TranscribeSegment[],
+  totalDuration: number,
+): TranscribeSegment[] {
+  const normalize = (text: string) =>
+    text
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, "")
+      .trim();
+  const OUTRO =
+    /^(terima kasih|thank you|thanks for watching|bye|goodbye|sampai jumpa|sampai ketemu|see you|ご視聴ありがとうございました|また会いましょう)$/u;
+  const out = [...segments];
+  while (out.length > 1) {
+    const s = out[out.length - 1];
+    const prev = out[out.length - 2];
+    const norm = normalize(s.text);
+    const prevNorm = normalize(prev.text);
+    if (!norm) {
+      out.pop();
+      continue;
+    }
+    const words = norm.split(/\s+/).length;
+    const prevWords = prevNorm ? prevNorm.split(/\s+/) : [];
+    const dur = Math.max(0.1, s.end - s.start);
+    const density = words / dur;
+    const late = s.start >= totalDuration * 0.5;
+    const repeatsPrev =
+      norm === prevNorm || (words === 1 && prevWords.includes(norm));
+    const outro = words <= 2 && OUTRO.test(norm) && late;
+    const sparseTail = words <= 2 && density < 0.7 && (dur >= 2.5 || late);
+    if (repeatsPrev || outro || sparseTail) {
+      out.pop();
+    } else {
+      break;
+    }
+  }
+  return out;
+}
 // whisper consumes a fixed 30 s window (480 000 samples -> 80x3000 mel).
 const CHUNK_SAMPLES = 30 * SAMPLE_RATE;
 
@@ -89,6 +134,7 @@ interface WhisperModule {
   default: (wasmUrl?: string) => Promise<unknown>;
   init: (distUrl?: string) => Promise<void>;
   init_webgpu?: (distUrl?: string, preferredLayout?: string, scope?: string) => Promise<void>;
+  load_decoder_split?: (prefill: Uint8Array, past: Uint8Array) => Promise<void>;
   set_arch: (
     layers: number,
     decLayers: number,
@@ -122,7 +168,7 @@ interface WhisperModule {
 const MODEL_CLASSIC = Object.fromEntries(
   Object.entries(MODEL_ARCH).map(([id, spec]) => [id, spec!.classic]),
 ) as Partial<Record<WhisperModel, boolean>>;
-const MAX_TOKENS = 448;
+const MAX_TOKENS = whisperModels.maxTokens;
 
 // One module instance per model: the wasm holds that model's encoder/decoder
 // sessions and arch, so switching size in the UI must reload (set_arch +
@@ -207,17 +253,20 @@ async function fetchModelFile(
   quant: WhisperQuant,
   file: string,
   onFrac: (frac: number) => void,
+  skipLocal = false,
 ): Promise<Uint8Array> {
   // Fast-path dev: folder lokal /models/whisper-<model>-<quant>/ (nama file
   // selalu polos encoder_model.onnx / decoder_model_merged.onnx).
-  const local = `${modelDir(model, quant)}/${file.replace(/_quantized|_q4f16|_q4|_fp16|_int8|_uint8|_bnb4/, "")}`;
-  try {
-    const res = await fetch(local);
-    if (res.ok && (res.headers.get("content-type") || "").includes("octet-stream")) {
-      return await readWithProgress(res, onFrac);
+  if (!skipLocal) {
+    const local = `${modelDir(model, quant)}/${file.replace(/_quantized|_q4f16|_q4|_fp16|_int8|_uint8|_bnb4/, "")}`;
+    try {
+      const res = await fetch(local);
+      if (res.ok && (res.headers.get("content-type") || "").includes("octet-stream")) {
+        return await readWithProgress(res, onFrac);
+      }
+    } catch {
+      /* fall through to HuggingFace */
     }
-  } catch {
-    /* fall through to HuggingFace */
   }
   // On-demand dari HuggingFace; hasil di-cache di CacheStorage supaya unduhan
   // pertama hanya sekali per kombinasi model×kuantisasi (gaya tscaps).
@@ -244,6 +293,47 @@ async function fetchModelFile(
   return bytes;
 }
 
+// WebGPU hanya benar dengan encoder int8 (fp16 encoder menghasilkan logits
+// rusak). Coba encoder dari folder q8 lokal, lalu HF encoder_model_int8.onnx
+// (lewati fast-path folder quant terpilih yang mungkin fp16).
+async function fetchWebgpuEncoder(
+  model: WhisperModel,
+  quant: WhisperQuant,
+  onFrac: (frac: number) => void,
+): Promise<Uint8Array> {
+  const local = `${modelDir(model, "q8")}/encoder_model.onnx`;
+  try {
+    const res = await fetch(local);
+    if (res.ok && (res.headers.get("content-type") || "").includes("octet-stream")) {
+      return await readWithProgress(res, onFrac);
+    }
+  } catch {
+    /* fall through */
+  }
+  return fetchModelFile(
+    model,
+    quant,
+    `encoder_model${ENCODER_SUFFIX}.onnx`,
+    onFrac,
+    true,
+  );
+}
+
+async function fetchWebgpuSplitDecoder(
+  model: WhisperModel,
+  quant: WhisperQuant,
+  onFrac: (frac: number) => void,
+): Promise<{ prefill: Uint8Array; past: Uint8Array }> {
+  const suffix = QUANT_SUFFIX[quant];
+  const prefill = await fetchModelFile(model, quant, `decoder_model${suffix}.onnx`, (f) =>
+    onFrac(f * 0.6),
+  );
+  const past = await fetchModelFile(model, quant, `decoder_with_past_model${suffix}.onnx`, (f) =>
+    onFrac(0.6 + f * 0.4),
+  );
+  return { prefill, past };
+}
+
 async function loadWhisper(
   model: WhisperModel,
   quant: WhisperQuant,
@@ -263,10 +353,15 @@ async function loadWhisper(
     // ort-web dist self-host; jangan pakai default Rust (hardcoded port dev
     // lama) — ikuti origin halaman supaya port dev berganti pun tetap jalan.
     if (backend === "webgpu" && mod.init_webgpu) {
+      const dbgScope = (globalThis as { __rscapsWebgpuScope?: string }).__rscapsWebgpuScope;
+      // Full WebGPU hanya kombinasi yang sudah terbukti (base/q8, base/fp16).
+      // Sisanya encoder-only: decoder WebGPU masih rusak untuk model lain,
+      // tetapi encoder GPU + decoder CPU tetap stabil dan lebih cepat dari CPU.
+      const scope = dbgScope ?? (WEBGPU_FULL.has(`${model}:${quant}`) ? undefined : "encoder");
       await mod.init_webgpu(
         `${location.origin}/nm/onnxruntime-web/dist/`,
         (globalThis as { __rscapsWebgpuLayout?: string }).__rscapsWebgpuLayout,
-        (globalThis as { __rscapsWebgpuScope?: string }).__rscapsWebgpuScope,
+        scope,
       );
     } else {
       await mod.init(`${location.origin}/nm/onnxruntime-web/dist/`);
@@ -288,7 +383,16 @@ async function loadWhisper(
     // carries a 51866th tokenizer entry but its logits stay 51865).
     const a = MODEL_ARCH[model];
     if (!a) throw new Error(`model "${model}" has no arch config`);
-    mod.set_arch(a.layers, a.decLayers, a.heads, 64, a.dModel, 51865, a.nMels, MODEL_CLASSIC[model] ?? false);
+    mod.set_arch(
+      a.layers,
+      a.decLayers,
+      a.heads,
+      whisperModels.headDim,
+      a.dModel,
+      whisperModels.vocab,
+      a.nMels,
+      MODEL_CLASSIC[model] ?? false,
+    );
 
     onProgress(0.05, "model");
     // fp16-weight models (fp16, q4f16) hit ORT regression #26717
@@ -304,19 +408,36 @@ async function loadWhisper(
     // Fetch sequentially with byte progress so the bar moves smoothly during a
     // first-run download. External-data variants (if the local folder carries
     // the split) are tried first and skip the full-file fetch entirely.
-    let decExt = await fetchModelExt(model, quant, "decoder_model_merged", (f) =>
-      onProgress(0.05 + f * 0.12, "model"),
-    );
+    let decExt =
+      backend === "webgpu"
+        ? null
+        : await fetchModelExt(model, quant, "decoder_model_merged", (f) =>
+            onProgress(0.05 + f * 0.12, "model"),
+          );
     let encExt: { pb: Uint8Array; data: Uint8Array } | null = null;
-    if (decExt) {
+    if (decExt && backend !== "webgpu") {
       encExt = await fetchModelExt(model, quant, `encoder_model${ENCODER_SUFFIX}`, (f) => onProgress(0.17 + f * 0.11, "model"));
     }
-    let enc: Uint8Array | null = encExt ? null : await fetchModelFile(model, quant, `encoder_model${ENCODER_SUFFIX}.onnx`, (f) =>
-      onProgress(0.05 + f * 0.13, "model"),
-    );
-    let dec: Uint8Array | null = decExt ? null : await fetchModelFile(model, quant, `decoder_model_merged${suffix}.onnx`, (f) =>
-      onProgress(0.18 + f * 0.1, "model"),
-    );
+    let enc: Uint8Array | null =
+      backend === "webgpu"
+        ? await fetchWebgpuEncoder(model, quant, (f) => onProgress(0.05 + f * 0.13, "model"))
+        : encExt
+          ? null
+          : await fetchModelFile(model, quant, `encoder_model${ENCODER_SUFFIX}.onnx`, (f) =>
+              onProgress(0.05 + f * 0.13, "model"),
+            );
+    // WebGPU: split decoder (prefill + with-past) menghindari cabang If
+    // per-layer yang salah dieksekusi di EP WebGPU (medium: 62 If, turbo: 6).
+    let splitDec: { prefill: Uint8Array; past: Uint8Array } | null =
+      backend === "webgpu" && mod.load_decoder_split
+        ? await fetchWebgpuSplitDecoder(model, quant, (f) => onProgress(0.18 + f * 0.1, "model"))
+        : null;
+    let dec: Uint8Array | null =
+      splitDec || decExt
+        ? null
+        : await fetchModelFile(model, quant, `decoder_model_merged${suffix}.onnx`, (f) =>
+            onProgress(0.18 + f * 0.1, "model"),
+          );
     let tok: string;
     if (quant === DEFAULT_QUANT[model]) {
       // fast-path lokal sudah menyediakan tokenizer di folder default
@@ -343,7 +464,9 @@ async function loadWhisper(
     // `_quantized` decoders break at All on small too (A/B scripts/tmp_runs/
     // small-q8-opt1.json: All = early-stop "Selamat tinggal", Basic = full id).
     const q8Basic = (model === "medium" || model === "small") && quant === "q8";
-    const optLevel = dbgLevel ?? (decExt || encExt ? 0 : quant === "fp16" || quant === "q4f16" || q8Basic ? 1 : 4);
+    const optLevel =
+      dbgLevel ??
+      (decExt || encExt ? 0 : quant === "fp16" || quant === "q4f16" || q8Basic ? 1 : 4);
     mod.set_opt_level(optLevel);
     // Escape hatch harness: override the HF avg-logprob quality gate per run.
     const dbgGate = (globalThis as { __rscapsLogprobGate?: number }).__rscapsLogprobGate;
@@ -361,7 +484,10 @@ async function loadWhisper(
     // during decoder build). JS refs are dropped right after each load so the
     // byte copies can be GC'd while the next session builds.
     const gExt = globalThis as { __rscapsExternalData?: { path: string; data: Uint8Array }[] };
-    if (decExt) {
+    if (splitDec) {
+      await mod.load_decoder_split!(splitDec.prefill, splitDec.past);
+      splitDec = null;
+    } else if (decExt) {
       // Path harus persis = location yang dibake ke pb oleh tmp_split_onnx.mjs.
       gExt.__rscapsExternalData = [{ path: "decoder_model_merged.weights.data", data: decExt.data }];
       try {
@@ -472,17 +598,23 @@ export async function transcribeBlob(
   if (isTauri()) {
     return transcribeNative(blob, model, quant, language, onProgress);
   }
-  // WebGPU (ort-web 1.31.1) terbukti benar hanya untuk base/q8. Model lain
-  // (small/medium/large/turbo) dan varian fp16/q4/int8 menghasilkan teks
-  // menyimpang di EP WebGPU walau op-nya "didukung" — jadi turunkan ke CPU
-  // daripada mengembalikan transkrip rusak.
-  let backend = (backendOverride ??
+  // Web = @huggingface/transformers v4: device "webgpu" atau "wasm" eksplisit.
+  // Default web memakai GPU; CPU hanya jika user memilih backend "cpu".
+  if ((globalThis as { __rscapsHybrid?: boolean }).__rscapsHybrid !== false) {
+    const backend = backendOverride ?? "webgpu";
+    const { transcribeWebGpu } = await import("./whisper/webgpu");
+    return transcribeWebGpu(blob, model, quant, language, backend, onProgress);
+  }
+  // WebGPU selalu aman: encoder int8 + decoder CPU untuk model non-base.
+  // Turbo dikecualikan: encoder WebGPU (int8) merusak 4 detik awal audio —
+  // CPU penuh mengembalikan frasa awal yang benar.
+  const requestedBackend = (backendOverride ??
     ((globalThis as { __rscapsBackend?: string }).__rscapsBackend === "webgpu" ? "webgpu" : "cpu")) as
     | "cpu"
     | "webgpu";
-  if (backend === "webgpu" && !WEBGPU_SAFE.has(`${model}:${quant}`)) {
-    console.warn(`[rscaps] WebGPU belum stabil untuk ${model}/${quant}; memakai CPU/WASM.`);
-    backend = "cpu";
+  const backend = requestedBackend === "webgpu" && model === "turbo" ? "cpu" : requestedBackend;
+  if (requestedBackend !== backend) {
+    console.warn("[rscaps] WebGPU turbo tidak stabil (encoder merusak awal audio); memakai CPU.");
   }
   const mod = await loadWhisper(model, quant, onProgress, backend);
 
@@ -588,5 +720,12 @@ export async function transcribeBlob(
   }
 
   onProgress(1, "done");
-  return { segments, text: texts.join(" ").trim() };
+  const trimmed = trimLowDensityTail(segments, totalSamples / SAMPLE_RATE);
+  return {
+    segments: trimmed,
+    text:
+      trimmed.length === segments.length
+        ? texts.join(" ").trim()
+        : trimmed.map((s) => s.text).join(" ").trim(),
+  };
 }

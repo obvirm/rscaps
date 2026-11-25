@@ -329,7 +329,7 @@ mod tests {
         assert_eq!(MAX_WIDTH_RATIO, 0.72, "maxWidthRatio is not in json");
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait. Hold on a second and look at this one now.".into(),
@@ -366,7 +366,7 @@ mod tests {
         // A word narrating at 500ms is gold, its neighbours stay white.
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "one two".into(),

@@ -298,7 +298,7 @@ mod tests {
     fn juno_splitter_is_clause_plus_twenty_five_chars_without_a_minimum() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait, hold on a second and look at this one right now please."

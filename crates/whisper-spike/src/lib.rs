@@ -1,9 +1,5 @@
-pub fn placeholder() {}
-
-mod engine;
-mod mel;
+pub use whisper_core::{engine, mel, tokenizer};
 pub mod policy;
-mod tokenizer;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
@@ -439,6 +435,11 @@ pub mod wasm {
 
     static ENCODER: Mutex<Option<Session>> = Mutex::new(None);
     static DECODER: Mutex<Option<Session>> = Mutex::new(None);
+    // Split decoder (WebGPU): prefill graph without past + with-past graph.
+    // Menghindari If/use_cache_branch per layer yang dipakai merged decoder
+    // medium (62 node If) dan turbo (6) — WebGPU salah memilih cabang.
+    static DECODER_PRE: Mutex<Option<Session>> = Mutex::new(None);
+    static DECODER_PAST: Mutex<Option<Session>> = Mutex::new(None);
     static TOKENIZER: Mutex<Option<WhisperTokenizer>> = Mutex::new(None);
     // Graph optimization level for the NEXT session loads (0=disable,
     // 1=basic, 2=extended, 3=all). fp16 exports crash ORT-wasm's fusion pass
@@ -635,7 +636,27 @@ pub mod wasm {
             .commit_from_memory(bytes)
             .await
             .map_err(js)?;
+        *DECODER_PRE.lock().map_err(js)? = None;
+        *DECODER_PAST.lock().map_err(js)? = None;
         *DECODER.lock().map_err(js)? = Some(session);
+        Ok(())
+    }
+
+    /// Load split decoders (prefill + with-past). Dipakai jalur WebGPU supaya
+    /// tidak mengeksekusi cabang If/use_cache_branch di merged decoder.
+    #[wasm_bindgen]
+    pub async fn load_decoder_split(prefill: &[u8], past: &[u8]) -> Result<(), JsValue> {
+        let pre = session_builder(false)?
+            .commit_from_memory(prefill)
+            .await
+            .map_err(js)?;
+        let pas = session_builder(false)?
+            .commit_from_memory(past)
+            .await
+            .map_err(js)?;
+        *DECODER.lock().map_err(js)? = None;
+        *DECODER_PRE.lock().map_err(js)? = Some(pre);
+        *DECODER_PAST.lock().map_err(js)? = Some(pas);
         Ok(())
     }
 
@@ -845,9 +866,12 @@ pub mod wasm {
             .ok_or_else(|| JsValue::from_str("load_tokenizer not called"))?;
 
         let mut dec_guard = DECODER.lock().map_err(js)?;
-        let session = dec_guard
-            .as_mut()
-            .ok_or_else(|| JsValue::from_str("load_decoder not called"))?;
+        let mut pre_guard = DECODER_PRE.lock().map_err(js)?;
+        let mut past_guard = DECODER_PAST.lock().map_err(js)?;
+        let split = pre_guard.is_some() && past_guard.is_some();
+        if !split && dec_guard.is_none() {
+            return Err(JsValue::from_str("load_decoder not called"));
+        }
 
         // Grow the wasm heap to a stable high-water mark BEFORE creating any
         // tensor. ort-web builds non-owning TypedArray views into our linear
@@ -957,7 +981,50 @@ pub mod wasm {
                 // Block-scoped: the borrowed KV inputs (kv_ref) live only inside
                 // this block; the awaited future owns them, so the borrows end
                 // here — the KV cache below can then be updated in place.
-                let mut outputs = {
+                let mut outputs = if split {
+                    let ids_arr =
+                        Array2::from_shape_vec((1, input_ids.len()), input_ids.clone())
+                            .map_err(js)?;
+                    let mut inputs: Vec<(String, SessionInputValue)> =
+                        Vec::with_capacity(2 + a.dec_layers * 4);
+                    inputs.push((
+                        "input_ids".to_string(),
+                        Value::from_array(ids_arr).map_err(js)?.into(),
+                    ));
+                    if !use_cache {
+                        inputs.push(("encoder_hidden_states".to_string(), (&enc_value).into()));
+                        let pre = pre_guard
+                            .as_mut()
+                            .ok_or_else(|| JsValue::from_str("split prefill decoder missing"))?;
+                        pre.run_async(inputs, &run_opts).await.map_err(js)?
+                    } else {
+                        for i in 0..a.dec_layers {
+                            inputs.push(kv_clone(
+                                format!("past_key_values.{i}.decoder.key"),
+                                &past_dec[i].0,
+                            )?);
+                            inputs.push(kv_clone(
+                                format!("past_key_values.{i}.decoder.value"),
+                                &past_dec[i].1,
+                            )?);
+                            inputs.push(kv_clone(
+                                format!("past_key_values.{i}.encoder.key"),
+                                &past_enc[i].0,
+                            )?);
+                            inputs.push(kv_clone(
+                                format!("past_key_values.{i}.encoder.value"),
+                                &past_enc[i].1,
+                            )?);
+                        }
+                        let pas = past_guard
+                            .as_mut()
+                            .ok_or_else(|| JsValue::from_str("split with-past decoder missing"))?;
+                        pas.run_async(inputs, &run_opts).await.map_err(js)?
+                    }
+                } else {
+                    let session = dec_guard
+                        .as_mut()
+                        .ok_or_else(|| JsValue::from_str("load_decoder not called"))?;
                     let ids_arr =
                         Array2::from_shape_vec((1, input_ids.len()), input_ids.clone())
                             .map_err(js)?;

@@ -14,7 +14,7 @@
     "q4f16": "_q4f16",
     "bnb4": "_bnb4"
   },
-  "webgpuSafe": ["base:q8"],
+  "webgpuSafe": ["base:q8", "base:fp16"],
   "models": {
     "tiny": {
       "layers": 4,
@@ -23,7 +23,8 @@
       "dModel": 384,
       "nMels": 80,
       "classic": true,
-      "repo": "onnx-community/whisper-tiny_timestamped"
+      "repo": "onnx-community/whisper-tiny_timestamped",
+      "alignmentHeads": [[2, 2], [3, 0], [3, 2], [3, 3], [3, 4], [3, 5]]
     },
     "base": {
       "layers": 6,
@@ -32,7 +33,8 @@
       "dModel": 512,
       "nMels": 80,
       "classic": true,
-      "repo": "onnx-community/whisper-base_timestamped"
+      "repo": "onnx-community/whisper-base_timestamped",
+      "alignmentHeads": [[3, 1], [4, 2], [4, 3], [4, 7], [5, 1], [5, 2], [5, 4], [5, 6]]
     },
     "small": {
       "layers": 12,
@@ -41,7 +43,8 @@
       "dModel": 768,
       "nMels": 80,
       "classic": true,
-      "repo": "onnx-community/whisper-small_timestamped"
+      "repo": "onnx-community/whisper-small_timestamped",
+      "alignmentHeads": [[5, 3], [5, 9], [8, 0], [8, 4], [8, 7], [8, 8], [9, 0], [9, 7], [9, 9], [10, 5]]
     },
     "medium": {
       "layers": 24,
@@ -50,7 +53,9 @@
       "dModel": 1024,
       "nMels": 80,
       "classic": true,
-      "repo": "onnx-community/whisper-medium_timestamped"
+      "splitDecoder": true,
+      "repo": "onnx-community/whisper-medium_timestamped",
+      "alignmentHeads": [[13, 15], [15, 4], [15, 15], [16, 1], [20, 0], [23, 4]]
     },
     "large": {
       "layers": 32,
@@ -59,7 +64,8 @@
       "dModel": 1280,
       "nMels": 128,
       "classic": false,
-      "repo": "onnx-community/whisper-large-v3-ONNX"
+      "repo": "onnx-community/whisper-large-v3-ONNX",
+      "alignmentHeads": [[9, 19], [11, 2], [11, 4], [11, 17], [22, 7], [22, 11], [22, 17], [23, 2], [23, 15]]
     },
     "turbo": {
       "layers": 32,
@@ -68,7 +74,9 @@
       "dModel": 1280,
       "nMels": 128,
       "classic": false,
-      "repo": "onnx-community/whisper-large-v3-turbo_timestamped"
+      "splitDecoder": true,
+      "repo": "onnx-community/whisper-large-v3-turbo_timestamped",
+      "alignmentHeads": [[2, 4], [2, 11], [3, 3], [3, 6], [3, 11], [3, 14]]
     }
   }
 }

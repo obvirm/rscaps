@@ -94,7 +94,7 @@ pub fn parse(text: &str, _format: Format) -> Result<Parsed, String> {
         if clean.is_empty() {
             continue;
         }
-        cues.push(Cue {
+        cues.push(Cue { words: None,
             start_ms,
             end_ms,
             text: clean,
@@ -232,7 +232,7 @@ mod tests {
     use super::*;
 
     fn cue(start: u32, end: u32, text: &str) -> Cue {
-        Cue {
+        Cue { words: None,
             start_ms: start,
             end_ms: end,
             text: text.to_string(),

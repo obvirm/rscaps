@@ -33,7 +33,7 @@
   let name = $state(initialName);
   let template = $state("luna");
   let direction = $state<Direction>("auto");
-  let backend = $state<WhisperBackend>("cpu");
+  let backend = $state<WhisperBackend>("webgpu");
   let model = $state<WhisperModel>("base");
   let quant = $state<WhisperQuant>(DEFAULT_QUANT["base"]);
   let language = $state("en");
@@ -68,10 +68,19 @@
     creating = true;
     try {
       const id = await createProject();
-      onclose();
-      await router.openProject(id);
       store.language = language;
       store.quant = quant;
+      try {
+        const { preloadWebGpu } = await import("../lib/whisper/webgpu");
+        store.setStatus("Memuat model Whisper...");
+        await preloadWebGpu(model, backend, language);
+      } catch (err) {
+        store.setStatus(String(err), true);
+        creating = false;
+        return;
+      }
+      onclose();
+      await router.openProject(id);
       void store.transcribeCurrent();
     } catch (err) {
       store.setStatus(String(err), true);

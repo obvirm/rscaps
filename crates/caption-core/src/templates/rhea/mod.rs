@@ -350,7 +350,7 @@ mod tests {
     fn rhea_splitter_is_sentence_plus_thirty_six_chars() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait, this is fine. But then the whole idea shifts again, doesn't it now?"

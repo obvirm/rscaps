@@ -581,7 +581,7 @@ mod tests {
     fn selene_splits_at_sentence_ends_within_twenty_chars() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Hello world. Bye now.".into(),
@@ -596,7 +596,7 @@ mod tests {
     fn char_limit_cuts_long_sentences_into_ten_to_twenty_char_segments() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "one two three four five six seven eight nine ten".into(),
@@ -616,7 +616,7 @@ mod tests {
     fn smart_punctuation_typographs_the_display() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait... \"hi\" -- ok".into(),

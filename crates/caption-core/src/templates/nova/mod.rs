@@ -432,7 +432,7 @@ mod tests {
     fn nova_forces_two_lines_and_clause_splits() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "wait, hold on and look at this one here now.".into(),

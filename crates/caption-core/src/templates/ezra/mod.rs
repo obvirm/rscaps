@@ -806,13 +806,13 @@ mod tests {
         let doc = CaptionDocument {
             duration_frames: 300,
             cues: vec![
-                Cue {
+                Cue { words: None,
                     start_ms: 0,
                     end_ms: 2500,
                     text: "Every word lands right here now".into(),
                     sheet: None,
                 },
-                Cue {
+                Cue { words: None,
                     start_ms: 2500,
                     end_ms: 5500,
                     text: "وما زال الكتاب مفتوحاً".into(),

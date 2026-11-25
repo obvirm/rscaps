@@ -5,7 +5,7 @@ use fframes::{FFramesContext, FFramesMode, Frame, TimeBase, Video, VideoSize};
 fn main() {
     let doc = CaptionDocument {
         duration_frames: 180,
-        cues: vec![Cue {
+        cues: vec![Cue { words: None,
             start_ms: 0,
             end_ms: 2000,
             text: "Hello world".into(),

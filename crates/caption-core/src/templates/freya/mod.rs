@@ -523,7 +523,7 @@ mod tests {
     fn freya_clause_segments_split_at_twenty_two_chars() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait, hold on now and look at this one here, please."

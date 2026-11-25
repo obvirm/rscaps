@@ -6292,6 +6292,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
+name = "whisper-core"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide 0.8.9",
+ "rustfft",
+ "serde_json",
+]
+
+[[package]]
 name = "whisper-spike"
 version = "0.1.0"
 dependencies = [
@@ -6306,6 +6315,17 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "whisper-core",
+]
+
+[[package]]
+name = "whisper-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "serde_json",
+ "wasm-bindgen",
+ "whisper-core",
 ]
 
 [[package]]

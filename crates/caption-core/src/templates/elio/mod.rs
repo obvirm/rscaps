@@ -289,7 +289,7 @@ mod tests {
     fn display_text_is_uppercased_but_timing_is_not() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "hello world".into(),
@@ -314,7 +314,7 @@ mod tests {
     fn elio_splitter_config_splits_long_sentences_at_80_chars() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "This sentence is definitely longer than eighty characters so it must split right now."

@@ -647,7 +647,7 @@ mod tests {
         // The splitter honours the 2-line floor on clause splits.
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "hold on, this one runs quite long for a single line."

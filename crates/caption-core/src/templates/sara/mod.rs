@@ -348,7 +348,7 @@ mod tests {
     fn sara_clause_boundary_splits_at_commas() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait, what now. Fine, then!".into(),
@@ -374,7 +374,7 @@ mod tests {
     fn sara_smart_punctuation_typography() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "wait... \"ok\" then -- bye".into(),

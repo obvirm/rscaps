@@ -620,7 +620,7 @@ mod tests {
     fn clause_boundary_and_the_char_limit_shape_the_segments() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Well, my friends, today we gather.".into(),
@@ -647,7 +647,7 @@ mod tests {
     fn remove_punctuation_strips_the_trailing_dot_from_display_only() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Hello there.".into(),
@@ -685,8 +685,8 @@ mod tests {
             template: "pastor".into(),
             behind_ranges: ranges.to_vec(),
             cues: vec![
-                crate::Cue { start_ms: 0, end_ms: 1500, text: "First cue here.".into(), sheet: None },
-                crate::Cue { start_ms: 1500, end_ms: 3000, text: "Second cue text.".into(), sheet: None },
+                crate::Cue { words: None, start_ms: 0, end_ms: 1500, text: "First cue here.".into(), sheet: None },
+                crate::Cue { words: None, start_ms: 1500, end_ms: 3000, text: "Second cue text.".into(), sheet: None },
             ],
             ..Default::default()
         }
@@ -733,11 +733,11 @@ mod tests {
         // behind (tiap instan di dalamnya behind — tak ada flip visual).
         // Band dengan CELAH tetap menolak (aturan straddle tscaps).
         let cues = vec![
-            crate::Cue { start_ms: 0, end_ms: 2500, text: "Welcome to rscaps".into(), sheet: None },
-            crate::Cue { start_ms: 2500, end_ms: 5500, text: "مرحبا بالعالم من rscaps — هذا نص عربي طويل لاختبار تقسيم الأسطر".into(), sheet: None },
-            crate::Cue { start_ms: 5500, end_ms: 8000, text: "שלום עולם — זהו טקסט עברי לבדיקת פריסה".into(), sheet: None },
-            crate::Cue { start_ms: 8000, end_ms: 10000, text: "Captions rendered by fframes in Rust".into(), sheet: None },
-            crate::Cue { start_ms: 10000, end_ms: 13000, text: "Mixed line with مرحبا and שלום together".into(), sheet: None },
+            crate::Cue { words: None, start_ms: 0, end_ms: 2500, text: "Welcome to rscaps".into(), sheet: None },
+            crate::Cue { words: None, start_ms: 2500, end_ms: 5500, text: "مرحبا بالعالم من rscaps — هذا نص عربي طويل لاختبار تقسيم الأسطر".into(), sheet: None },
+            crate::Cue { words: None, start_ms: 5500, end_ms: 8000, text: "שלום עולם — זהו טקסט עברי לבדיקת פריסה".into(), sheet: None },
+            crate::Cue { words: None, start_ms: 8000, end_ms: 10000, text: "Captions rendered by fframes in Rust".into(), sheet: None },
+            crate::Cue { words: None, start_ms: 10000, end_ms: 13000, text: "Mixed line with مرحبا and שלום together".into(), sheet: None },
         ];
         let mk = |ranges: &[(u32, u32)]| CaptionDocument {
             duration_frames: 900,

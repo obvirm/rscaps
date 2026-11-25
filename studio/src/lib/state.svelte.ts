@@ -385,12 +385,24 @@ class StudioState {
         this.transcribeStage = stage;
         this.setStatus(STAGE_STATUS[stage] ?? stage);
       }, this.backend);
+      const resultWords = result.words ?? [];
       const cues: Cue[] = result.segments
-        .map((s) => ({
-          start_ms: Math.max(0, Math.round(s.start * 1000)),
-          end_ms: Math.max(0, Math.round(s.end * 1000)),
-          text: s.text,
-        }))
+        .map((s) => {
+          const start_ms = Math.max(0, Math.round(s.start * 1000));
+          const end_ms = Math.max(0, Math.round(s.end * 1000));
+          const words = resultWords
+            .filter((w) => {
+              const mid = (w.start_ms + w.end_ms) / 2;
+              return mid >= start_ms && mid < end_ms;
+            })
+            .map((w) => ({ text: w.text, start_ms: w.start_ms, end_ms: w.end_ms }));
+          return {
+            start_ms,
+            end_ms,
+            text: s.text,
+            ...(words.length ? { words } : {}),
+          };
+        })
         .filter(
           (c) =>
             c.end_ms > c.start_ms &&

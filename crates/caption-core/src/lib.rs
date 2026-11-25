@@ -9,10 +9,21 @@ pub mod srt;
 pub mod templates;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CueWord {
+    pub text: String,
+    pub start_ms: u32,
+    pub end_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cue {
     pub start_ms: u32,
     pub end_ms: u32,
     pub text: String,
+    /// Word-level timings from the transcriber (hybrid DTW). When present the
+    /// caption pipeline uses these instead of spreading the cue text evenly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<CueWord>>,
     /// Sheet id pemilik cue (None/empty = sheet default dokumen).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sheet: Option<String>,
@@ -742,7 +753,12 @@ impl Video for CaptionVideo {
         let mut running = 0u32;
         for cue in &doc.cues {
             bases_full.push(running);
-            running += crate::templates::pipeline::tokenize(&cue.text).len() as u32;
+            let count = cue
+                .words
+                .as_ref()
+                .map(|w| w.iter().filter(|x| !x.text.trim().is_empty()).count())
+                .unwrap_or_else(|| crate::templates::pipeline::tokenize(&cue.text).len());
+            running += count as u32;
         }
         let mut plans: Vec<(usize, &str, &CaptionParams, Vec<Cue>, Vec<u32>, Option<&Sheet>)> =
             Vec::new();

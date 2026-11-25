@@ -14,6 +14,7 @@ const sep = process.platform === "win32" ? ";" : ":";
 const CRATES = [
   { dir: "crates/caption-bridge", ffmpeg: true },
   { dir: "crates/svgr-wasm", ffmpeg: false },
+  { dir: "crates/whisper-wasm", ffmpeg: false },
 ];
 
 for (const crate of CRATES) {

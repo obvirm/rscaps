@@ -342,7 +342,7 @@ mod tests {
     fn lewis_shows_one_word_at_a_time() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "no commas, no stops — just words".into(),

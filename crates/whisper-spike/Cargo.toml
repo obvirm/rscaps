@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+whisper-core = { path = "../whisper-core" }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = [
     "std",
     "ndarray",

@@ -1,9 +1,18 @@
 export type Direction = "auto" | "ltr" | "rtl";
 
+export interface CueWord {
+  text: string;
+  start_ms: number;
+  end_ms: number;
+}
+
 export interface Cue {
   start_ms: number;
   end_ms: number;
   text: string;
+  /** Word-level timings from the hybrid transcriber; engine falls back to
+   *  evenly spreading `text` when absent. */
+  words?: CueWord[];
   /** Sheet id pemilik cue (absen/kosong = sheet default dokumen). */
   sheet?: string;
 }

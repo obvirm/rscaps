@@ -712,7 +712,7 @@ mod tests {
     fn luca_splitter_is_sentence_plus_thirty_five_chars() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "One very long sentence that definitely needs a second segment here."
@@ -747,19 +747,19 @@ mod tests {
         let doc = CaptionDocument {
             duration_frames: 6000,
             cues: vec![
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One two.".into(),
                     sheet: None,
                 },
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 1200,
                     end_ms: 2000,
                     text: "Three four.".into(),
                     sheet: None,
                 },
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 4000,
                     end_ms: 5000,
                     text: "Five six.".into(),

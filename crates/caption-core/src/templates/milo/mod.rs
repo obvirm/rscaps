@@ -699,7 +699,7 @@ mod tests {
     fn milo_splitter_is_clause_plus_thirty_five_chars() {
         let doc = CaptionDocument {
             duration_frames: 6000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 6000,
                 text: "We said, this is quite a long sentence that will need to be split into several segments here."
@@ -736,19 +736,19 @@ mod tests {
         let doc = CaptionDocument {
             duration_frames: 6000,
             cues: vec![
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One two.".into(),
                     sheet: None,
                 },
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 1200,
                     end_ms: 2000,
                     text: "Three four.".into(),
                     sheet: None,
                 },
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 4000,
                     end_ms: 5000,
                     text: "Five six.".into(),

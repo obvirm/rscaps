@@ -31,9 +31,18 @@ pub fn doc_words(doc: &crate::CaptionDocument) -> Vec<TimedWord> {
     let mut stream: Vec<TimedWord> = Vec::new();
     let mut cue_word_counts: Vec<usize> = Vec::with_capacity(doc.cues.len());
     for (cue_i, cue) in doc.cues.iter().enumerate() {
-        let tokens = tokenize(&cue.text);
         let before = stream.len();
-        stream.extend(spread(&tokens, cue.start_ms as f32, cue.end_ms as f32));
+        if let Some(words) = cue.words.as_ref() {
+            stream.extend(
+                words
+                    .iter()
+                    .filter(|w| !w.text.trim().is_empty())
+                    .map(|w| TimedWord::new(w.text.clone(), w.start_ms as f32, w.end_ms as f32)),
+            );
+        } else {
+            let tokens = tokenize(&cue.text);
+            stream.extend(spread(&tokens, cue.start_ms as f32, cue.end_ms as f32));
+        }
         cue_word_counts.push(stream.len() - before);
         // Role sheet menempel pada semua kata cue itu (tscaps: sheet
         // ber-role `peak`/`hook` menandai kata-kata yang dinarasikan di
@@ -697,6 +706,37 @@ mod tests {
     }
 
     #[test]
+    fn cue_words_use_real_timings_instead_of_even_spread() {
+        let doc = crate::CaptionDocument {
+            cues: vec![crate::Cue {
+                words: Some(vec![
+                    crate::CueWord {
+                        text: "Hi".into(),
+                        start_ms: 100,
+                        end_ms: 400,
+                    },
+                    crate::CueWord {
+                        text: "there".into(),
+                        start_ms: 600,
+                        end_ms: 1800,
+                    },
+                ]),
+                start_ms: 0,
+                end_ms: 2000,
+                text: "Hi there".into(),
+                sheet: None,
+            }],
+            ..Default::default()
+        };
+        let words = doc_words(&doc);
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].start_ms, 100.0);
+        assert_eq!(words[0].end_ms, 400.0);
+        assert_eq!(words[1].start_ms, 600.0);
+        assert_eq!(words[1].end_ms, 1800.0);
+    }
+
+    #[test]
     fn merged_effects_honours_tri_state_overrides() {
         use crate::EffectsParams;
         // Template declares GapFree only.
@@ -723,7 +763,7 @@ mod tests {
     fn user_max_chars_overrides_template_limit() {
         let doc = crate::CaptionDocument {
             duration_frames: 300,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "One two three four five six seven eight nine ten.".into(),
@@ -853,13 +893,13 @@ mod tests {
         let doc = crate::CaptionDocument {
             duration_frames: 300,
             cues: vec![
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One sentence.".into(),
                     sheet: None,
                 },
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 1500,
                     end_ms: 2500,
                     text: "Second one.".into(),
@@ -882,13 +922,13 @@ mod tests {
         let doc = crate::CaptionDocument {
             duration_frames: 3000,
             cues: vec![
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One sentence.".into(),
                     sheet: None,
                 },
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 4000,
                     end_ms: 5000,
                     text: "Far away.".into(),
@@ -907,13 +947,13 @@ mod tests {
         let doc = crate::CaptionDocument {
             duration_frames: 3000,
             cues: vec![
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 0,
                     end_ms: 1000,
                     text: "One sentence.".into(),
                     sheet: None,
                 },
-                crate::Cue {
+                crate::Cue { words: None,
                     start_ms: 1500,
                     end_ms: 2500,
                     text: "Second one.".into(),
@@ -953,7 +993,7 @@ mod tests {
         let segments = {
             let doc = crate::CaptionDocument {
                 duration_frames: 300,
-                cues: vec![crate::Cue {
+                cues: vec![crate::Cue { words: None,
                     start_ms: 0,
                     end_ms: 1000,
                     text: "Hello.".into(),
@@ -972,7 +1012,7 @@ mod tests {
     fn mixed_doc(direction: &str) -> crate::CaptionDocument {
         crate::CaptionDocument {
             duration_frames: 300,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 1000,
                 // Latin majority over the whole doc → majority vote would say LTR.
@@ -998,7 +1038,7 @@ mod tests {
     fn direction_override_ltr_wins_over_majority_vote() {
         // Arabic majority so auto would say RTL; the override forces LTR.
         let doc = crate::CaptionDocument {
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 1000,
                 text: "مرحبا بالعالم مرحبا hello".into(),

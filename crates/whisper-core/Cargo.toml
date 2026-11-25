@@ -1,0 +1,12 @@
+[package]
+name = "whisper-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+
+[dependencies]
+rustfft = "6"
+serde_json = "1"
+miniz_oxide = "0.8"

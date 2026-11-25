@@ -11,6 +11,7 @@ const repo = fileURLToPath(new URL("./", import.meta.url));
 const pkgRoot = fileURLToPath(new URL("./crates/caption-bridge/pkg/", import.meta.url));
 const svgrPkgRoot = fileURLToPath(new URL("./crates/svgr-wasm/pkg/", import.meta.url));
 const whisperPkgRoot = fileURLToPath(new URL("./crates/whisper-spike/pkg/", import.meta.url));
+const whisperCorePkgRoot = fileURLToPath(new URL("./crates/whisper-wasm/pkg/", import.meta.url));
 const nmRoot = fileURLToPath(new URL("./node_modules/", import.meta.url));
 const modelsRoot = fileURLToPath(new URL("./models/", import.meta.url));
 const tplFontsRoot = fileURLToPath(new URL("./studio/tplfonts/", import.meta.url));
@@ -36,6 +37,7 @@ function resolveOutsideRoot(urlPath: string): string | null {
   if (urlPath.startsWith("/pkg/")) return join(pkgRoot, clean.replace(/^pkg[/\\]/, ""));
   if (urlPath.startsWith("/svgrpkg/")) return join(svgrPkgRoot, clean.replace(/^svgrpkg[/\\]/, ""));
   if (urlPath.startsWith("/wpkg/")) return join(whisperPkgRoot, clean.replace(/^wpkg[/\\]/, ""));
+  if (urlPath.startsWith("/wcorepkg/")) return join(whisperCorePkgRoot, clean.replace(/^wcorepkg[/\\]/, ""));
   if (urlPath.startsWith("/nm/")) return join(nmRoot, clean.replace(/^nm[/\\]/, ""));
   if (urlPath.startsWith("/models/")) return join(modelsRoot, clean.replace(/^models[/\\]/, ""));
   if (urlPath.startsWith("/tplfonts/")) return join(tplFontsRoot, clean.replace(/^tplfonts[/\\]/, ""));
@@ -53,7 +55,7 @@ function staticDirs(): Plugin {
       server.middlewares.use(async (req, res, next) => {
         const url = req.url || "";
         const pathname = url.split("?")[0];
-        if (!pathname.startsWith("/pkg/") && !pathname.startsWith("/nm/") && !pathname.startsWith("/fonts/") && !pathname.startsWith("/tplfonts/") && !pathname.startsWith("/models/") && !pathname.startsWith("/wpkg/") && !pathname.startsWith("/svgrpkg/")) {
+        if (!pathname.startsWith("/pkg/") && !pathname.startsWith("/nm/") && !pathname.startsWith("/fonts/") && !pathname.startsWith("/tplfonts/") && !pathname.startsWith("/models/") && !pathname.startsWith("/wpkg/") && !pathname.startsWith("/wcorepkg/") && !pathname.startsWith("/svgrpkg/")) {
           return next();
         }
         const filePath = resolveOutsideRoot(pathname);
@@ -93,6 +95,7 @@ function staticDirs(): Plugin {
       copyInto(pkgRoot, "pkg");
       copyInto(svgrPkgRoot, "svgrpkg");
       copyInto(whisperPkgRoot, "wpkg");
+      copyInto(whisperCorePkgRoot, "wcorepkg");
       copyAssetFonts(dist);
     },
   };

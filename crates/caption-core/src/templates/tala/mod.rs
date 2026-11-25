@@ -328,7 +328,7 @@ mod tests {
     fn tala_clause_segments_split_and_strip_trailing_punctuation() {
         let doc = CaptionDocument {
             duration_frames: 3000,
-            cues: vec![crate::Cue {
+            cues: vec![crate::Cue { words: None,
                 start_ms: 0,
                 end_ms: 3000,
                 text: "Wait, hold on now.".into(),
