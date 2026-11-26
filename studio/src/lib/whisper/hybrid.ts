@@ -146,7 +146,7 @@ export async function transcribeHybrid(
     timings: reply.result.timings,
   };
   const t = result.text.trim().toLowerCase();
-  const sparseWords = result.words.length < Math.max(2, duration * 0.75);
+  const sparseWords = result.words.length < Math.max(2, duration * 1.5);
   const sparseHallucination =
     model !== "base" &&
     (sparseWords ||

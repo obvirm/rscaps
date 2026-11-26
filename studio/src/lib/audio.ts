@@ -16,14 +16,12 @@ export async function decodeAudioTo16kMono(blob: Blob): Promise<DecodedAudio> {
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
   let buffer: AudioBuffer;
   try {
-    // decodeAudioData detaches the buffer, so pass a copy.
     buffer = await probeCtx.decodeAudioData(arrayBuf.slice(0));
   } finally {
     await probeCtx.close().catch(() => {});
   }
   const durationSec = buffer.duration;
   const targetLength = Math.max(1, Math.ceil(durationSec * 16000));
-  // Mono destination downmixes multi-channel input automatically.
   const off = new OfflineAudioContext(1, targetLength, 16000);
   const src = off.createBufferSource();
   src.buffer = buffer;
