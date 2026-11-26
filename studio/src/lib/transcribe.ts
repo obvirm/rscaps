@@ -605,7 +605,8 @@ export async function transcribeBlob(
   if ((globalThis as { __rscapsHybrid?: boolean }).__rscapsHybrid !== false) {
     if (model === "tiny" || model === "small" || model === "medium" || model === "large" || model === "turbo") {
       const { transcribeHybrid } = await import("./whisper/hybrid");
-      return transcribeHybrid(blob, model, quant, language, onProgress);
+      const hybridModel = model === "large" ? "turbo" : model;
+      return transcribeHybrid(blob, hybridModel, quant, language, onProgress);
     }
     const backend = backendOverride ?? "webgpu";
     const { transcribeWebGpu } = await import("./whisper/webgpu");
