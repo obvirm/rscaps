@@ -17,10 +17,11 @@ type Pipe = (
   options: Record<string, unknown>,
 ) => Promise<{ text: string; chunks?: { text: string; timestamp: [number, number] }[] }>;
 
-const REPOS: Record<Exclude<ModelKey, "medium">, string> = {
+const REPOS: Record<ModelKey, string> = {
   tiny: "onnx-community/whisper-tiny_timestamped",
   base: "onnx-community/whisper-base_timestamped",
   small: "onnx-community/whisper-small_timestamped",
+  medium: "onnx-community/whisper-large-v3-turbo_timestamped",
   large: "onnx-community/whisper-large-v3-turbo_timestamped",
   turbo: "onnx-community/whisper-large-v3-turbo_timestamped",
 };
@@ -31,11 +32,6 @@ env.useBrowserCache = true;
 let cache: { key: string; pipe: Pipe } | null = null;
 
 function repoFor(model: ModelKey): string {
-  if (model === "medium") {
-    throw new Error(
-      "Whisper medium tidak didukung di web (graph decoder medium bermasalah di WebGPU). Pakai small atau turbo; medium hanya untuk native.",
-    );
-  }
   return REPOS[model];
 }
 
