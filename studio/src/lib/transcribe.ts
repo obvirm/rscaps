@@ -598,9 +598,15 @@ export async function transcribeBlob(
   if (isTauri()) {
     return transcribeNative(blob, model, quant, language, onProgress);
   }
-  // Web = @huggingface/transformers v4: device "webgpu" atau "wasm" eksplisit.
-  // Default web memakai GPU; CPU hanya jika user memilih backend "cpu".
+  // Web = @huggingface/transformers v4 untuk model yang graph WebGPU-nya
+  // bersih (tiny/base). small/medium/large/turbo memakai jalur hybrid ORT
+  // WebGPU + Rust mel/DTW karena merged decoder model tersebut memecah
+  // graph WebGPU (If/Softmax) atau QDQ q8-nya loop.
   if ((globalThis as { __rscapsHybrid?: boolean }).__rscapsHybrid !== false) {
+    if (model === "small" || model === "medium" || model === "large" || model === "turbo") {
+      const { transcribeHybrid } = await import("./whisper/hybrid");
+      return transcribeHybrid(blob, model, quant, language, onProgress);
+    }
     const backend = backendOverride ?? "webgpu";
     const { transcribeWebGpu } = await import("./whisper/webgpu");
     return transcribeWebGpu(blob, model, quant, language, backend, onProgress);

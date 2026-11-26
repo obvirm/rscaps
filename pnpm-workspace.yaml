@@ -1,5 +1,8 @@
 verifyDepsBeforeRun: false
 
+overrides:
+  onnxruntime-web: 1.31.1
+
 allowBuilds:
   '@parcel/watcher': false
   bsdoc: false

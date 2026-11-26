@@ -72,7 +72,7 @@
       store.language = language;
       store.quant = quant;
       try {
-        if (!isTauri()) {
+        if (!isTauri() && model !== "small" && model !== "medium" && model !== "large" && model !== "turbo") {
           const { preloadWebGpu } = await import("../lib/whisper/webgpu");
           store.setStatus("Memuat model Whisper...");
           await preloadWebGpu(model, backend, language);
