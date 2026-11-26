@@ -44,6 +44,12 @@ let active: {
   onProgress: ProgressFn;
 } | null = null;
 
+function resetWorker(): void {
+  worker?.terminate();
+  worker = null;
+  active = null;
+}
+
 function ensureWorker(): Worker {
   if (worker) return worker;
   worker = new Worker(new URL("./hybrid.worker.ts", import.meta.url), { type: "module" });
@@ -154,6 +160,7 @@ export async function transcribeHybrid(
         (/^(terima kasih|sampai jumpa|thank(s| you)|please subscribe)/.test(t) ||
           result.words.length === 0)));
   if (sparseHallucination) {
+    resetWorker();
     const fallback = await transcribeHybrid(blob, "base", "q8", language, (f, stage) =>
       onProgress(0.9 + f * 0.09, stage),
     );
