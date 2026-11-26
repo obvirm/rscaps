@@ -31,6 +31,9 @@
   });
 
   const initialName = video.name.replace(/\.[^.]+$/, "") || "Untitled";
+  const availableModels = isTauri()
+    ? WHISPER_MODELS
+    : WHISPER_MODELS.filter((m) => m.id !== "large");
   let name = $state(initialName);
   let template = $state("luna");
   let direction = $state<Direction>("auto");
@@ -72,7 +75,7 @@
       store.language = language;
       store.quant = quant;
       try {
-        if (!isTauri() && model !== "small" && model !== "medium" && model !== "large" && model !== "turbo") {
+        if (!isTauri() && model !== "tiny" && model !== "small" && model !== "medium" && model !== "large" && model !== "turbo") {
           const { preloadWebGpu } = await import("../lib/whisper/webgpu");
           store.setStatus("Memuat model Whisper...");
           await preloadWebGpu(model, backend, language);
@@ -174,14 +177,14 @@
           <p class="hint">
             {backend === "cpu"
               ? "Default — works on every device."
-              : "Stable for base + q8. Other model/quant combinations fall back to CPU."}
+              : "WebGPU — base lewat transformers.js; tiny/small/medium/turbo lewat jalur hybrid GPU."}
           </p>
         </div>
 
         <div class="field">
           <label class="label" for="np-model">Model</label>
           <select id="np-model" class="select" bind:value={model} onchange={() => (quant = DEFAULT_QUANT[model])}>
-            {#each WHISPER_MODELS as m (m.id)}
+            {#each availableModels as m (m.id)}
               <option value={m.id} disabled={!isModelSupported(m.id)}>
                 {m.label}{isModelSupported(m.id) ? "" : " — not in this build"}
               </option>

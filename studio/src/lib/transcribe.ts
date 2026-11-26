@@ -599,11 +599,11 @@ export async function transcribeBlob(
     return transcribeNative(blob, model, quant, language, onProgress);
   }
   // Web = @huggingface/transformers v4 untuk model yang graph WebGPU-nya
-  // bersih (tiny/base). small/medium/large/turbo memakai jalur hybrid ORT
-  // WebGPU + Rust mel/DTW karena merged decoder model tersebut memecah
-  // graph WebGPU (If/Softmax) atau QDQ q8-nya loop.
+  // bersih (base). Model lain memakai jalur hybrid ORT WebGPU + Rust
+  // mel/DTW karena merged decoder-nya memecah graph WebGPU (If/Softmax)
+  // atau QDQ q8-nya loop.
   if ((globalThis as { __rscapsHybrid?: boolean }).__rscapsHybrid !== false) {
-    if (model === "small" || model === "medium" || model === "large" || model === "turbo") {
+    if (model === "tiny" || model === "small" || model === "medium" || model === "large" || model === "turbo") {
       const { transcribeHybrid } = await import("./whisper/hybrid");
       return transcribeHybrid(blob, model, quant, language, onProgress);
     }
