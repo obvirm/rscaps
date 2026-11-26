@@ -890,6 +890,8 @@ async function transcribe(req: Request) {
     const opts: Record<string, unknown> = {
       graphOptimizationLevel: graphOptLevel(req.model, computeQuant),
       executionProviders: ["webgpu"],
+      enableMemPattern: false,
+      enableCpuMemArena: false,
     };
     const decoderOpts: Record<string, unknown> = {
       ...opts,
