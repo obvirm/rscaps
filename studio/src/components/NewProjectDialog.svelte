@@ -35,8 +35,8 @@
   let template = $state("luna");
   let direction = $state<Direction>("auto");
   let backend = $state<WhisperBackend>("webgpu");
-  let model = $state<WhisperModel>("base");
-  let quant = $state<WhisperQuant>(DEFAULT_QUANT["base"]);
+  let model = $state<WhisperModel>("medium");
+  let quant = $state<WhisperQuant>(DEFAULT_QUANT["medium"]);
   let language = $state("en");
   let advancedOpen = $state(false);
   let creating = $state(false);
@@ -72,7 +72,7 @@
       store.language = language;
       store.quant = quant;
       try {
-        if (!isTauri() && model === "base") {
+        if (!isTauri() && model === "medium") {
           const { preloadWebGpu } = await import("../lib/whisper/webgpu");
           store.setStatus("Memuat model Whisper...");
           await preloadWebGpu(model, quant, backend, language);
