@@ -13,7 +13,7 @@ export interface TranscribeSegment {
 export interface TranscribeResult {
   segments: TranscribeSegment[];
   text: string;
-  /** Word-level timings from the hybrid DTW path (ms, absolute timeline). */
+  /** Word-level timings dari transformers.js (ms, absolute timeline). */
   words?: { text: string; start_ms: number; end_ms: number }[];
 }
 
@@ -598,140 +598,9 @@ export async function transcribeBlob(
   if (isTauri()) {
     return transcribeNative(blob, model, quant, language, onProgress);
   }
-  // Web = @huggingface/transformers v4 untuk model yang graph WebGPU-nya
-  // bersih (base). Model lain memakai jalur hybrid ORT WebGPU + Rust
-  // mel/DTW karena merged decoder-nya memecah graph WebGPU (If/Softmax)
-  // atau QDQ q8-nya loop.
-  if ((globalThis as { __rscapsHybrid?: boolean }).__rscapsHybrid !== false) {
-    if (model === "tiny" || model === "small" || model === "medium" || model === "large" || model === "turbo") {
-      const { transcribeHybrid } = await import("./whisper/hybrid");
-      return transcribeHybrid(blob, model, quant, language, onProgress);
-    }
-    const backend = backendOverride ?? "webgpu";
-    const { transcribeWebGpu } = await import("./whisper/webgpu");
-    return transcribeWebGpu(blob, model, quant, language, backend, onProgress);
-  }
-  // WebGPU selalu aman: encoder int8 + decoder CPU untuk model non-base.
-  // Turbo dikecualikan: encoder WebGPU (int8) merusak 4 detik awal audio —
-  // CPU penuh mengembalikan frasa awal yang benar.
-  const requestedBackend = (backendOverride ??
-    ((globalThis as { __rscapsBackend?: string }).__rscapsBackend === "webgpu" ? "webgpu" : "cpu")) as
-    | "cpu"
-    | "webgpu";
-  const backend = requestedBackend === "webgpu" && model === "turbo" ? "cpu" : requestedBackend;
-  if (requestedBackend !== backend) {
-    console.warn("[rscaps] WebGPU turbo tidak stabil (encoder merusak awal audio); memakai CPU.");
-  }
-  const mod = await loadWhisper(model, quant, onProgress, backend);
-
-  onProgress(0.32, "audio");
-  const audio = await decodeAudioTo16kMono(blob);
-  const samples = audio.samples;
-  const totalSamples = samples.length;
-  if (totalSamples === 0) {
-    onProgress(1, "done");
-    return { segments: [], text: "" };
-  }
-
-  const langId = BigInt(langToTokenId(language));
-  // <|transcribe|> per vocab variant (klasik 50359, v3 50360).
-  const taskToken = BigInt(MODEL_CLASSIC[model] ?? false ? 50359 : 50360);
-  const segments: TranscribeSegment[] = [];
-  const texts: string[] = [];
-  const totalChunks = Math.max(1, Math.ceil(totalSamples / CHUNK_SAMPLES));
-
-  for (let i = 0; i < totalChunks; i++) {
-    const start = i * CHUNK_SAMPLES;
-    const end = Math.min(start + CHUNK_SAMPLES, totalSamples);
-    const window = samples.subarray(start, end);
-    // Pad the final short window to at least 1 sample so the mel has signal.
-    const chunk = window.length < 1 ? new Float32Array(1) : window;
-
-    onProgress(0.4 + (i / totalChunks) * 0.58, "transcribe");
-    const offsetSec = start / SAMPLE_RATE;
-    const windowDur = chunk.length / SAMPLE_RATE;
-
-    let winSegments: TranscribeSegment[] = [];
-    let winText = "";
-
-    const hidden = await mod.encode_audio(chunk);
-    const raw = await mod.transcribe(hidden, langId, taskToken, true, MAX_TOKENS, windowDur);
-    let parsed = JSON.parse(raw) as {
-      text: string;
-      segments: { start: number; end: number; text: string }[];
-      quality?: { silent: boolean; avg_logprob: number; no_speech: number };
-    };
-    if (parsed.quality) console.log(`quality ${JSON.stringify(parsed.quality)}`);
-
-    // Sparse-decode rescue: a confident end-of-audio prior ("Terima kasih
-    // telah menonton!") on hard audio yields a few words across many seconds
-    // of dense speech (fragile quant exports, verbatim in transformers.js).
-    // Re-decode the window in short slices — short windows escape the
-    // attractor — and keep the result only when it is meaningfully richer.
-    const wordCount = parsed.text.trim() ? parsed.text.trim().split(/\s+/).length : 0;
-    // Degeneracy signal: one word dominating the decode ("I, I, I, I") is a
-    // repetition artifact even when the sparse-word test passes.
-    const wordHist = new Map<string, number>();
-    for (const w of parsed.text.toLowerCase().split(/\s+/)) {
-      if (!w) continue;
-      wordHist.set(w, (wordHist.get(w) ?? 0) + 1);
-    }
-    const topWordFrac = wordCount ? Math.max(...wordHist.values()) / wordCount : 0;
-    if (
-      !parsed.quality?.silent &&
-      windowDur > 8 &&
-      (wordCount < Math.max(2, windowDur * 0.4) || topWordFrac > 0.3) &&
-      hasSpeechEnergy(chunk)
-    ) {
-      const sliceTexts: string[] = [];
-      let sliceWords = 0;
-      let sliceSegments: TranscribeSegment[] = [];
-      const SLICE_SAMPLES = 4 * SAMPLE_RATE;
-      const nSlices = Math.ceil(chunk.length / SLICE_SAMPLES);
-      for (let s = 0; s < nSlices; s++) {
-        const slice = chunk.subarray(
-          s * SLICE_SAMPLES,
-          Math.min((s + 1) * SLICE_SAMPLES, chunk.length),
-        );
-        if (slice.length < SAMPLE_RATE / 2) break;
-        const sliceStartSec = (s * SLICE_SAMPLES) / SAMPLE_RATE;
-        const sliceDur = slice.length / SAMPLE_RATE;
-        const hidden2 = await mod.encode_audio(slice);
-        const raw2 = await mod.transcribe(hidden2, langId, taskToken, true, MAX_TOKENS, sliceDur);
-        const parsed2 = JSON.parse(raw2) as typeof parsed;
-        if (parsed2.quality) console.log(`quality ${JSON.stringify(parsed2.quality)}`);
-        for (const seg of parsed2.segments) {
-          const text = seg.text.trim();
-          if (!text) continue;
-          sliceSegments.push({ start: seg.start + sliceStartSec, end: seg.end + sliceStartSec, text });
-        }
-        if (parsed2.text.trim()) {
-          sliceTexts.push(parsed2.text.trim());
-          sliceWords += parsed2.text.trim().split(/\s+/).length;
-        }
-      }
-      if (sliceWords > wordCount) {
-        parsed = { text: sliceTexts.join(" "), segments: sliceSegments };
-      }
-    }
-
-    for (const seg of parsed.segments) {
-      const text = seg.text.trim();
-      if (!text) continue;
-      winSegments.push({ start: seg.start + offsetSec, end: seg.end + offsetSec, text });
-    }
-    if (parsed.text.trim()) winText = parsed.text.trim();
-    segments.push(...winSegments);
-    if (winText) texts.push(winText);
-  }
-
-  onProgress(1, "done");
-  const trimmed = trimLowDensityTail(segments, totalSamples / SAMPLE_RATE);
-  return {
-    segments: trimmed,
-    text:
-      trimmed.length === segments.length
-        ? texts.join(" ").trim()
-        : trimmed.map((s) => s.text).join(" ").trim(),
-  };
+  // Web = @huggingface/transformers v4 murni. Mode dipilih eksplisit:
+  // webgpu (device "webgpu") atau cpu (device "wasm"). Mode eksplisit, tanpa jalur cadangan.
+  const backend = backendOverride ?? "webgpu";
+  const { transcribeWebGpu } = await import("./whisper/webgpu");
+  return transcribeWebGpu(blob, model, quant, language, backend, onProgress);
 }

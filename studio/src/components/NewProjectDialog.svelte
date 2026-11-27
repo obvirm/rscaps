@@ -75,7 +75,7 @@
         if (!isTauri() && model === "base") {
           const { preloadWebGpu } = await import("../lib/whisper/webgpu");
           store.setStatus("Memuat model Whisper...");
-          await preloadWebGpu(model, backend, language);
+          await preloadWebGpu(model, quant, backend, language);
         }
       } catch (err) {
         store.setStatus(String(err), true);
@@ -174,7 +174,7 @@
           <p class="hint">
             {backend === "cpu"
               ? "Default — works on every device."
-              : "WebGPU — base lewat transformers.js; tiny/small/medium/large/turbo lewat jalur hybrid GPU."}
+              : "WebGPU — @huggingface/transformers, device webgpu, tanpa fallback."}
           </p>
         </div>
 

@@ -10,8 +10,7 @@ export interface Cue {
   start_ms: number;
   end_ms: number;
   text: string;
-  /** Word-level timings from the hybrid transcriber; engine falls back to
-   *  evenly spreading `text` when absent. */
+  /** Word-level timings dari transformers.js; engine menyebar `text` bila kosong. */
   words?: CueWord[];
   /** Sheet id pemilik cue (absen/kosong = sheet default dokumen). */
   sheet?: string;

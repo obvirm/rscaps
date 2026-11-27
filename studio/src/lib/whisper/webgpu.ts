@@ -1,37 +1,40 @@
 import { decodeAudioTo16kMono } from "../audio";
-import type { WhisperBackend, WhisperModel, WhisperQuant } from "../types";
-import type { ProgressFn, TranscribeResult, TranscribeSegment } from "../transcribe";
+import type { WhisperModel, WhisperQuant } from "../types";
+import type { ProgressFn, TranscribeResult } from "../transcribe";
 
-type Word = { text: string; start_s: number; end_s: number };
+type Backend = "webgpu" | "cpu";
 
 type Reply =
   | { type: "progress"; id: number; phase: string; fraction: number }
-  | { type: "done"; id: number; result: { text: string; segments: TranscribeSegment[]; words: Word[]; timings?: Record<string, number> } }
+  | {
+      type: "done";
+      id: number;
+      result: TranscribeResult & { timings?: Record<string, unknown> };
+    }
   | { type: "error"; id: number; error: string };
 
-let worker: Worker | null = null;
-let nextId = 1;
-let queue: Promise<unknown> = Promise.resolve();
-const pending = new Map<
-  number,
-  {
-    onProgress: (fraction: number, phase: string) => void;
-    resolve: (r: Extract<Reply, { type: "done" }>["result"]) => void;
-    reject: (e: Error) => void;
-  }
->();
+type Pending = {
+  resolve: (r: Extract<Reply, { type: "done" }>) => void;
+  reject: (e: Error) => void;
+  onProgress: ProgressFn;
+};
 
-function getWorker() {
+let worker: Worker | null = null;
+let nextId = 0;
+const pending = new Map<number, Pending>();
+
+function getWorker(): Worker {
   if (worker) return worker;
   worker = new Worker(new URL("./webgpu.worker.ts", import.meta.url), { type: "module" });
   worker.onmessage = (ev: MessageEvent<Reply>) => {
     const msg = ev.data;
     const p = pending.get(msg.id);
     if (!p) return;
-    if (msg.type === "progress") p.onProgress(msg.fraction, msg.phase);
-    else if (msg.type === "done") {
+    if (msg.type === "progress") {
+      p.onProgress(0.05 + msg.fraction * 0.9, "transcribe");
+    } else if (msg.type === "done") {
       pending.delete(msg.id);
-      p.resolve(msg.result);
+      p.resolve(msg);
     } else {
       pending.delete(msg.id);
       p.reject(new Error(msg.error));
@@ -45,65 +48,55 @@ function getWorker() {
   return worker;
 }
 
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-  const next = queue.then(fn, fn);
-  queue = next.then(
-    () => undefined,
-    () => undefined,
-  );
-  return next;
-}
-
 function send(
-  req: { type: "transcribe" | "preload"; samples?: Float32Array; model: WhisperModel; backend: WhisperBackend; language: string },
-  onProgress: (fraction: number, phase: string) => void,
-): Promise<Extract<Reply, { type: "done" }>["result"]> {
-  return enqueue(
-    () =>
-      new Promise((resolve, reject) => {
-        const id = nextId++;
-        pending.set(id, { onProgress, resolve, reject });
-        const w = getWorker();
-        w.postMessage({ ...req, id }, req.samples ? [req.samples.buffer] : []);
-      }),
-  );
+  payload: {
+    type: "transcribe" | "preload";
+    samples: Float32Array;
+    model: WhisperModel;
+    quant: WhisperQuant;
+    backend: Backend;
+    language: string;
+  },
+  onProgress: ProgressFn,
+): Promise<Extract<Reply, { type: "done" }>> {
+  const id = ++nextId;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject, onProgress });
+    getWorker().postMessage({ ...payload, id }, [payload.samples.buffer]);
+  });
 }
 
 export async function preloadWebGpu(
   model: WhisperModel,
-  backend: WhisperBackend,
+  quant: WhisperQuant,
+  backend: Backend,
   language: string,
   onProgress: ProgressFn = () => {},
 ): Promise<void> {
   await send(
-    { type: "preload", model, backend, language },
-    (fraction) => onProgress(fraction, "model"),
+    { type: "preload", samples: new Float32Array(16000), model, quant, backend, language },
+    onProgress,
   );
 }
 
 export async function transcribeWebGpu(
   blob: Blob,
   model: WhisperModel,
-  _quant: WhisperQuant,
+  quant: WhisperQuant,
   language: string,
-  backend: WhisperBackend,
+  backend: Backend = "webgpu",
   onProgress: ProgressFn = () => {},
-): Promise<TranscribeResult & { words: (Word & { start_ms: number; end_ms: number })[]; timings?: Record<string, number> }> {
+): Promise<TranscribeResult> {
   onProgress(0.02, "audio");
   const audio = await decodeAudioTo16kMono(blob);
-  const result = await send(
-    { type: "transcribe", samples: audio.samples, model, backend, language },
-    (fraction) => onProgress(0.05 + fraction * 0.9, "transcribe"),
+  const reply = await send(
+    { type: "transcribe", samples: audio.samples, model, quant, backend, language },
+    onProgress,
   );
   onProgress(1, "done");
   return {
-    text: result.text,
-    segments: result.segments,
-    words: result.words.map((w) => ({
-      ...w,
-      start_ms: Math.round(w.start_s * 1000),
-      end_ms: Math.round(w.end_s * 1000),
-    })),
-    timings: result.timings,
+    text: reply.result.text,
+    segments: reply.result.segments,
+    words: reply.result.words ?? [],
   };
 }

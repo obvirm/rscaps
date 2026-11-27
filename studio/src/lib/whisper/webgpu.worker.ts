@@ -1,4 +1,6 @@
-import { env, pipeline } from "@huggingface/transformers";
+import { env, pipeline, LogitsProcessor, LogitsProcessorList } from "@huggingface/transformers";
+import type { Tensor } from "@huggingface/transformers";
+import type { WhisperQuant } from "../types";
 
 type ModelKey = "tiny" | "base" | "small" | "medium" | "large" | "turbo";
 type Backend = "webgpu" | "cpu";
@@ -8,6 +10,7 @@ type Request = {
   id: number;
   samples?: Float32Array;
   model: ModelKey;
+  quant: WhisperQuant;
   backend: Backend;
   language: string;
 };
@@ -21,27 +24,130 @@ const REPOS: Record<ModelKey, string> = {
   tiny: "onnx-community/whisper-tiny_timestamped",
   base: "onnx-community/whisper-base_timestamped",
   small: "onnx-community/whisper-small_timestamped",
-  medium: "onnx-community/whisper-large-v3-turbo_timestamped",
+  medium: "onnx-community/whisper-medium_timestamped",
   large: "onnx-community/whisper-large-v3-turbo_timestamped",
   turbo: "onnx-community/whisper-large-v3-turbo_timestamped",
 };
 
+const MAX_NEW_TOKENS = 444;
+
+type TokenTimestamps = { dims: number[]; data: Float32Array };
+type Extractor = (
+  outputs: unknown,
+  alignmentHeads: unknown,
+  numFrames: unknown,
+  timePrecision: number,
+  inputIds: number,
+) => TokenTimestamps;
+
+const alignedModels = new WeakSet<object>();
+
+function installTimestampAligner(model: { _extract_token_timestamps?: Extractor } | null): void {
+  if (!model || typeof model._extract_token_timestamps !== "function" || alignedModels.has(model)) return;
+  alignedModels.add(model);
+  const original = model._extract_token_timestamps.bind(model);
+  model._extract_token_timestamps = (outputs, heads, numFrames, precision, inputIds = 0) => {
+    const frames = typeof numFrames === "number" ? Math.floor(numFrames / 2) : numFrames;
+    const reading = original(outputs, heads, frames, precision, inputIds);
+    if (inputIds < 1) return reading;
+    const predicting = original(outputs, heads, frames, precision, inputIds - 1);
+    const [batchSize = 1, length = 0] = reading.dims;
+    if (length < 2) return reading;
+    for (let batch = 0; batch < batchSize; batch++) {
+      const read = reading.data.subarray(batch * length, (batch + 1) * length);
+      const pred = predicting.data.subarray(batch * length, (batch + 1) * length);
+      for (let i = inputIds; i < length - 1; i++) {
+        const t = pred[i - 1]!;
+        if (t !== 0) read[i] = (read[i]! + t) / 2;
+      }
+      read[length - 1] = pred[length - 2]!;
+    }
+    return reading;
+  };
+}
+
+const MIN_FULL_PERIODS = 5;
+const MIN_REPETITION_TOKENS = 50;
+
+class LoopGuard {
+  private fired = false;
+  constructor(private readonly eos: number) {}
+  apply(inputIds: bigint[][], logits: Tensor): Tensor {
+    for (let b = 0; b < inputIds.length; b++) {
+      if (!this.looping(inputIds[b] ?? [])) continue;
+      this.fired = true;
+      const row = (logits as unknown as { data: Float32Array }[])[b];
+      if (row) {
+        row.data.fill(-Infinity);
+        row.data[this.eos] = 0;
+      }
+    }
+    return logits;
+  }
+  consumeFired(): boolean {
+    const v = this.fired;
+    this.fired = false;
+    return v;
+  }
+  private looping(seq: readonly bigint[]): boolean {
+    const maxPeriod = Math.floor(seq.length / MIN_FULL_PERIODS);
+    for (let period = 1; period <= maxPeriod; period++) {
+      const window = Math.max(
+        period * MIN_FULL_PERIODS,
+        period * Math.ceil(MIN_REPETITION_TOKENS / period),
+      );
+      if (window > seq.length) continue;
+      let periodic = true;
+      for (let i = seq.length - window + period; i < seq.length; i++) {
+        if (seq[i] !== seq[i - period]) {
+          periodic = false;
+          break;
+        }
+      }
+      if (periodic) return true;
+    }
+    return false;
+  }
+}
+
+class ReplacingList extends LogitsProcessorList {
+  override push(item: LogitsProcessor): void {
+    const existing = this.processors.findIndex((held) => held.constructor === item.constructor);
+    if (existing >= 0) this.processors.splice(existing, 1);
+    super.push(item);
+  }
+}
+
+class GuardProcessor extends LogitsProcessor {
+  constructor(private readonly guard: LoopGuard) {
+    super();
+  }
+  _call(inputIds: bigint[][], logits: Tensor): Tensor {
+    return this.guard.apply(inputIds, logits);
+  }
+}
+
+function eosOf(pipe: unknown): number | null {
+  const model = (pipe as { model?: { generation_config?: { eos_token_id?: unknown }; config?: { eos_token_id?: unknown } } }).model;
+  const raw = model?.generation_config?.eos_token_id ?? model?.config?.eos_token_id;
+  const id = Array.isArray(raw) ? raw[0] : raw;
+  return typeof id === "number" ? id : null;
+}
+
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
-let cache: { key: string; pipe: Pipe } | null = null;
+let cache: { key: string; pipe: Pipe; processors: LogitsProcessorList | null } | null = null;
 
-function repoFor(model: ModelKey): string {
-  return REPOS[model];
-}
-
-async function loadPipe(req: Request): Promise<Pipe> {
-  const repo = repoFor(req.model);
+async function loadPipe(req: Request): Promise<{ pipe: Pipe; processors: LogitsProcessorList | null }> {
   if (req.backend === "webgpu" && !(navigator as Navigator & { gpu?: unknown }).gpu) {
-    throw new Error("WebGPU tidak tersedia di browser ini; pilih mode CPU secara eksplisit.");
+    throw new Error("WebGPU tidak tersedia di browser ini. Pilih mode CPU secara eksplisit.");
   }
-  const key = `${repo}:${req.backend}`;
-  if (cache?.key === key) return cache.pipe;
+  if (req.backend === "webgpu") {
+    env.backends.onnx.wasm!.numThreads = 1;
+  }
+  const key = `${REPOS[req.model]}:${req.quant}:${req.backend}`;
+  if (cache?.key === key) return { pipe: cache.pipe, processors: cache.processors };
 
   let lastProgress = -1;
   const progress = (p: { status?: string; progress?: number; file?: string }) => {
@@ -52,22 +158,20 @@ async function loadPipe(req: Request): Promise<Pipe> {
     self.postMessage({ type: "progress", id: req.id, phase: p.file ?? p.status ?? "model", fraction });
   };
 
-  const options =
-    req.backend === "webgpu"
-      ? ({
-          device: "webgpu",
-          dtype: { encoder_model: "fp32", decoder_model_merged: "fp16" },
-          progress_callback: progress,
-        } as const)
-      : ({
-          device: "wasm",
-          dtype: { encoder_model: "q8", decoder_model_merged: "q8" },
-          progress_callback: progress,
-        } as const);
-
-  const loaded = (await pipeline("automatic-speech-recognition", repo, options)) as unknown as Pipe;
-  cache = { key, pipe: loaded };
-  return loaded;
+  const loaded = (await pipeline("automatic-speech-recognition", REPOS[req.model], {
+    device: req.backend === "webgpu" ? "webgpu" : "wasm",
+    dtype:
+      req.backend === "webgpu"
+        ? { encoder_model: "q4", decoder_model_merged: "q4" }
+        : "q8",
+    session_options: { graphOptimizationLevel: "basic" },
+    progress_callback: progress,
+  } as const)) as unknown as Pipe;
+  const eos = eosOf(loaded);
+  const processors = eos === null ? null : new ReplacingList();
+  if (processors && eos !== null) processors.push(new GuardProcessor(new LoopGuard(eos)));
+  cache = { key, pipe: loaded, processors };
+  return { pipe: loaded, processors };
 }
 
 function segmentsFromWords(chunks: { text: string; timestamp: [number, number] }[]) {
@@ -101,7 +205,7 @@ function segmentsFromWords(chunks: { text: string; timestamp: [number, number] }
 }
 
 async function run(req: Request) {
-  const pipe = await loadPipe(req);
+  const { pipe, processors } = await loadPipe(req);
   if (req.type === "preload") {
     await pipe(new Float32Array(16000), {
       language: req.language,
@@ -115,15 +219,15 @@ async function run(req: Request) {
   if (!req.samples) throw new Error("samples missing");
   self.postMessage({ type: "progress", id: req.id, phase: "transcribe", fraction: 0.55 });
   const output = await pipe(req.samples, {
-    language: req.language,
+    sampling_rate: 16000,
+    language: req.language || null,
     task: "transcribe",
     return_timestamps: "word",
     chunk_length_s: 30,
     stride_length_s: 5,
-    max_new_tokens: 448,
+    max_new_tokens: MAX_NEW_TOKENS,
   });
-  const chunks = output.chunks ?? [];
-  const { words, segments } = segmentsFromWords(chunks);
+  const { words, segments } = segmentsFromWords(output.chunks ?? []);
   self.postMessage({
     type: "done",
     id: req.id,
@@ -131,7 +235,7 @@ async function run(req: Request) {
       text: output.text.trim(),
       segments,
       words,
-      timings: { backend: req.backend, pure: req.backend === "webgpu" ? 1 : 0 },
+      timings: { backend: req.backend, pure: 1 },
     },
   });
 }
@@ -142,6 +246,6 @@ self.onmessage = async (ev: MessageEvent<Request>) => {
   try {
     await run(req);
   } catch (e) {
-    self.postMessage({ type: "error", id: req.id, error: String(e) });
+    self.postMessage({ type: "error", id: req.id, error: String((e as Error)?.stack ?? e) });
   }
 };
