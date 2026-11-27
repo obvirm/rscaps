@@ -201,6 +201,80 @@ fn trim_duplicate_tail(segs: &mut Vec<NativeSegment>) {
     }
 }
 
+fn strip_tail_loop(text: &str) -> String {
+    let norm = |w: &String| {
+        w.to_lowercase()
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_string()
+    };
+    let mut raw: Vec<String> = text.split_whitespace().map(|w| w.to_string()).collect();
+    let mut norms: Vec<String> = raw.iter().map(norm).collect();
+    loop {
+        let len = norms.len();
+        let mut cut = None;
+        'outer: for n in 2..=6 {
+            if len < n + 1 {
+                break;
+            }
+            for start in 0..=len - n - 1 {
+                if len - start < n + 1 {
+                    continue;
+                }
+                if (start + n..len).all(|j| norms[j] == norms[j - n]) {
+                    cut = Some(start);
+                    break 'outer;
+                }
+            }
+        }
+        match cut {
+            Some(i) => {
+                raw.truncate(i);
+                norms.truncate(i);
+            }
+            None => break,
+        }
+    }
+    raw.join(" ")
+}
+
+fn is_outro(text: &str) -> bool {
+    let t = text.to_lowercase();
+    [
+        "thank you for watching",
+        "thanks for watching",
+        "terima kasih",
+        "sampai jumpa",
+        "please subscribe",
+        "i hope you enjoyed",
+        "selamat menonton",
+    ]
+    .iter()
+    .any(|m| t.contains(m))
+}
+
+fn clean_segments(segs: &mut Vec<NativeSegment>, window_dur: f32) {
+    for seg in segs.iter_mut() {
+        seg.text = strip_tail_loop(&seg.text);
+    }
+    segs.retain(|s| !s.text.trim().is_empty());
+    loop {
+        let pop = match segs.last() {
+            Some(last) => {
+                is_outro(&last.text)
+                    && last.end - last.start <= 4.0
+                    && last.end >= window_dur - 2.0
+            }
+            None => false,
+        };
+        if pop {
+            segs.pop();
+        } else {
+            break;
+        }
+    }
+    trim_duplicate_tail(segs);
+}
+
 pub struct NativeEngine {
     pub encoder: Session,
     pub decoder: Session,
@@ -931,7 +1005,13 @@ impl NativeEngine {
             let mut out: Vec<NativeSegment> = Vec::new();
             let mut texts: Vec<String> = Vec::new();
             for (i, slot) in slots.into_iter().enumerate() {
-                let (segs, text) = slot.ok_or("batch window tidak selesai")?;
+                let (mut segs, _text) = slot.ok_or("batch window tidak selesai")?;
+                clean_segments(&mut segs, slice as f32 / SAMPLE_RATE as f32);
+                let text = segs
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let offset = (i * slice / SAMPLE_RATE) as f32;
                 out.extend(segs.into_iter().map(|mut s| {
                     s.start += offset;
@@ -1412,7 +1492,7 @@ impl NativeEngine {
                 text,
             });
         }
-        trim_duplicate_tail(&mut win_segs);
+        clean_segments(&mut win_segs, window_dur);
         let text = win_segs
             .iter()
             .map(|s| s.text.as_str())
