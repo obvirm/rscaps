@@ -536,6 +536,7 @@ async function transcribeNative(
   quant: WhisperQuant,
   language: string,
   onProgress: ProgressFn,
+  asr = "auto",
 ): Promise<TranscribeResult> {
   onProgress(0.02, "audio");
   const tmpDir = await invoke<string>("native_get_temp_dir");
@@ -562,7 +563,7 @@ async function transcribeNative(
     onProgress(0.05, "audio");
     const result = await invoke<{ text: string; segments: { start: number; end: number; text: string }[] }>(
       "transcribe_native",
-      { path, model, quant, lang: language, runId, ffmpegDir: null },
+      { path, model, quant, lang: language, asr, runId, ffmpegDir: null },
     );
     onProgress(1, "done");
     const segments: TranscribeSegment[] = result.segments
@@ -586,6 +587,7 @@ export async function transcribeBlob(
   language: string,
   onProgress: ProgressFn = () => {},
   backendOverride?: "cpu" | "webgpu",
+  asr = "auto",
 ): Promise<TranscribeResult> {
   if (!isModelSupported(model)) {
     throw new Error(
@@ -596,7 +598,7 @@ export async function transcribeBlob(
   // BUKAN wasm. Audio ditulis ke temp file → command transcribe_native
   // (ffmpeg decode + window 30s + rescue di Rust) → JSON sama skema.
   if (isTauri()) {
-    return transcribeNative(blob, model, quant, language, onProgress);
+    return transcribeNative(blob, model, quant, language, onProgress, asr);
   }
   // Web = @huggingface/transformers v4 murni. Mode dipilih eksplisit:
   // webgpu (device "webgpu") atau cpu (device "wasm"). Mode eksplisit, tanpa jalur cadangan.

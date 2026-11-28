@@ -2,6 +2,7 @@
 //!
 //! This crate can be used as a library by Tauri or other native hosts.
 
+pub mod backend;
 pub mod doc;
 pub mod fframes_engine;
 pub mod fonts;

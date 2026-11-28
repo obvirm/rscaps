@@ -16,6 +16,7 @@ import {
   type RscapsProject,
   type TemplateEntry,
   type WhisperBackend,
+  type NativeAsr,
   type WhisperModel,
   type WhisperQuant,
   DEFAULT_QUANT,
@@ -38,6 +39,7 @@ export interface NewProjectOptions {
   template: string;
   direction: Direction;
   backend: WhisperBackend;
+  asr?: NativeAsr;
   model: WhisperModel;
   video: Blob;
   videoName: string;
@@ -87,6 +89,7 @@ class StudioState {
   videoUrl = $state<string | null>(null);
   videoName = $state<string | null>(null);
   backend = $state<WhisperBackend>("cpu");
+  asr = $state<NativeAsr>("auto");
   model = $state<WhisperModel>("base");
   quant = $state<WhisperQuant>(DEFAULT_QUANT["base"]);
   language = $state("en");
@@ -287,6 +290,7 @@ class StudioState {
         width: opts.width,
         height: opts.height,
         backend: opts.backend,
+        asr: opts.asr,
         model: opts.model,
       },
       videoName: opts.videoName,
@@ -295,6 +299,7 @@ class StudioState {
     this.projectName = project.name;
     this.applyVideoMeta(opts.fps, opts.width, opts.height, opts.videoName);
     this.backend = opts.backend;
+    this.asr = opts.asr ?? "auto";
     this.model = opts.model;
     this.setVideoBlob(opts.video);
     // Register real video dimensions with the engine so templates lay out on
@@ -338,6 +343,7 @@ class StudioState {
       project.videoName || null,
     );
     this.backend = project.settings.backend || "cpu";
+    this.asr = project.settings.asr || "auto";
     this.model = project.settings.model || "base";
     this.docText = JSON.stringify(project.doc, null, 2);
     this.clearHistory();
@@ -384,7 +390,7 @@ class StudioState {
         this.transcribeFraction = fraction;
         this.transcribeStage = stage;
         this.setStatus(STAGE_STATUS[stage] ?? stage);
-      }, this.backend);
+      }, this.backend, this.asr);
       const resultWords = result.words ?? [];
       const cues: Cue[] = result.segments
         .map((s) => {
@@ -449,6 +455,7 @@ class StudioState {
           width: this.videoWidth,
           height: this.videoHeight,
           backend: this.backend,
+          asr: this.asr,
           model: this.model,
         },
         videoName: this.videoName ?? undefined,
@@ -1762,9 +1769,8 @@ class StudioState {
   async exportProjectNative(
     projectId: string,
     opts: {
-      engine: "cpu" | "skia" | "fframes";
-      hwEncode: boolean;
-      hwEncoder: string;
+      cap: string;
+      enc: string;
       hwaccel?: string;
       format: ExportFormat;
       quality: ExportQuality;
@@ -1829,9 +1835,8 @@ class StudioState {
       // Jalankan native render
       await invoke("native_render_video", {
         opts: {
-          engine: opts.engine,
-          hw_encode: opts.hwEncode,
-          hw_encoder: opts.hwEncoder,
+          cap: opts.cap,
+          enc: opts.enc,
           hwaccel: opts.hwaccel || null,
           video_path: tempVideoPath,
           srt_path: tempSrtPath,
@@ -1845,7 +1850,7 @@ class StudioState {
         },
       });
 
-      this.setStatus(`exported ${project.name || "export"}.${ext} (native ${opts.engine})`);
+      this.setStatus(`exported ${project.name || "export"}.${ext} (native ${opts.cap}/${opts.enc})`);
     } catch (err) {
       console.error(err);
       this.setStatus(String(err), true);

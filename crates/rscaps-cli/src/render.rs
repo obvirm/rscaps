@@ -61,16 +61,11 @@ pub fn tool_bin(name: &str, extra_dir: Option<&Path>) -> Result<PathBuf> {
             }
         }
     }
-    let local = PathBuf::from(
-        "E:/temp/opencode/ffmpeg-9.0.2-full_build-shared/bin",
-    )
-    .join(&exe);
+    let local = PathBuf::from("E:/temp/opencode/ffmpeg-9.0.2-full_build-shared/bin").join(&exe);
     if local.is_file() {
         return Ok(local);
     }
-    bail!(
-        "{name} tidak ditemukan — set PATH, env RSCAPS_FFMPEG_DIR, atau flag --ffmpeg-dir"
-    )
+    bail!("{name} tidak ditemukan — set PATH, env RSCAPS_FFMPEG_DIR, atau flag --ffmpeg-dir")
 }
 
 pub fn probe_video(ffprobe: &Path, video: &Path) -> Result<VideoProbe> {
@@ -104,10 +99,7 @@ pub fn probe_video(ffprobe: &Path, video: &Path) -> Result<VideoProbe> {
             height = s["height"].as_u64().unwrap_or(0) as u32;
             if let Some(rate) = s["r_frame_rate"].as_str() {
                 if let Some((n, d)) = rate.split_once('/') {
-                    fps = (
-                        n.parse().unwrap_or(30),
-                        d.parse().unwrap_or(1).max(1),
-                    );
+                    fps = (n.parse().unwrap_or(30), d.parse().unwrap_or(1).max(1));
                 }
             }
         }
@@ -148,12 +140,22 @@ pub fn hw_encode_args(encoder: &str, crf: u32, preset: &str) -> Vec<String> {
     let crf = crf.to_string();
     let mut a = vec!["-c:v".to_string(), encoder.to_string()];
     match encoder {
-        "h264_qsv" => a.extend(["-global_quality".to_string(), crf, "-preset".to_string(), preset.to_string()]),
+        "h264_qsv" => a.extend([
+            "-global_quality".to_string(),
+            crf,
+            "-preset".to_string(),
+            preset.to_string(),
+        ]),
         "h264_vaapi" => a.extend(["-qp".to_string(), crf]),
         "h264_videotoolbox" => a.extend(["-q:v".to_string(), crf]),
         "h264_amf" => a.extend(["-qp_i".to_string(), crf.clone(), "-qp_p".to_string(), crf]),
         // h264_nvenc + default: cq + preset.
-        _ => a.extend(["-cq".to_string(), crf, "-preset".to_string(), preset.to_string()]),
+        _ => a.extend([
+            "-cq".to_string(),
+            crf,
+            "-preset".to_string(),
+            preset.to_string(),
+        ]),
     }
     a
 }
@@ -218,12 +220,8 @@ pub fn render_video(
     let frame_count = (probe.duration_sec * fps_f64).ceil().max(1.0) as u32;
 
     // Dokumen menutupi seluruh durasi video.
-    let doc: CaptionDocument = doc::build_document(
-        opts.srt,
-        opts.template,
-        opts.params,
-        Some(frame_count),
-    )?;
+    let doc: CaptionDocument =
+        doc::build_document(opts.srt, opts.template, opts.params, Some(frame_count))?;
 
     let mut font_source = CliFontSource::new();
     // Paritas dengan studio web: HANYA font dari fontManifest.json (satu
@@ -275,8 +273,14 @@ pub fn render_video(
     // saja, lalu ffmpeg yang composite video → jauh lebih murah daripada
     // raster komposit full-frame di Rust.
     #[cfg(feature = "gpu-skia")]
-    let skia_raster = if opts.engine == "skia" || opts.engine == "fframes" {
-        Some(SkiaRasterizer::new(
+    let skia_raster = if opts.engine == "skia" {
+        Some(SkiaRasterizer::new_gpu(
+            probe.width,
+            probe.height,
+            font_source.database(),
+        )?)
+    } else if opts.engine == "skia-cpu" || opts.engine == "fframes" {
+        Some(SkiaRasterizer::new_cpu(
             probe.width,
             probe.height,
             font_source.database(),
@@ -284,7 +288,6 @@ pub fn render_video(
     } else {
         None
     };
-
 
     // ── ffmpeg: video + rawvideo pipe → overlay → encoder ──────────────────
     let mut head: Vec<String> = ["-y", "-hide_banner", "-loglevel", "error"]
@@ -307,13 +310,18 @@ pub fn render_video(
         }
     }
     // Encoder hardware bila diminta & tersedia; selain itu libx264.
-    let use_hw = opts.hw_encode && hw_encoder_available(&ffmpeg, opts.hw_encoder);
-    if opts.hw_encode && !use_hw {
-        eprintln!(
-            "[render] WARN: --hw-encode diminta tapi {} tidak tersedia → fallback libx264",
-            opts.hw_encoder
-        );
-    }
+    // Backend hardware yang dipilih eksplisit tidak boleh fallback diam-diam.
+    let use_hw = if opts.hw_encode {
+        if !hw_encoder_available(&ffmpeg, opts.hw_encoder) {
+            bail!(
+                "encoder {} tidak tersedia di build ffmpeg ini; pilih --enc cpu atau encoder lain",
+                opts.hw_encoder
+            );
+        }
+        true
+    } else {
+        false
+    };
     let mut encode_args: Vec<String> = if use_hw {
         hw_encode_args(opts.hw_encoder, opts.crf, opts.preset)
     } else {
@@ -326,7 +334,12 @@ pub fn render_video(
             opts.preset.to_string(),
         ]
     };
-    encode_args.extend(["-pix_fmt".into(), "yuv420p".into(), "-movflags".into(), "+faststart".into()]);
+    encode_args.extend([
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+    ]);
 
     // ── K-SLICE (engine skia & cpu): K proses ffmpeg paralel (decode+blend+
     // encode per potongan frame), tiap potongan digabung `concat -c copy` ──
@@ -335,7 +348,12 @@ pub fn render_video(
     // NVENC session ×K + decode ×K. Raster (12 lane, backend sesuai engine)
     // dan cache per-SVG dibagi rata ke tiap slice; double-buffer tetap jalan
     // per slice (raster window N+1 selagi window N ditulis).
-    if opts.engine == "skia" || opts.engine == "cpu" || opts.engine == "fframes" {
+    if opts.engine == "skia"
+        || opts.engine == "skia-cpu"
+        || opts.engine == "cpu"
+        || opts.engine == "wgpu-lyon"
+        || opts.engine == "fframes"
+    {
         let slices = std::env::var("RSCAPS_SLICES")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -343,7 +361,8 @@ pub fn render_video(
             .unwrap_or(3);
         let lanes_per_slice = (std::thread::available_parallelism()
             .map(|n| n.get())
-            .unwrap_or(12) / slices)
+            .unwrap_or(12)
+            / slices)
             .max(1);
         // Depth double-buffer (frameAhead). RAM ≈ SLICES × WINDOW × 3.3MB
         // (pita 1920×427×4B). Default 32 → ~320MB @3 slice; env buat uji.
@@ -353,9 +372,34 @@ pub fn render_video(
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0)
             .unwrap_or(WINDOW);
+        #[cfg(feature = "wgpu-lyon")]
+        let wgpu_renderer = if opts.engine == "wgpu-lyon" {
+            Some(std::sync::Mutex::new(
+                caption_wgpu::WgpuLyonRenderer::with_fontdb(
+                    probe.width,
+                    probe.height,
+                    font_source.database(),
+                )?,
+            ))
+        } else {
+            None
+        };
         let lane_raster = if opts.engine == "cpu" {
             LaneRaster::Cpu {
                 fdb: font_source.database(),
+            }
+        } else if opts.engine == "wgpu-lyon" {
+            #[cfg(feature = "wgpu-lyon")]
+            {
+                LaneRaster::Wgpu {
+                    renderer: wgpu_renderer
+                        .as_ref()
+                        .context("renderer wgpu tidak terbuat (bug internal engine wgpu)")?,
+                }
+            }
+            #[cfg(not(feature = "wgpu-lyon"))]
+            {
+                bail!("engine wgpu-lyon butuh build ulang: cargo build -p rscaps-cli --features wgpu-lyon")
             }
         } else {
             #[cfg(feature = "gpu-skia")]
@@ -408,10 +452,7 @@ pub fn render_video(
                 band_h * 100 / probe.height
             );
         }
-        let zeros_rgba = std::sync::Arc::new(vec![
-            0u8;
-            probe.width as usize * band_h as usize * 4
-        ]);
+        let zeros_rgba = std::sync::Arc::new(vec![0u8; probe.width as usize * band_h as usize * 4]);
 
         let frames_per_slice = frame_count.div_ceil(slices as u32);
         let slice_results: Vec<Result<PathBuf, anyhow::Error>> = std::thread::scope(|scope| {
@@ -552,6 +593,10 @@ fn cpu_frame_rgba(
 enum LaneRaster<'a> {
     #[cfg(feature = "gpu-skia")]
     Skia(&'a SkiaRasterizer),
+    #[cfg(feature = "wgpu-lyon")]
+    Wgpu {
+        renderer: &'a std::sync::Mutex<caption_wgpu::WgpuLyonRenderer>,
+    },
     Cpu {
         fdb: &'a svgr::usvgr::fontdb::Database,
     },
@@ -562,6 +607,8 @@ enum LaneRaster<'a> {
 enum LaneState<'a> {
     #[cfg(feature = "gpu-skia")]
     Skia(SkiaRendererOwned<'a>),
+    #[cfg(feature = "wgpu-lyon")]
+    Wgpu(&'a std::sync::Mutex<caption_wgpu::WgpuLyonRenderer>),
     Cpu {
         fdb: &'a svgr::usvgr::fontdb::Database,
         cache: svgr::SvgrCache,
@@ -574,6 +621,14 @@ impl LaneState<'_> {
         match self {
             #[cfg(feature = "gpu-skia")]
             LaneState::Skia(r) => r.render_frame_rgba(svg, width, height),
+            #[cfg(feature = "wgpu-lyon")]
+            LaneState::Wgpu(r) => {
+                crate::images::ensure_svg_images(svg);
+                let images = crate::images::snapshot();
+                r.lock()
+                    .map_err(|_| anyhow::anyhow!("wgpu renderer lock poisoned"))?
+                    .render_svg_with_images(svg, &images)
+            }
             LaneState::Cpu { fdb, cache, pool } => {
                 cpu_frame_rgba(svg, width, height, fdb, cache, pool)
             }
@@ -593,6 +648,12 @@ fn compute_caption_band(
     width: u32,
     height: u32,
 ) -> Option<(u32, u32)> {
+    #[cfg(feature = "wgpu-lyon")]
+    if matches!(raster, LaneRaster::Wgpu { .. }) {
+        // Renderer wgpu memiliki texture full-frame; band crop akan mengubah
+        // tinggi pipe tanpa mengubah texture. Pakai full-frame dulu.
+        return None;
+    }
     const SAMPLES: u32 = 24;
     // Margin bleed blur. DEFAULT 128px — invariant dokumentasi: margin ≥
     // bleed 105px (3σ+dy blur cleo). Env `RSCAPS_BAND_MARGIN` untuk uji
@@ -610,6 +671,8 @@ fn compute_caption_band(
     let mut state = match raster {
         #[cfg(feature = "gpu-skia")]
         LaneRaster::Skia(r) => LaneState::Skia(r.make_renderer()),
+        #[cfg(feature = "wgpu-lyon")]
+        LaneRaster::Wgpu { renderer } => LaneState::Wgpu(renderer),
         LaneRaster::Cpu { fdb } => LaneState::Cpu {
             fdb,
             cache: svgr::SvgrCache::none(),
@@ -741,7 +804,10 @@ fn run_skia_slice(p: SliceParams<'_>) -> Result<()> {
     } else {
         cmd.args([
             "-filter_complex",
-            &format!("[0:v][1:v]overlay=format=auto:shortest=1:x=0:y={}[v]", p.band_y),
+            &format!(
+                "[0:v][1:v]overlay=format=auto:shortest=1:x=0:y={}[v]",
+                p.band_y
+            ),
         ]);
     }
     cmd.args(["-map", "[v]", "-map", "0:a?", "-c:a", "copy"]);
@@ -796,6 +862,8 @@ fn run_skia_slice(p: SliceParams<'_>) -> Result<()> {
                         let mut lane_state = match p.raster {
                             #[cfg(feature = "gpu-skia")]
                             LaneRaster::Skia(r) => LaneState::Skia(r.make_renderer()),
+                            #[cfg(feature = "wgpu-lyon")]
+                            LaneRaster::Wgpu { renderer } => LaneState::Wgpu(renderer),
                             LaneRaster::Cpu { fdb } => LaneState::Cpu {
                                 fdb,
                                 cache: svgr::SvgrCache::none(),
@@ -837,10 +905,9 @@ fn run_skia_slice(p: SliceParams<'_>) -> Result<()> {
                             } else if p.band_h == p.probe.height {
                                 raw
                             } else {
-                                wrap_svg_band(&raw, p.probe.width, p.band_y, p.band_h)
-                                    .ok_or_else(|| {
-                                        anyhow::anyhow!("wrap band svg gagal (frame {f})")
-                                    })?
+                                wrap_svg_band(&raw, p.probe.width, p.band_y, p.band_h).ok_or_else(
+                                    || anyhow::anyhow!("wrap band svg gagal (frame {f})"),
+                                )?
                             };
                             SVG_BUILD_US.fetch_add(
                                 t_build.elapsed().as_micros() as u64,
@@ -1021,29 +1088,41 @@ enum SkiaBackendOwned {
 
 #[cfg(feature = "gpu-skia")]
 impl SkiaRasterizer {
-    pub fn new(
+    /// Backend GPU strict: Vulkan wajib tersedia. Dipakai `skia-gpu`/`auto`
+    /// setelah lock — kegagalan adalah hard error, bukan fallback ke CPU.
+    pub fn new_gpu(
         width: u32,
         height: u32,
         svgr_db: &svgr::usvgr::fontdb::Database,
     ) -> Result<Self> {
-        let backend = match fframes_skia_renderer::vulkan::SkiaVulkanCtx::new(
+        let ctx = fframes_skia_renderer::vulkan::SkiaVulkanCtx::new(
             width as usize,
             height as usize,
-        ) {
-            Ok(ctx) => {
-                eprintln!("[engine=skia] backend: Vulkan (GPU) {width}x{height}");
-                SkiaBackendOwned::Vulkan(ctx)
-            }
-            Err(err) => {
-                eprintln!("[engine=skia] vulkan tidak tersedia ({err}) -> fallback Skia-CPU");
-                SkiaBackendOwned::Cpu(fframes_skia_renderer::SkiaCpuCtx::new(
-                    width as usize,
-                    height as usize,
-                ))
-            }
-        };
+        )
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "skia-gpu: Vulkan tidak tersedia ({err}); pilih --cap skia-cpu bila memang ingin CPU"
+            )
+        })?;
+        eprintln!("[engine=skia-gpu] backend: Vulkan (GPU) {width}x{height}");
         Ok(Self {
-            backend,
+            backend: SkiaBackendOwned::Vulkan(ctx),
+            fontdb: to_fframes_fontdb(svgr_db),
+        })
+    }
+
+    /// Backend Skia CPU eksplisit.
+    pub fn new_cpu(
+        width: u32,
+        height: u32,
+        svgr_db: &svgr::usvgr::fontdb::Database,
+    ) -> Result<Self> {
+        eprintln!("[engine=skia-cpu] backend: Skia CPU {width}x{height}");
+        Ok(Self {
+            backend: SkiaBackendOwned::Cpu(fframes_skia_renderer::SkiaCpuCtx::new(
+                width as usize,
+                height as usize,
+            )),
             fontdb: to_fframes_fontdb(svgr_db),
         })
     }
@@ -1075,7 +1154,9 @@ pub struct SkiaRendererOwned<'a> {
 
 #[cfg(feature = "gpu-skia")]
 enum SkiaRendererInner<'a> {
-    Vulkan(fframes_skia_renderer::SkiaFrameRenderer<'a, fframes_skia_renderer::vulkan::SkiaVulkanCtx>),
+    Vulkan(
+        fframes_skia_renderer::SkiaFrameRenderer<'a, fframes_skia_renderer::vulkan::SkiaVulkanCtx>,
+    ),
     Cpu(fframes_skia_renderer::SkiaFrameRenderer<'a, fframes_skia_renderer::SkiaCpuCtx>),
 }
 
@@ -1136,12 +1217,20 @@ pub struct SkiaRendererOwned<'a> {
 
 #[cfg(not(feature = "gpu-skia"))]
 impl SkiaRasterizer {
-    pub fn new(
+    pub fn new_gpu(
         _width: u32,
         _height: u32,
         _svgr_db: &svgr::usvgr::fontdb::Database,
     ) -> Result<Self> {
-        bail!("engine skia butuh build ulang: cargo build -p rscaps-cli --features gpu-skia")
+        bail!("engine skia-gpu butuh build ulang: cargo build -p rscaps-cli --features gpu-skia")
+    }
+
+    pub fn new_cpu(
+        _width: u32,
+        _height: u32,
+        _svgr_db: &svgr::usvgr::fontdb::Database,
+    ) -> Result<Self> {
+        bail!("engine skia-cpu butuh build ulang: cargo build -p rscaps-cli --features gpu-skia")
     }
 
     pub fn make_renderer(&self) -> SkiaRendererOwned<'_> {
@@ -1155,7 +1244,6 @@ impl SkiaRendererOwned<'_> {
         unreachable!("SkiaRendererOwned hanya bisa dibuat saat feature gpu-skia aktif")
     }
 }
-
 
 /// Cache raster per-SVG: frame statis dalam satu cue menghasilkan SVG identik,
 /// jadi hasil raster (RGBA premultiplied siap-pipe) boleh dipakai ulang.

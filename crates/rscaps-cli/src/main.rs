@@ -13,10 +13,10 @@ use std::time::Instant;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
+mod backend;
 mod doc;
 mod fframes_engine;
 mod fonts;
@@ -24,10 +24,11 @@ mod images;
 mod render;
 mod server;
 
-use fonts::CliFontSource;
-use render::{RenderVideoOpts, render_video, tool_bin};
+use backend::{CaptionBackend, EncodeBackend};
 use caption_core::CaptionDocument;
 use fframes::{FFramesContext, FFramesMode, TimeBase, VideoSize};
+use fonts::CliFontSource;
+use render::{RenderVideoOpts, render_video, tool_bin};
 
 #[derive(Parser)]
 #[command(
@@ -87,9 +88,12 @@ enum Cmd {
         /// Folder font tambahan selain font sistem (default: studio/tplfonts/ttf kalau ada)
         #[arg(long)]
         fonts: Option<PathBuf>,
-        /// Mesin raster: cpu (usvgr) | skia (GPU, butuh --features gpu-skia); fframes tak didukung di `frames` — pakai `render`
-        #[arg(long, default_value = "cpu")]
-        engine: String,
+        /// Mesin raster caption: auto | tiny-skia | skia-gpu | skia-cpu
+        #[arg(short = 'c', long = "cap", default_value = "auto")]
+        cap: String,
+        /// Alias lama (deprecated): cpu | skia | fframes
+        #[arg(long, hide = true)]
+        engine: Option<String>,
     },
     /// Burn-in caption ke video → mp4 (frame caption-core + overlay ffmpeg)
     Render {
@@ -120,15 +124,20 @@ enum Cmd {
         /// x264 preset
         #[arg(long, default_value = "medium")]
         preset: String,
-        /// Mesin raster caption: cpu | skia | fframes
-        #[arg(long, default_value = "cpu")]
-        engine: String,
-        /// Encode video di GPU (ganti libx264 -> encoder hardware)
-        #[arg(long)]
+        /// Mesin raster caption: auto | tiny-skia | skia-gpu | skia-cpu | fframes | fframes-pipeline
+        #[arg(short = 'c', long = "cap", default_value = "auto")]
+        cap: String,
+        /// Encoder video: auto | cpu | nvenc | qsv | amf | vaapi | videotoolbox
+        #[arg(short = 'e', long = "enc", default_value = "auto")]
+        enc: String,
+        /// Alias lama (deprecated): cpu | skia | fframes | fframes-pipeline
+        #[arg(long, hide = true)]
+        engine: Option<String>,
+        /// Alias lama (deprecated): sama dengan --enc <encoder>
+        #[arg(long, hide = true)]
         hw_encode: bool,
-        /// Encoder hardware utk --hw-encode:
-        /// h264_nvenc|h264_qsv|h264_vaapi|h264_videotoolbox|h264_amf
-        #[arg(long, default_value = "h264_nvenc")]
+        /// Nama encoder lama untuk --hw-encode
+        #[arg(long, hide = true, default_value = "h264_nvenc")]
         hw_encoder: String,
         /// Decode dengan -hwaccel <auto|cuda|d3d11va|vaapi|qsv> (default: CPU)
         #[arg(long)]
@@ -161,6 +170,7 @@ fn main() -> Result<()> {
             from,
             to,
             fonts,
+            cap,
             engine,
         } => cmd_frames(CmdFramesArgs {
             srt: &srt,
@@ -173,7 +183,8 @@ fn main() -> Result<()> {
             from,
             to,
             fonts: fonts.as_deref(),
-            engine: &engine,
+            cap: &cap,
+            legacy_engine: engine.as_deref(),
         }),
         Cmd::Render {
             video,
@@ -185,6 +196,8 @@ fn main() -> Result<()> {
             ffmpeg_dir,
             crf,
             preset,
+            cap,
+            enc,
             engine,
             hw_encode,
             hw_encoder,
@@ -199,9 +212,11 @@ fn main() -> Result<()> {
             ffmpeg_dir: ffmpeg_dir.as_deref(),
             crf,
             preset: &preset,
-            engine: &engine,
-            hw_encode,
-            hw_encoder: &hw_encoder,
+            cap: &cap,
+            enc: &enc,
+            legacy_engine: engine.as_deref(),
+            legacy_hw_encode: hw_encode,
+            legacy_hw_encoder: &hw_encoder,
             hwaccel: hwaccel.as_deref(),
         }),
         Cmd::Serve { bind, port } => cmd_serve(&bind, port),
@@ -231,8 +246,8 @@ fn cmd_convert(input: &Path, to: &str, out: Option<&Path>) -> Result<()> {
     if to != "srt" && to != "vtt" {
         bail!("format output harus srt atau vtt (didapat: {to})");
     }
-    let text = std::fs::read_to_string(input)
-        .with_context(|| format!("baca {}", input.display()))?;
+    let text =
+        std::fs::read_to_string(input).with_context(|| format!("baca {}", input.display()))?;
     let cues_json = caption_core::parse_subtitle_json(&text, &from)
         .map_err(|err| anyhow::anyhow!("parse subtitle: {err}"))?;
     let parsed: serde_json::Value = serde_json::from_str(&cues_json)?;
@@ -253,11 +268,11 @@ fn cmd_convert(input: &Path, to: &str, out: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-
 // ── frames ─────────────────────────────────────────────────────────────────
 
 struct CmdFramesArgs<'a> {
-    engine: &'a str,
+    cap: &'a str,
+    legacy_engine: Option<&'a str>,
     srt: &'a Path,
     template: &'a str,
     out: &'a Path,
@@ -272,6 +287,16 @@ struct CmdFramesArgs<'a> {
 
 fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
     let t0 = Instant::now();
+    let cap = CaptionBackend::parse(args.legacy_engine.unwrap_or(args.cap))?.resolve()?;
+    if matches!(
+        cap,
+        CaptionBackend::Fframes | CaptionBackend::FframesPipeline
+    ) {
+        bail!(
+            "caption backend fframes hanya untuk `render` (burn-in), bukan `frames` — pakai --cap cpu atau skia-cpu"
+        );
+    }
+    let engine = cap.engine_arg();
     crate::fonts::init_font_debug_logger();
     let format = args.format.to_lowercase();
     if format != "svg" && format != "png" {
@@ -329,8 +354,28 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
     let mut cache = svgr::SvgrCache::none();
     let pool = svgr::PixmapPool::new();
     // Engine skia: backend + font-DB dibuat SEKALI, dipakai ulang tiap frame.
-    let skia_raster = if args.engine == "skia" {
-        Some(crate::render::SkiaRasterizer::new(
+    let skia_backend = if cap.is_skia() {
+        Some(match cap {
+            CaptionBackend::SkiaGpu => backend::SkiaBackend::new_gpu(
+                width as u32,
+                height as u32,
+                font_source.database(),
+            )?,
+            CaptionBackend::SkiaCpu => backend::SkiaBackend::new_cpu(
+                width as u32,
+                height as u32,
+                font_source.database(),
+            )?,
+            _ => unreachable!("cap.is_skia() sudah menyaring backend"),
+        })
+    } else {
+        None
+    };
+    // Renderer bertahan antar frame (surface GPU tidak dibuat-buang).
+    let mut skia_ren = skia_backend.as_ref().map(|b| b.make_renderer());
+    #[cfg(feature = "wgpu-lyon")]
+    let mut wgpu_backend = if cap.is_wgpu() {
+        Some(caption_wgpu::WgpuLyonRenderer::with_fontdb(
             width as u32,
             height as u32,
             font_source.database(),
@@ -338,8 +383,12 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
     } else {
         None
     };
-    // Renderer bertahan antar frame (surface GPU tidak dibuat-buang).
-    let mut skia_ren = skia_raster.as_ref().map(|r| r.make_renderer());
+    #[cfg(not(feature = "wgpu-lyon"))]
+    if cap.is_wgpu() {
+        anyhow::bail!(
+            "caption backend wgpu-lyon butuh build ulang: cargo build -p rscaps-cli --features wgpu-lyon"
+        );
+    }
 
     // ── Render ─────────────────────────────────────────────────────────────
     let mut written = 0usize;
@@ -363,26 +412,54 @@ fn cmd_frames(args: CmdFramesArgs<'_>) -> Result<()> {
         match format.as_str() {
             "svg" => {
                 let path = args.out.join(format!("{name}.svg"));
-                std::fs::write(&path, &s)
-                    .with_context(|| format!("tulis {}", path.display()))?;
+                std::fs::write(&path, &s).with_context(|| format!("tulis {}", path.display()))?;
             }
             "png" => {
-                if args.engine == "skia" {
+                if cap.is_wgpu() {
+                    #[cfg(feature = "wgpu-lyon")]
+                    {
+                        crate::images::ensure_svg_images(&s);
+                        let images = crate::images::snapshot();
+                        let rgba = wgpu_backend
+                            .as_mut()
+                            .context("renderer wgpu hilang — bug internal")?
+                            .render_svg_with_images(&s, &images)
+                            .with_context(|| format!("raster wgpu {name}"))?;
+                        let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
+                            .context("alokasi pixmap wgpu")?;
+                        pixmap.data_mut().copy_from_slice(&rgba);
+                        let bytes = pixmap.encode_png().context("encode png wgpu")?;
+                        std::fs::write(args.out.join(format!("{name}.png")), bytes)
+                            .with_context(|| format!("tulis {name}.png"))?;
+                    }
+                    #[cfg(not(feature = "wgpu-lyon"))]
+                    anyhow::bail!("caption backend wgpu-lyon belum ada di build ini");
+                } else if cap.is_skia() {
                     let bytes = skia_ren
                         .as_mut()
                         .context("renderer skia hilang — bug internal")?
                         .render_frame_png(&s, width as u32, height as u32)
                         .with_context(|| format!("raster {name}"))?;
-                    std::fs::write(args.out.join(format!("{name}.png")), bytes)
-                        .with_context(|| format!("tulis {}", args.out.join(format!("{name}.png")).display()))?;
+                    std::fs::write(args.out.join(format!("{name}.png")), bytes).with_context(
+                        || format!("tulis {}", args.out.join(format!("{name}.png")).display()),
+                    )?;
                 } else {
                     let t_r = std::time::Instant::now();
                     // Gambar data: URL (mask iris, upload user) — decode-once
                     // lalu ikut ke Options.image_data (kontrak svgr-wasm).
                     crate::images::ensure_svg_images(&s);
                     let images = crate::images::snapshot();
-                    let pixmap = render_png(&s, width, height, &images, font_source.database(), &mut cache, &pool, args.engine)
-                        .with_context(|| format!("raster {name}"))?;
+                    let pixmap = render_png(
+                        &s,
+                        width,
+                        height,
+                        &images,
+                        font_source.database(),
+                        &mut cache,
+                        &pool,
+                        engine,
+                    )
+                    .with_context(|| format!("raster {name}"))?;
                     let render_us = t_r.elapsed().as_micros();
                     let bytes = pixmap
                         .encode_png()
@@ -426,35 +503,23 @@ fn render_png(
     engine: &str,
 ) -> Result<svgr::tiny_skia::Pixmap> {
     match engine {
-        "fframes" | "fframes-pipeline" => anyhow::bail!("engine {engine} hanya untuk `render` (burn-in), bukan `frames` - pakai --engine cpu atau skia"),
+        "fframes" | "fframes-pipeline" => anyhow::bail!(
+            "engine {engine} hanya untuk `render` (burn-in), bukan `frames` — pakai --cap cpu atau skia-cpu"
+        ),
         _ => {}
     }
-    let opt = svgr::usvgr::Options {
-        image_data: Some(images),
-        ..Default::default()
-    };
-    let tree = svgr::usvgr::Tree::from_str(svg, &opt, fontdb)
-        .map_err(|err| anyhow::anyhow!("parse svg: {err}"))?;
-    let mut pixmap = svgr::tiny_skia::Pixmap::new(width, height)
-        .ok_or_else(|| anyhow::anyhow!("gagal alokasi pixmap {width}×{height}"))?;
-    let ctx = svgr::Context::new_from_pixmap(&pixmap);
-    svgr::render(
-        &tree,
-        svgr::tiny_skia::Transform::identity(),
-        &mut pixmap.as_mut(),
-        cache,
-        pool,
-        &ctx,
-    );
-    Ok(pixmap)
+    let mut backend = backend::TinySkiaBackend::new(fontdb, images, cache, pool);
+    backend.render_pixmap(svg, width, height)
 }
 
 // ── render (burn-in) ───────────────────────────────────────────────────────
 
 struct CmdRenderArgs<'a> {
-    engine: &'a str,
-    hw_encode: bool,
-    hw_encoder: &'a str,
+    cap: &'a str,
+    enc: &'a str,
+    legacy_engine: Option<&'a str>,
+    legacy_hw_encode: bool,
+    legacy_hw_encoder: &'a str,
     hwaccel: Option<&'a str>,
     video: &'a Path,
     srt: &'a Path,
@@ -470,14 +535,25 @@ struct CmdRenderArgs<'a> {
 fn cmd_render(args: CmdRenderArgs<'_>) -> Result<()> {
     let t0 = Instant::now();
     // Validasi dulu biar error cepat sebelum spawn ffmpeg.
-    let _ = tool_bin("ffprobe", args.ffmpeg_dir)?;
+    let ffprobe = tool_bin("ffprobe", args.ffmpeg_dir)?;
+    let ffmpeg = tool_bin("ffmpeg", args.ffmpeg_dir)?;
+    let cap = CaptionBackend::parse(args.legacy_engine.unwrap_or(args.cap))?.resolve()?;
+    let enc = if args.legacy_hw_encode {
+        EncodeBackend::parse(args.legacy_hw_encoder)?
+    } else {
+        EncodeBackend::parse(args.enc)?
+    };
+    let (hw_encode, hw_encoder) = resolve_encode(enc, &ffmpeg)?;
     println!(
-        "render {} + {} ({}) → {}",
+        "render {} + {} ({}) → {} · caption={} · encode={}",
         args.video.display(),
         args.srt.display(),
         args.template,
-        args.out.display()
+        args.out.display(),
+        cap.engine_arg(),
+        if hw_encode { hw_encoder } else { "libx264" }
     );
+    let _ = ffprobe;
     let mut last_pct = 0u32;
     render_video(
         &RenderVideoOpts {
@@ -490,9 +566,9 @@ fn cmd_render(args: CmdRenderArgs<'_>) -> Result<()> {
             ffmpeg_dir: args.ffmpeg_dir,
             crf: args.crf,
             preset: args.preset,
-            engine: args.engine,
-            hw_encode: args.hw_encode,
-            hw_encoder: args.hw_encoder,
+            engine: cap.engine_arg(),
+            hw_encode,
+            hw_encoder,
             hwaccel: args.hwaccel,
         },
         |done, total| {
@@ -506,6 +582,32 @@ fn cmd_render(args: CmdRenderArgs<'_>) -> Result<()> {
     eprintln!();
     println!("selesai → {} · {:?}", args.out.display(), t0.elapsed());
     Ok(())
+}
+
+/// Lock kandidat encode sebelum job dimulai. `auto` memilih encoder pertama
+/// yang benar-benar ada di build ffmpeg; pilihan eksplisit yang tidak ada
+/// adalah hard error (tidak turun diam-diam ke libx264).
+fn resolve_encode(enc: EncodeBackend, ffmpeg: &Path) -> Result<(bool, &'static str)> {
+    if enc == EncodeBackend::Cpu {
+        return Ok((false, "libx264"));
+    }
+    if let Some(name) = enc.hw_encoder() {
+        if !render::hw_encoder_available(ffmpeg, name) {
+            bail!(
+                "encoder {name} tidak tersedia di build ffmpeg ini; pilih --enc cpu atau encoder lain"
+            );
+        }
+        eprintln!("[encode] locked: {name}");
+        return Ok((true, name));
+    }
+    for name in backend::AUTO_ENCODERS {
+        if render::hw_encoder_available(ffmpeg, name) {
+            eprintln!("[encode] auto locked: {name}");
+            return Ok((true, name));
+        }
+    }
+    eprintln!("[encode] auto: tidak ada encoder hardware tersedia → libx264");
+    Ok((false, "libx264"))
 }
 
 // ── serve ──────────────────────────────────────────────────────────────────

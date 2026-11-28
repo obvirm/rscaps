@@ -23,5 +23,8 @@ crates/whisper-spike/test/*.webm
 .DS_Store
 Thumbs.db
 
+# Catatan plan lokal (tidak di-commit)
+/.plans/
+
 # output uji (verify_chunk/parity)
 /out/

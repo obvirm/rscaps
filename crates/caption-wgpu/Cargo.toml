@@ -1,0 +1,19 @@
+[package]
+name = "caption-wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+lyon = "1.0.19"
+svgr = "0.50"
+wgpu = "30.0.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"

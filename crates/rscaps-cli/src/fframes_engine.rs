@@ -617,15 +617,20 @@ pub fn render_fframes(opts: &FframesRenderOpts<'_>) -> Result<()> {
         }
     }
 
-    // Encoder: hardware bila diminta & tersedia, selain itu libx264.
+    // Encoder: hardware bila diminta & tersedia; pilihan eksplisit yang tidak
+    // ada adalah hard error, bukan fallback diam ke libx264.
     let crf_str = opts.crf.to_string();
-    let use_hw = opts.hw_encode && crate::render::hw_encoder_available(&ffmpeg, opts.hw_encoder);
-    if opts.hw_encode && !use_hw {
-        eprintln!(
-            "[fframes] WARN: --hw-encode diminta tapi {} tidak tersedia → fallback libx264",
-            opts.hw_encoder
-        );
-    }
+    let use_hw = if opts.hw_encode {
+        if !crate::render::hw_encoder_available(&ffmpeg, opts.hw_encoder) {
+            anyhow::bail!(
+                "encoder {} tidak tersedia di build ffmpeg ini; pilih --enc cpu atau encoder lain",
+                opts.hw_encoder
+            );
+        }
+        true
+    } else {
+        false
+    };
     let crf = crf_str.as_str();
     // Nama flag kualitas beda per vendor (nvenc=cq, qsv=global_quality, dst).
     let p_nvenc = [("cq", crf), ("preset", opts.preset)];

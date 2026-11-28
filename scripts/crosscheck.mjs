@@ -5,7 +5,9 @@ import puppeteer from "puppeteer-core";
 import fs from "node:fs";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const VIDEO = "E:\\project\\rscaps\\crates\\whisper-spike\\test\\speech-test.mp4";
+const VIDEO =
+  process.env.RSCAPS_VIDEO ||
+  "E:\\project\\rscaps\\crates\\whisper-spike\\test\\speech-test.mp4";
 const SRT =
   process.env.RSCAPS_SRT || "E:\\project\\rscaps\\rscaps-sample.srt";
 const OUT = "E:\\temp\\opencode\\compare";
@@ -225,7 +227,8 @@ async function seekTscaps(page, sec = SEEK_SEC) {
     const slider = document.querySelector(
       "input.timeline-slider:not(.volume-slider)",
     );
-    if (!slider) return { ok: false, reason: "no slider" };
+    const vid = document.querySelector("video");
+    if (!slider) return { ok: false, reason: "no slider", actual: vid?.currentTime ?? 0 };
     const setter = Object.getOwnPropertyDescriptor(
       HTMLInputElement.prototype,
       "value",
@@ -233,10 +236,7 @@ async function seekTscaps(page, sec = SEEK_SEC) {
     setter.call(slider, String(sec));
     slider.dispatchEvent(new Event("input", { bubbles: true }));
     slider.dispatchEvent(new Event("change", { bubbles: true }));
-    // currentTime AKTUAL video (player bisa mendarat sedikit di bawah nilai
-    // slider, mis. 1.2 -> 1.199) — jadi acuan frame yang sama di rscaps.
-    const vid = document.querySelector("video");
-    return { ok: true, actual: vid ? vid.currentTime : null, value: slider.value };
+    return { ok: true, actual: vid ? vid.currentTime : 0, value: slider.value };
   }, sec);
   await sleep(600);
   if (!info.ok) console.log("[seekA miss]", JSON.stringify(info));
@@ -306,10 +306,10 @@ try {
         const seek = await seekTscaps(pageA, sec);
         await shotTscaps(pageA, `${OUT}/${t.id}${suffix}__tscaps.png`);
         await pageB.bringToFront();
-        // Pemetaan frame teruji: slider 1.2 -> tscaps melapor 1.199 tapi state
-        // kontennya = t 1.2 -> rscaps frame 12 = round(1.2*fps). JANGAN pakai
-        // floor(actual) — tscaps tampil 0.099s lebih awal (frame 11).
-        await seekRscaps(pageB, sec);
+        // Ikuti waktu yang benar-benar tampil di tscaps (bisa 0 bila player
+        // belum siap), supaya kedua screenshot menunjukkan frame yang sama.
+        const useSec = typeof seek.actual === "number" ? seek.actual : sec;
+        await seekRscaps(pageB, useSec);
         await shotRscaps(pageB, `${OUT}/${t.id}${suffix}__rscaps.png`);
       }
       row.status = "ok";

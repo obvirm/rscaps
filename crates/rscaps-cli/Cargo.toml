@@ -30,6 +30,7 @@ log = "0.4"
 fframes = { version = "1.2.1-rc.38", default-features = false, features = ["cpu_renderer"] }
 axum = "0.8"
 fframes_skia_renderer = { version = "1.2.1-rc.38", optional = true, features = ["vulkan"] }
+caption-wgpu = { path = "../caption-wgpu", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
 rayon = "1"
@@ -45,6 +46,7 @@ default = []
 # Raster SVG tetap usvgr/tiny-skia (CPU, deterministik; preview studio
 # memakai engine yang sama → output konsisten).
 gpu-skia = ["dep:fframes_skia_renderer"]
+wgpu-lyon = ["dep:caption-wgpu"]
 gpu-nvidia = ["fframes/nvidia"]
 gpu-qsv = ["fframes/qsv"]
 gpu-vaapi = ["fframes/vaapi"]

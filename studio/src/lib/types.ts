@@ -226,6 +226,7 @@ export interface WasmBridge {
 // ── Project model ─────────────────────────────────────────────────────────
 
 export type WhisperBackend = "cpu" | "webgpu";
+export type NativeAsr = "auto" | "cpu" | "cuda" | "dml" | "vulkan" | "boost";
 export type WhisperModel = "tiny" | "base" | "small" | "medium" | "large" | "turbo";
 
 // Kuantisasi ONNX (onnx-community repos). q8 = *_quantized (MatMulNBits pada
@@ -314,6 +315,8 @@ export interface ProjectSettings {
   width: number;
   height: number;
   backend: WhisperBackend;
+  /** Native ASR backend (Tauri only); web ignores it. */
+  asr?: NativeAsr;
   model: WhisperModel;
 }
 

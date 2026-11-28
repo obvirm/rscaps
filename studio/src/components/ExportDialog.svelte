@@ -16,9 +16,8 @@
   let quality = $state<ExportQuality>("high");
 
   // Native-only options
-  let nativeEngine = $state<"cpu" | "skia" | "fframes">("fframes");
-  let nativeHwEncode = $state(true);
-  let nativeHwEncoder = $state("h264_nvenc");
+  let nativeCap = $state("auto");
+  let nativeEnc = $state("auto");
   let nativeHwaccel = $state<"auto" | "cuda" | "d3d11va" | "vaapi" | "qsv" | "">("auto");
   let nativeCrf = $state(18);
   let nativePreset = $state("medium");
@@ -28,7 +27,6 @@
   let advancedOpen = $state(false);
   let subtitlesOpen = $state(false);
   let nativeAdvancedOpen = $state(false);
-  let hwEncoderAvailable = $state(false);
 
   const resolutions: { id: ExportResolution; label: string }[] = $derived([
     { id: "keep", label: `Keep original (${project.width} × ${project.height})` },
@@ -44,13 +42,70 @@
 
   const outputSize = $derived(computeOutputSize(project.width, project.height, resolution));
 
-  const hwEncoders = [
-    { value: "h264_nvenc", label: "NVIDIA NVENC (h264_nvenc)" },
-    { value: "h264_qsv", label: "Intel QuickSync (h264_qsv)" },
-    { value: "h264_vaapi", label: "VAAPI (h264_vaapi)" },
-    { value: "h264_videotoolbox", label: "Apple VideoToolbox (h264_videotoolbox)" },
-    { value: "h264_amf", label: "AMD AMF (h264_amf)" },
-  ];
+  interface BackendOption {
+    value: string;
+    label: string;
+    enabled: boolean;
+    reason: string | null;
+  }
+
+  interface BackendStatus {
+    caption: { value: string; enabled: boolean; reason: string | null }[];
+    encode: { value: string; enabled: boolean; reason: string | null }[];
+  }
+
+  const captionBackends = $state<BackendOption[]>([
+    { value: "auto", label: "Auto (lock satu kandidat)", enabled: true, reason: null },
+    { value: "tiny-skia", label: "CPU — tiny-skia (paritas web)", enabled: true, reason: null },
+    { value: "skia-gpu", label: "Skia GPU (Vulkan)", enabled: true, reason: null },
+    { value: "skia-cpu", label: "Skia CPU", enabled: true, reason: null },
+    { value: "fframes", label: "FFrames streaming", enabled: true, reason: null },
+    { value: "fframes-pipeline", label: "FFrames pipeline penuh", enabled: true, reason: null },
+    { value: "wgpu-lyon", label: "WebGPU — wgpu + lyon (experimental)", enabled: false, reason: "build tanpa wgpu-lyon" },
+  ]);
+
+  const encodeBackends = $state<BackendOption[]>([
+    { value: "auto", label: "Auto (NVENC → QSV → AMF → VAAPI → x264)", enabled: true, reason: null },
+    { value: "cpu", label: "CPU (libx264)", enabled: true, reason: null },
+    { value: "nvenc", label: "NVIDIA NVENC", enabled: true, reason: null },
+    { value: "qsv", label: "Intel QuickSync", enabled: true, reason: null },
+    { value: "amf", label: "AMD AMF", enabled: true, reason: null },
+    { value: "vaapi", label: "VAAPI", enabled: true, reason: null },
+    { value: "videotoolbox", label: "Apple VideoToolbox", enabled: true, reason: null },
+  ]);
+
+  function applyBackendStatus(status: BackendStatus) {
+    const caption = new Map(status.caption.map((b) => [b.value, b]));
+    const encode = new Map(status.encode.map((b) => [b.value, b]));
+    for (const b of captionBackends) {
+      const s = caption.get(b.value);
+      if (s) {
+        b.enabled = s.enabled;
+        b.reason = s.reason;
+      }
+    }
+    for (const b of encodeBackends) {
+      const s = encode.get(b.value);
+      if (s) {
+        b.enabled = s.enabled;
+        b.reason = s.reason;
+      }
+    }
+  }
+
+  async function refreshBackendStatus() {
+    if (!store.isTauri) return;
+    try {
+      const status = await invoke<BackendStatus>("native_backend_status", {
+        ffmpegDir: nativeFfmpegDir || null,
+      });
+      applyBackendStatus(status);
+    } catch {
+      // Status hanya badge; export tetap memvalidasi backend saat job mulai.
+    }
+  }
+
+  onMount(refreshBackendStatus);
 
   const hwaccelOptions = [
     { value: "", label: "None (CPU decode)" },
@@ -61,19 +116,6 @@
     { value: "qsv", label: "QuickSync (Intel)" },
   ];
 
-  async function checkHwEncoder() {
-    if (!store.isTauri) return;
-    try {
-      const avail = await invoke<boolean>("native_check_hw_encoder", {
-        ffmpegDir: nativeFfmpegDir || null,
-        encoder: nativeHwEncoder,
-      });
-      hwEncoderAvailable = avail;
-    } catch {
-      hwEncoderAvailable = false;
-    }
-  }
-
   async function onExport() {
     if (store.exporting) return;
 
@@ -83,9 +125,8 @@
     } else {
       // Native export (CLI engines via Tauri)
       await store.exportProjectNative(project.id, {
-        engine: nativeEngine,
-        hwEncode: nativeHwEncode,
-        hwEncoder: nativeHwEncoder,
+        cap: nativeCap,
+        enc: nativeEnc,
         hwaccel: nativeHwaccel || undefined,
         format,
         quality,
@@ -107,19 +148,6 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "Escape" && !store.exporting) onclose();
   }
-
-  onMount(() => {
-    if (store.isTauri) {
-      checkHwEncoder();
-    }
-  });
-
-  // Re-check when hw_encoder changes
-  $effect(() => {
-    if (store.isTauri && exportMode === "native" && nativeHwEncode) {
-      checkHwEncoder();
-    }
-  });
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -223,52 +251,50 @@
     {#if exportMode === "native" && store.isTauri}
       <div class="native-options">
         <div class="field">
-          <label class="label" for="ex-native-engine">Render Engine</label>
-          <select id="ex-native-engine" class="select" bind:value={nativeEngine} disabled={store.exporting}>
-            <option value="fframes">FFrames (full GPU pipeline: decode→composite→encode)</option>
-            <option value="cpu">CPU (usvgr + tiny-skia, deterministik, paritas web)</option>
-            <option value="skia">Skia GPU (Vulkan)</option>
+          <label class="label" for="ex-native-cap">Caption Backend</label>
+          <select id="ex-native-cap" class="select" bind:value={nativeCap} disabled={store.exporting}>
+            {#each captionBackends as b (b.value)}
+              <option value={b.value} disabled={!b.enabled}>{b.label}{b.enabled ? "" : ` — ${b.reason ?? "tidak tersedia"}`}</option>
+            {/each}
           </select>
           <p class="hint">
-            {nativeEngine === "fframes"
-              ? "Terbaik: decode+composite+encode GPU, pipelined chunked, tanpa RAM cap."
-              : nativeEngine === "cpu"
-                ? "Deterministik, cocok CI/server, paritas pixel dengan web export."
-                : "GPU via Vulkan, alternatif lebih cepat dari CPU."}
+            {nativeCap === "auto"
+              ? "Auto mengunci Skia GPU bila build mendukung; build tanpa gpu-skia memakai tiny-skia. Gagal init = error eksplisit."
+              : nativeCap === "tiny-skia"
+                ? "Deterministik, paritas piksel dengan web export."
+                : nativeCap === "wgpu-lyon"
+                  ? "Experimental: raster path di wgpu+lyon; filter/mask/blend belum penuh."
+                  : nativeCap.startsWith("fframes")
+                  ? "Pipeline fframes: raster caption + composite/encode video."
+                  : "Skia Vulkan/CPU; gagal init = error eksplisit, tanpa fallback diam."}
           </p>
         </div>
 
         <div class="field">
-          <label class="label">Hardware Encode</label>
-          <div class="checkbox-row">
-            <input type="checkbox" id="ex-hw-encode" bind:checked={nativeHwEncode} disabled={store.exporting} />
-            <label for="ex-hw-encode">Enable hardware encoder (fallback ke libx264 kalau tidak tersedia)</label>
-          </div>
+          <label class="label" for="ex-native-enc">Video Encode</label>
+          <select id="ex-native-enc" class="select" bind:value={nativeEnc} disabled={store.exporting}>
+            {#each encodeBackends as e (e.value)}
+              <option value={e.value} disabled={!e.enabled}>{e.label}{e.enabled ? "" : ` — ${e.reason ?? "tidak tersedia"}`}</option>
+            {/each}
+          </select>
+          <p class="hint">
+            {nativeEnc === "auto"
+              ? "Auto memilih encoder hardware yang tersedia; jika tidak ada, libx264."
+              : nativeEnc === "cpu"
+                ? "libx264 CPU."
+                : "Encoder hardware eksplisit; jika tidak tersedia, export gagal (tanpa fallback diam)."}
+          </p>
         </div>
 
-        {#if nativeHwEncode}
-          <div class="field">
-            <label class="label" for="ex-hw-encoder">Hardware Encoder</label>
-            <select id="ex-hw-encoder" class="select" bind:value={nativeHwEncoder} disabled={store.exporting} onchange={checkHwEncoder}>
-              {#each hwEncoders as enc}
-                <option value={enc.value}>{enc.label} {hwEncoderAvailable && nativeHwEncoder === enc.value ? "✓" : ""}</option>
-              {/each}
-            </select>
-            <p class="hint">
-              {hwEncoderAvailable ? "Encoder tersedia di ffmpeg ini ✓" : "Encoder TIDAK tersedia → fallback libx264"}
-            </p>
-          </div>
-
-          <div class="field">
-            <label class="label" for="ex-hwaccel">Hardware Decode (hwaccel)</label>
-            <select id="ex-hwaccel" class="select" bind:value={nativeHwaccel} disabled={store.exporting}>
-              {#each hwaccelOptions as ha}
-                <option value={ha.value}>{ha.label}</option>
-              {/each}
-            </select>
-            <p class="hint">Decode video di GPU sebelum composite. "Auto" = ffmpeg pilih.</p>
-          </div>
-        {/if}
+        <div class="field">
+          <label class="label" for="ex-hwaccel">Hardware Decode (hwaccel)</label>
+          <select id="ex-hwaccel" class="select" bind:value={nativeHwaccel} disabled={store.exporting}>
+            {#each hwaccelOptions as ha}
+              <option value={ha.value}>{ha.label}</option>
+            {/each}
+          </select>
+          <p class="hint">Decode video di GPU sebelum composite. "Auto" = ffmpeg pilih.</p>
+        </div>
 
         <button class="advanced-toggle" type="button" onclick={() => (nativeAdvancedOpen = !nativeAdvancedOpen)} aria-expanded={nativeAdvancedOpen} disabled={store.exporting}>
           <svg class:open={nativeAdvancedOpen} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5 8 6l-4 3.5" /></svg>
@@ -301,7 +327,7 @@
 
             <div class="field">
               <label class="label" for="ex-ffmpeg-dir">FFmpeg Directory (opsional)</label>
-              <input id="ex-ffmpeg-dir" type="text" class="select" bind:value={nativeFfmpegDir} placeholder="C:\\ffmpeg\\bin atau /usr/bin" disabled={store.exporting} />
+              <input id="ex-ffmpeg-dir" type="text" class="select" bind:value={nativeFfmpegDir} placeholder="C:\\ffmpeg\\bin atau /usr/bin" disabled={store.exporting} onchange={refreshBackendStatus} />
               <p class="hint">Folder berisi ffmpeg/ffprobe. Bisa juga via env RSCAPS_FFMPEG_DIR atau PATH.</p>
             </div>
           </div>
@@ -311,7 +337,7 @@
 
     <p class="summary">
       Output {outputSize.width} × {outputSize.height} · {project.fps} fps · {format.toUpperCase()}
-      {#if exportMode === "native"} · Engine: {nativeEngine.toUpperCase()} {nativeHwEncode ? "· HW Encode" : ""}{/if}
+      {#if exportMode === "native"} · Caption: {nativeCap} · Encode: {nativeEnc}{/if}
     </p>
 
     {#if store.exporting}
@@ -412,18 +438,6 @@
   }
   .hint.warning {
     color: rgb(var(--warning));
-  }
-  .checkbox-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12.5px;
-    color: rgb(var(--fg-1));
-  }
-  .checkbox-row input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    accent-color: rgb(var(--accent));
   }
 
   /* Mode Tabs */

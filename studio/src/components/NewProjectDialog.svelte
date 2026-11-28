@@ -11,11 +11,12 @@
     formatTimeShort,
     type Direction,
     type WhisperBackend,
+    type NativeAsr,
     type WhisperModel,
     type WhisperQuant,
   } from "../lib/types";
   import { isModelSupported } from "../lib/transcribe";
-  import { isTauri } from "../lib/tauri";
+  import { invoke, isTauri } from "../lib/tauri";
   import type { VideoProbe } from "../lib/video";
 
   let {
@@ -28,6 +29,7 @@
   // populated before the picker renders options.
   onMount(() => {
     void store.bootWasm();
+    void refreshAsrStatus();
   });
 
   const initialName = video.name.replace(/\.[^.]+$/, "") || "Untitled";
@@ -35,6 +37,40 @@
   let template = $state("luna");
   let direction = $state<Direction>("auto");
   let backend = $state<WhisperBackend>("webgpu");
+  let nativeAsr = $state<NativeAsr>("auto");
+  interface AsrOption {
+    value: NativeAsr;
+    label: string;
+    enabled: boolean;
+    reason: string | null;
+  }
+  const asrBackends = $state<AsrOption[]>([
+    { value: "auto", label: "Auto (lock EP build)", enabled: true, reason: null },
+    { value: "cpu", label: "CPU", enabled: true, reason: null },
+    { value: "cuda", label: "CUDA", enabled: true, reason: null },
+    { value: "dml", label: "DirectML", enabled: true, reason: null },
+    { value: "vulkan", label: "Vulkan", enabled: true, reason: null },
+    { value: "boost", label: "Boost", enabled: true, reason: null },
+  ]);
+  async function refreshAsrStatus() {
+    if (!isTauri()) return;
+    try {
+      const status = await invoke<{ asr: { value: string; enabled: boolean; reason: string | null }[] }>(
+        "native_backend_status",
+        { ffmpegDir: null },
+      );
+      const map = new Map(status.asr.map((a) => [a.value, a]));
+      for (const b of asrBackends) {
+        const s = map.get(b.value);
+        if (s) {
+          b.enabled = s.enabled;
+          b.reason = s.reason;
+        }
+      }
+    } catch {
+      // Badge saja; transkripsi tetap memvalidasi EP saat job mulai.
+    }
+  }
   let model = $state<WhisperModel>("medium");
   let quant = $state<WhisperQuant>(DEFAULT_QUANT["medium"]);
   let language = $state("en");
@@ -54,6 +90,7 @@
       template,
       direction,
       backend,
+      asr: isTauri() ? nativeAsr : undefined,
       model,
       video,
       videoName: video.name,
@@ -166,16 +203,31 @@
     {#if advancedOpen}
       <div class="advanced">
         <div class="field">
-          <label class="label" for="np-backend">Backend</label>
-          <select id="np-backend" class="select" bind:value={backend}>
-            <option value="cpu">CPU</option>
-            <option value="webgpu">WebGPU</option>
-          </select>
-          <p class="hint">
-            {backend === "cpu"
-              ? "Default — works on every device."
-              : "WebGPU — @huggingface/transformers, device webgpu, tanpa fallback."}
-          </p>
+          <label class="label" for="np-asr">ASR Backend</label>
+          {#if isTauri()}
+            <select id="np-asr" class="select" bind:value={nativeAsr}>
+              {#each asrBackends as a (a.value)}
+                <option value={a.value} disabled={!a.enabled}>{a.label}{a.enabled ? "" : ` — ${a.reason ?? "tidak tersedia"}`}</option>
+              {/each}
+            </select>
+            <p class="hint">
+              {nativeAsr === "auto"
+                ? "Auto memakai EP bawaan build (default CUDA) dan mengunci satu kandidat."
+                : nativeAsr === "cpu"
+                  ? "CPU in-process; tidak memakai GPU."
+                  : "EP eksplisit; jika build tidak mendukung, transkripsi gagal eksplisit."}
+            </p>
+          {:else}
+            <select id="np-backend" class="select" bind:value={backend}>
+              <option value="cpu">CPU</option>
+              <option value="webgpu">WebGPU</option>
+            </select>
+            <p class="hint">
+              {backend === "cpu"
+                ? "Default — works on every device."
+                : "WebGPU — @huggingface/transformers, device webgpu, tanpa fallback."}
+            </p>
+          {/if}
         </div>
 
         <div class="field">

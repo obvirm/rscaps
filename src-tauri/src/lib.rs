@@ -1,3 +1,4 @@
+use rscaps_cli::backend::{AsrBackend, CaptionBackend, EncodeBackend};
 use rscaps_cli::{render_video, RenderVideoOpts, probe_video, tool_bin, hw_encoder_available};
 use caption_core::{templates::{render as render_template, template_catalog}, CaptionParams, CaptionDocument};
 use fframes::{FFramesContext, FFramesMode, TimeBase, VideoSize};
@@ -96,12 +97,62 @@ async fn native_check_hw_encoder(
     Ok(hw_encoder_available(&ffmpeg, &encoder))
 }
 
+/// Status backend untuk UI: semua opsi tampil, yang tidak tersedia diberi
+/// alasan eksplisit (tidak ada fallback diam).
+#[tauri::command]
+async fn native_backend_status(ffmpeg_dir: Option<String>) -> Result<serde_json::Value, String> {
+    let ffmpeg = tool_bin("ffmpeg", ffmpeg_dir.as_deref().map(Path::new)).ok();
+    let encoder = |name: &str| -> bool {
+        ffmpeg
+            .as_deref()
+            .map(|path| hw_encoder_available(path, name))
+            .unwrap_or(false)
+    };
+    let caption = vec![
+        serde_json::json!({"value": "auto", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "tiny-skia", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "skia-gpu", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "skia-cpu", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "fframes", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "fframes-pipeline", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "wgpu-lyon", "enabled": cfg!(feature = "wgpu-lyon"), "reason": if cfg!(feature = "wgpu-lyon") { serde_json::Value::Null } else { serde_json::json!("build tanpa wgpu-lyon") }}),
+    ];
+    let nvenc = encoder("h264_nvenc");
+    let qsv = encoder("h264_qsv");
+    let amf = encoder("h264_amf");
+    let vaapi = encoder("h264_vaapi");
+    let videotoolbox = encoder("h264_videotoolbox");
+    let encode = vec![
+        serde_json::json!({"value": "auto", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "cpu", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "nvenc", "enabled": nvenc, "reason": if nvenc { serde_json::Value::Null } else { serde_json::json!("h264_nvenc tidak ada di ffmpeg") }}),
+        serde_json::json!({"value": "qsv", "enabled": qsv, "reason": if qsv { serde_json::Value::Null } else { serde_json::json!("h264_qsv tidak ada di ffmpeg") }}),
+        serde_json::json!({"value": "amf", "enabled": amf, "reason": if amf { serde_json::Value::Null } else { serde_json::json!("h264_amf tidak ada di ffmpeg") }}),
+        serde_json::json!({"value": "vaapi", "enabled": vaapi, "reason": if vaapi { serde_json::Value::Null } else { serde_json::json!("h264_vaapi tidak ada di ffmpeg") }}),
+        serde_json::json!({"value": "videotoolbox", "enabled": videotoolbox, "reason": if videotoolbox { serde_json::Value::Null } else { serde_json::json!("h264_videotoolbox tidak ada di ffmpeg") }}),
+    ];
+    let asr = vec![
+        serde_json::json!({"value": "auto", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "cpu", "enabled": true, "reason": null}),
+        serde_json::json!({"value": "cuda", "enabled": cfg!(feature = "gpu-cuda"), "reason": if cfg!(feature = "gpu-cuda") { serde_json::Value::Null } else { serde_json::json!("build tanpa gpu-cuda") }}),
+        serde_json::json!({"value": "dml", "enabled": cfg!(feature = "gpu-directml"), "reason": if cfg!(feature = "gpu-directml") { serde_json::Value::Null } else { serde_json::json!("build tanpa gpu-directml") }}),
+        serde_json::json!({"value": "vulkan", "enabled": cfg!(feature = "gpu-webgpu"), "reason": if cfg!(feature = "gpu-webgpu") { serde_json::Value::Null } else { serde_json::json!("build tanpa gpu-webgpu") }}),
+        serde_json::json!({"value": "boost", "enabled": cfg!(feature = "gpu-cuda") && cfg!(feature = "gpu-directml"), "reason": if cfg!(feature = "gpu-cuda") && cfg!(feature = "gpu-directml") { serde_json::Value::Null } else { serde_json::json!("build tanpa cuda+directml") }}),
+    ];
+    Ok(serde_json::json!({ "caption": caption, "encode": encode, "asr": asr }))
+}
+
 /// Opsi render native (mirip CLI `RenderVideoOpts`).
 #[derive(serde::Deserialize)]
 struct NativeRenderOpts {
-    engine: String,           // "cpu" | "skia" | "fframes"
-    hw_encode: bool,
-    hw_encoder: String,       // "h264_nvenc" | "h264_qsv" | "h264_vaapi" | "h264_videotoolbox" | "h264_amf"
+    /// Backend caption baru: auto|tiny-skia|skia-gpu|skia-cpu|fframes|fframes-pipeline
+    cap: Option<String>,
+    /// Encoder baru: auto|cpu|nvenc|qsv|amf|vaapi|videotoolbox
+    enc: Option<String>,
+    /// Alias lama dari UI/build sebelumnya.
+    engine: Option<String>,
+    hw_encode: Option<bool>,
+    hw_encoder: Option<String>,
     hwaccel: Option<String>,  // "auto" | "cuda" | "d3d11va" | "vaapi" | "qsv"
     video_path: String,
     srt_path: String,
@@ -112,6 +163,31 @@ struct NativeRenderOpts {
     ffmpeg_dir: Option<String>,
     crf: u32,
     preset: String,
+}
+
+/// Lock encoder native sebelum job. `auto` memilih yang benar-benar ada;
+/// pilihan eksplisit yang tidak ada adalah hard error (tanpa fallback diam).
+fn resolve_encode_native(
+    enc: EncodeBackend,
+    ffmpeg: &Path,
+) -> Result<(bool, &'static str), String> {
+    if enc == EncodeBackend::Cpu {
+        return Ok((false, "libx264"));
+    }
+    if let Some(name) = enc.hw_encoder() {
+        if !hw_encoder_available(ffmpeg, name) {
+            return Err(format!(
+                "encoder {name} tidak tersedia di build ffmpeg ini; pilih enc=cpu atau encoder lain"
+            ));
+        }
+        return Ok((true, name));
+    }
+    for name in rscaps_cli::backend::AUTO_ENCODERS {
+        if hw_encoder_available(ffmpeg, name) {
+            return Ok((true, name));
+        }
+    }
+    Ok((false, "libx264"))
 }
 
 /// Progress event untuk frontend.
@@ -128,21 +204,32 @@ async fn native_render_video(
     app: tauri::AppHandle,
     opts: NativeRenderOpts,
 ) -> Result<(), String> {
-    // Validasi engine
-    let valid_engines = ["cpu", "skia", "fframes", "fframes-pipeline"];
-    if !valid_engines.contains(&opts.engine.as_str()) {
-        return Err(format!("engine tidak valid: {} (pilih: cpu, skia, fframes, fframes-pipeline)", opts.engine));
-    }
-    // skia butuh feature gpu-skia
-    #[cfg(not(feature = "gpu-skia"))]
-    if opts.engine == "skia" || opts.engine == "fframes" {
-        return Err("engine skia butuh build dengan --features gpu-skia".to_string());
-    }
+    // Backend caption + encode: satu kontrak dengan CLI. `auto` mengunci satu
+    // kandidat; pilihan eksplisit yang tidak tersedia adalah hard error.
+    let cap_raw = opts
+        .cap
+        .as_deref()
+        .or(opts.engine.as_deref())
+        .unwrap_or("auto");
+    let cap = CaptionBackend::parse(cap_raw)
+        .map_err(|e| format!("caption backend: {e}"))?
+        .resolve()
+        .map_err(|e| format!("caption backend: {e}"))?;
+    let enc_raw = opts.enc.as_deref().unwrap_or_else(|| {
+        if opts.hw_encode.unwrap_or(false) {
+            opts.hw_encoder.as_deref().unwrap_or("auto")
+        } else {
+            "auto"
+        }
+    });
+    let enc = EncodeBackend::parse(enc_raw).map_err(|e| format!("encode backend: {e}"))?;
+    let ffmpeg = tool_bin("ffmpeg", opts.ffmpeg_dir.as_deref().map(Path::new))
+        .map_err(|e| format!("ffmpeg: {e}"))?;
+    let (hw_encode, hw_encoder) = resolve_encode_native(enc, &ffmpeg)?;
 
     // Clone string values before moving into closure (lifetime issue with spawn_blocking)
-    let engine = opts.engine.clone();
-    let hw_encode = opts.hw_encode;
-    let hw_encoder = opts.hw_encoder.clone();
+    let engine = cap.engine_arg().to_string();
+    let hw_encoder = hw_encoder.to_string();
     let hwaccel = opts.hwaccel.clone();
     let video_path = opts.video_path.clone();
     let srt_path = opts.srt_path.clone();
@@ -298,6 +385,43 @@ fn set_prog(run_id: &str, frac: f64, stage: &str) {
     }
 }
 
+/// Validasi pilihan ASR terhadap EP yang benar-benar dikompilasi. `auto`
+/// membiarkan build memilih; pilihan eksplisit yang tidak ada = hard error.
+fn asr_env_mode(asr: AsrBackend) -> Result<Option<&'static str>, String> {
+    match asr {
+        AsrBackend::Auto => Ok(None),
+        AsrBackend::Cpu => Ok(Some("off")),
+        AsrBackend::Cuda => {
+            if cfg!(feature = "gpu-cuda") {
+                Ok(Some("cuda"))
+            } else {
+                Err("ASR cuda tidak tersedia di build ini; pilih cpu/auto".into())
+            }
+        }
+        AsrBackend::Dml => {
+            if cfg!(feature = "gpu-directml") {
+                Ok(Some("full"))
+            } else {
+                Err("ASR dml tidak tersedia di build ini; pilih cpu/auto".into())
+            }
+        }
+        AsrBackend::Vulkan => {
+            if cfg!(feature = "gpu-webgpu") {
+                Ok(Some("vulkan"))
+            } else {
+                Err("ASR vulkan tidak tersedia di build ini; pilih cpu/auto".into())
+            }
+        }
+        AsrBackend::Boost => {
+            if cfg!(feature = "gpu-cuda") && cfg!(feature = "gpu-directml") {
+                Ok(Some("cuda-dml"))
+            } else {
+                Err("ASR boost butuh build cuda+directml; pilih cpu/auto".into())
+            }
+        }
+    }
+}
+
 /// Poll progress dari frontend (invoke per ~500 ms).
 #[tauri::command]
 fn transcribe_native_progress(run_id: String) -> (f64, String) {
@@ -316,7 +440,17 @@ async fn transcribe_native(
     lang: String,
     run_id: String,
     ffmpeg_dir: Option<String>,
+    asr: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let asr = AsrBackend::parse(asr.as_deref().unwrap_or("auto"))
+        .map_err(|e| format!("ASR backend: {e}"))?;
+    let mode = asr_env_mode(asr)?;
+    let previous = std::env::var_os("RSCAPS_GPU_MODE");
+    if let Some(mode) = mode {
+        // NativeEngine membaca env saat load/transcribe; transkripsi native
+        // berjalan serial, lalu env dikembalikan seperti semula.
+        unsafe { std::env::set_var("RSCAPS_GPU_MODE", mode) };
+    }
     // ffmpeg: eksplisit bila diberi, else PATH (tool_bin punya fallback bundel).
     let ff = rscaps_cli::tool_bin("ffmpeg", ffmpeg_dir.as_deref().map(Path::new)).ok();
     let ff2 = ff.clone();
@@ -346,9 +480,16 @@ async fn transcribe_native(
             .collect();
         Ok(serde_json::json!({ "text": text, "segments": segs }))
     });
-    handle
+    let result = handle
         .await
-        .map_err(|e| format!("join: {e}"))?
+        .map_err(|e| format!("join: {e}"))?;
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("RSCAPS_GPU_MODE", value),
+            None => std::env::remove_var("RSCAPS_GPU_MODE"),
+        }
+    }
+    result
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -371,6 +512,7 @@ pub fn run() {
             native_write_file,
             native_probe_video,
             native_check_hw_encoder,
+            native_backend_status,
             native_render_video,
             native_list_templates,
             native_render_preview_svg,
