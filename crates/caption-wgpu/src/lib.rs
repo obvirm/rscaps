@@ -36,9 +36,15 @@ struct ImageVertex {
     uv: [f32; 2],
 }
 
+#[derive(Clone)]
+enum MaskSource {
+    Image(Arc<PreloadedImageData>),
+    Paths { vertices: Vec<Vertex>, indices: Vec<u32> },
+}
+
 struct ImageDraw {
     data: Arc<PreloadedImageData>,
-    mask: Option<Arc<PreloadedImageData>>,
+    mask: Option<MaskSource>,
     vertices: Vec<ImageVertex>,
     indices: Vec<u32>,
 }
@@ -412,41 +418,109 @@ impl WgpuLyonRenderer {
                 },
             );
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let (bind_group, masked) = if let Some(mask) = &draw.mask {
-                let mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("rscaps-caption-mask"),
-                    size: wgpu::Extent3d {
-                        width: mask.width.max(1),
-                        height: mask.height.max(1),
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: FORMAT,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &mask_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &mask.data.as_ref(),
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(mask.width.max(1) * 4),
-                        rows_per_image: Some(mask.height.max(1)),
-                    },
-                    wgpu::Extent3d {
-                        width: mask.width.max(1),
-                        height: mask.height.max(1),
-                        depth_or_array_layers: 1,
-                    },
-                );
-                let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mask_view = match &draw.mask {
+                Some(MaskSource::Image(mask)) => {
+                    let mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("rscaps-caption-mask"),
+                        size: wgpu::Extent3d {
+                            width: mask.width.max(1),
+                            height: mask.height.max(1),
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: FORMAT,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    self.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &mask_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &mask.data.as_ref(),
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(mask.width.max(1) * 4),
+                            rows_per_image: Some(mask.height.max(1)),
+                        },
+                        wgpu::Extent3d {
+                            width: mask.width.max(1),
+                            height: mask.height.max(1),
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    Some(mask_texture.create_view(&wgpu::TextureViewDescriptor::default()))
+                }
+                Some(MaskSource::Paths { vertices, indices }) => {
+                    let mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("rscaps-caption-mask-paths"),
+                        size: wgpu::Extent3d {
+                            width: self.width,
+                            height: self.height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: FORMAT,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    });
+                    let mask_view =
+                        mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    let vbytes = bytemuck::cast_slice(vertices);
+                    let vbuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("rscaps-caption-mask-vertices"),
+                        size: vbytes.len().max(4) as u64,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    self.queue.write_buffer(&vbuf, 0, vbytes);
+                    let ibytes = bytemuck::cast_slice(indices);
+                    let ibuf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("rscaps-caption-mask-indices"),
+                        size: ibytes.len().max(4) as u64,
+                        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
+                    self.queue.write_buffer(&ibuf, 0, ibytes);
+                    let mut mask_encoder =
+                        self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("rscaps-caption-mask-encoder"),
+                        });
+                    {
+                        let mut pass = mask_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("rscaps-caption-mask-pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &mask_view,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        pass.set_pipeline(&self.pipeline);
+                        pass.set_vertex_buffer(0, vbuf.slice(..));
+                        pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+                    }
+                    self.queue.submit(Some(mask_encoder.finish()));
+                    Some(mask_view)
+                }
+                None => None,
+            };
+            let (bind_group, masked) = if let Some(mask_view) = mask_view {
                 let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("rscaps-caption-masked-bind"),
                     layout: &self.masked_layout,
@@ -705,13 +779,15 @@ fn walk_children(
     width: u32,
     height: u32,
     shadow: Option<Shadow>,
-    mask: Option<Arc<PreloadedImageData>>,
+    mask: Option<MaskSource>,
 ) -> Result<()> {
     for node in group.children() {
         match node {
             Node::Group(g) => {
                 let opacity = opacity * g.opacity().get();
-                let mask = mask_image(g.mask()).or_else(|| mask.clone());
+                let mask = mask_source(g.mask(), width, height)
+                    .or_else(|| clip_source(g.clip_path(), width, height))
+                    .or_else(|| mask.clone());
                 if shadow.is_none() {
                     let nested = shadows_for(g.filters());
                     if !nested.is_empty() {
@@ -748,7 +824,23 @@ fn walk_children(
     Ok(())
 }
 
-fn mask_image(mask: Option<&Mask>) -> Option<Arc<PreloadedImageData>> {
+fn mask_source(
+    mask: Option<&Mask>,
+    width: u32,
+    height: u32,
+) -> Option<MaskSource> {
+    mask.and_then(|m| source_from_group(m.root(), width, height))
+}
+
+fn clip_source(
+    clip: Option<&usvgr::ClipPath>,
+    width: u32,
+    height: u32,
+) -> Option<MaskSource> {
+    clip.and_then(|c| source_from_group(c.root(), width, height))
+}
+
+fn source_from_group(group: &Group, width: u32, height: u32) -> Option<MaskSource> {
     fn first_data_image(group: &Group) -> Option<Arc<PreloadedImageData>> {
         for node in group.children() {
             match node {
@@ -767,7 +859,39 @@ fn mask_image(mask: Option<&Mask>) -> Option<Arc<PreloadedImageData>> {
         }
         None
     }
-    mask.and_then(|m| first_data_image(m.root()))
+    if let Some(data) = first_data_image(group) {
+        return Some(MaskSource::Image(data));
+    }
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    collect_mask_paths(group, &mut vertices, &mut indices, width, height);
+    if indices.is_empty() {
+        None
+    } else {
+        Some(MaskSource::Paths { vertices, indices })
+    }
+}
+
+fn collect_mask_paths(
+    group: &Group,
+    vertices: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    width: u32,
+    height: u32,
+) {
+    for node in group.children() {
+        match node {
+            Node::Group(g) => collect_mask_paths(g, vertices, indices, width, height),
+            Node::Path(p) => {
+                let _ = add_path(p, 1.0, vertices, indices, width, height, None);
+            }
+            Node::FastShape(s) => {
+                let _ = add_path(s.path(), 1.0, vertices, indices, width, height, None);
+            }
+            Node::Text(t) => collect_mask_paths(t.flattened(), vertices, indices, width, height),
+            Node::Image(_) => {}
+        }
+    }
 }
 
 fn add_image(
@@ -776,7 +900,7 @@ fn add_image(
     image_draws: &mut Vec<ImageDraw>,
     width: u32,
     height: u32,
-    mask: Option<Arc<PreloadedImageData>>,
+    mask: Option<MaskSource>,
 ) -> Result<()> {
     if img.visibility() != Visibility::Visible {
         return Ok(());
