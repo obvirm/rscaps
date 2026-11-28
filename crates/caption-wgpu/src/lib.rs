@@ -920,11 +920,6 @@ fn shadows_for(filters: &[std::sync::Arc<filter::Filter>]) -> Vec<Shadow> {
                 filter::Kind::DropShadow(s) => {
                     let c = rgba(s.color());
                     let blur = s.std_dev_x().get().max(s.std_dev_y().get());
-                    if blur > 6.0 {
-                        // Blur besar butuh pass texture; salinan offset akan
-                        // terlihat sebagai bayangan ganda. Lewati dulu.
-                        continue;
-                    }
                     out.push(Shadow {
                         dx: s.dx(),
                         dy: s.dy(),
@@ -934,9 +929,6 @@ fn shadows_for(filters: &[std::sync::Arc<filter::Filter>]) -> Vec<Shadow> {
                 }
                 filter::Kind::GaussianBlur(b) => {
                     let blur = b.std_dev_x().get().max(b.std_dev_y().get());
-                    if blur > 6.0 {
-                        continue;
-                    }
                     out.push(Shadow {
                         dx: offset.0,
                         dy: offset.1,
@@ -1295,10 +1287,9 @@ fn add_shadow_geometry(
     // Gaussian blur didekati dengan beberapa salinan offset. Cukup untuk
     // membuat tepi bayangan lunak tanpa pass texture tambahan.
     let radius = shadow.blur.max(0.0);
-    let samples: &[(f32, f32)] = if radius <= 0.01 {
-        &[(0.0, 0.0)]
-    } else {
-        &[
+    let mut samples: Vec<(f32, f32, f32)> = Vec::new();
+    if radius <= 6.0 {
+        let ring = [
             (0.0, 0.0),
             (1.0, 0.0),
             (-1.0, 0.0),
@@ -1308,13 +1299,34 @@ fn add_shadow_geometry(
             (-0.7, 0.7),
             (0.7, -0.7),
             (-0.7, -0.7),
-        ]
-    };
-    let alpha_scale = 1.0 / samples.len() as f32;
-    for &(ox, oy) in samples {
-        let dx = shadow.dx + ox * radius;
-        let dy = shadow.dy + oy * radius;
-        let c = [color[0], color[1], color[2], color[3] * alpha_scale];
+        ];
+        let weight = 1.0 / ring.len() as f32;
+        for (ox, oy) in ring {
+            samples.push((ox * radius, oy * radius, weight));
+        }
+    } else {
+        let sigma = (radius * 0.5).max(0.001);
+        let step = radius * 0.5;
+        let mut total = 0.0f32;
+        for gy in -2..=2 {
+            for gx in -2..=2 {
+                let ox = gx as f32 * step;
+                let oy = gy as f32 * step;
+                let w = (-(ox * ox + oy * oy) / (2.0 * sigma * sigma)).exp();
+                samples.push((ox, oy, w));
+                total += w;
+            }
+        }
+        if total > 0.0 {
+            for sample in &mut samples {
+                sample.2 /= total;
+            }
+        }
+    }
+    for &(ox, oy, weight) in &samples {
+        let dx = shadow.dx + ox;
+        let dy = shadow.dy + oy;
+        let c = [color[0], color[1], color[2], color[3] * weight];
         let mut tess = FillTessellator::new();
         let mut geometry: VertexBuffers<Vertex, u32> = VertexBuffers::new();
         tess.tessellate_path(
