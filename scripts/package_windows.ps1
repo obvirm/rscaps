@@ -60,12 +60,18 @@ function Stage-Variant([string]$variant) {
     default    { @() }
   }
   $releaseDir = Join-Path $TargetDir "release"
-  $ffmpegDlls = Get-ChildItem $releaseDir -Filter *.dll -ErrorAction SilentlyContinue |
+  $ffmpegDlls = Get-ChildItem $ffmpegBin -Filter *.dll -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match '^(av|sw)[a-z0-9-]+\.dll$' } |
     Select-Object -ExpandProperty Name
   foreach ($pattern in @($commonDlls + $variantDlls + $ffmpegDlls)) {
     Get-ChildItem $releaseDir -Filter $pattern -ErrorAction SilentlyContinue |
       Copy-Item -Destination $stage -Force
+    Get-ChildItem $ffmpegBin -Filter $pattern -ErrorAction SilentlyContinue |
+      Copy-Item -Destination $stage -Force
+  }
+  foreach ($exe in @("ffmpeg.exe", "ffprobe.exe")) {
+    $p = Join-Path $ffmpegBin $exe
+    if (Test-Path $p) { Copy-Item $p $stage }
   }
 
   if ($variant -eq "cuda" -and $CudaRuntimeDir) {
