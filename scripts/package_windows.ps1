@@ -8,6 +8,7 @@ param(
   [string[]]$Variants = @("cpu", "cuda", "directml", "vulkan"),
   [string]$TargetDir = "target/package",
   [string]$CudaRuntimeDir = "",
+  [string]$DawnDll = "",
   [switch]$SkipBuild
 )
 
@@ -88,6 +89,12 @@ function Stage-Variant([string]$variant) {
       Copy-Item -Destination $stage
   }
   if ($variant -eq "vulkan") {
+    $dawn = if ($DawnDll) { $DawnDll } else { $env:RSCAPS_DAWN_DLL }
+    if ($dawn -and (Test-Path $dawn)) {
+      Copy-Item $dawn $stage
+    } else {
+      Write-Warning "[package] webgpu_dawn.dll tidak disuplai; Tauri Vulkan akan gagal start (0xC0000135). Pakai -DawnDll <path>."
+    }
     foreach ($dll in @("webgpu_dawn.dll", "dxcompiler.dll", "dxil.dll")) {
       $p = Join-Path $ffmpegBin $dll
       if (Test-Path $p) { Copy-Item $p $stage }
