@@ -24,11 +24,20 @@ $featureMap = @{
   directml = @("gpu-directml")
   vulkan   = @("gpu-webgpu", "wgpu-lyon")
 }
+# CLI tidak punya feature gpu-cuda/gpu-directml/gpu-webgpu; pakai feature
+# fframes yang setara agar build CLI tidak gagal karena feature tak dikenal.
+$cliFeatureMap = @{
+  cpu      = @()
+  cuda     = @("gpu-nvidia")
+  directml = @()
+  vulkan   = @("gpu-vulkan", "wgpu-lyon")
+}
 
 function Build-Variant([string]$variant) {
   $features = $featureMap[$variant]
+  $cliFeatures = $cliFeatureMap[$variant]
   $featArgs = @()
-  if ($features.Count -gt 0) { $featArgs = @("--features", ($features -join ",")) }
+  if ($cliFeatures.Count -gt 0) { $featArgs = @("--features", ($cliFeatures -join ",")) }
 
   Write-Host "[package] build CLI $variant"
   & cargo build --release --target-dir $TargetDir -p rscaps-cli --bin rscaps @featArgs
