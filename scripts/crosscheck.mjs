@@ -56,7 +56,7 @@ async function upload(page, inputSel, file) {
 async function setupTscaps(page) {
   log("[A] goto tscaps");
   await page.bringToFront();
-  await page.goto("http://localhost:5173/", { waitUntil: "networkidle2", timeout: 60000 });
+  await page.goto(process.env.TSCAPS_URL || "http://localhost:5173/", { waitUntil: "networkidle2", timeout: 60000 });
   await page.waitForFunction(
     () =>
       [...document.querySelectorAll("button")].some((b) =>
@@ -152,16 +152,55 @@ async function waitForTscapsReady(page, timeout = 300000) {
   );
 }
 
-async function selectTscaps(page, id) {
+async function selectTscaps(page, id, label = id) {
   await waitForTscapsReady(page);
   if (!(await setSearch(page, id))) throw new Error("[A] search box tidak ada");
-  await page.waitForFunction(
-    (sel) => !!document.querySelector(sel),
-    { timeout: 8000, polling: 150 },
-    `button[aria-label="${id}"]`,
+  const hasCard = () =>
+    page.evaluate(
+      (wanted) =>
+        [...document.querySelectorAll("button[aria-label]")].some(
+          (b) => (b.getAttribute("aria-label") || "").toLowerCase() === wanted,
+        ),
+      id.toLowerCase(),
+    );
+  try {
+    await page.waitForFunction(
+      (wanted) =>
+        [...document.querySelectorAll("button[aria-label]")].some(
+          (b) => (b.getAttribute("aria-label") || "").toLowerCase() === wanted,
+        ),
+      { timeout: 8000, polling: 150 },
+      id.toLowerCase(),
+    );
+  } catch (e) {
+    if (!(await hasCard()) && label !== id) {
+      await setSearch(page, label);
+      await page.waitForFunction(
+        (wanted) =>
+          [...document.querySelectorAll("button[aria-label]")].some(
+            (b) => (b.getAttribute("aria-label") || "").toLowerCase() === wanted,
+          ),
+        { timeout: 8000, polling: 150 },
+        id.toLowerCase(),
+      );
+    } else {
+      const labels = await page.evaluate(() =>
+        [...document.querySelectorAll("button[aria-label]")]
+          .map((b) => b.getAttribute("aria-label"))
+          .filter(Boolean),
+      );
+      console.log(`[A] card ${id} tidak ada; labels=`, JSON.stringify(labels));
+      throw e;
+    }
+  }
+  const card = await page.evaluateHandle(
+    (wanted) =>
+      [...document.querySelectorAll("button[aria-label]")].find(
+        (b) => (b.getAttribute("aria-label") || "").toLowerCase() === wanted,
+      ),
+    id.toLowerCase(),
   );
-  const card = await page.$(`button[aria-label="${id}"]`);
-  await card.click({ timeout: 8000 });
+  await card.asElement().click({ timeout: 8000 });
   await sleep(800);
   const dialogText = await page.evaluate(
     () => document.querySelector('[role="dialog"]')?.innerText || "",
@@ -179,7 +218,21 @@ async function selectTscaps(page, id) {
   }
 }
 
+async function hideHud(page) {
+  await page.evaluate(() => {
+    const re = /^(\d{2}:\d{2}:\d{2}(?:\.\d+)?|frame \d+\b)/;
+    for (const el of document.querySelectorAll("div, span")) {
+      const text = (el.textContent || "").trim();
+      const rect = el.getBoundingClientRect();
+      if (el.children.length === 0 && text.length <= 80 && rect.height < 40 && re.test(text)) {
+        el.style.visibility = "hidden";
+      }
+    }
+  });
+}
+
 async function shotTscaps(page, file) {
+  await hideHud(page);
   const box = await page.$('div[style*="aspect-ratio"]');
   if (box) await box.screenshot({ path: file, timeout: 15000 }).catch(async () => {
     await page.screenshot({ path: file });
@@ -257,6 +310,7 @@ async function seekRscaps(page, sec = SEEK_SEC) {
 }
 
 async function shotRscaps(page, file) {
+  await hideHud(page);
   const box = await page.$(".video-box");
   if (box) await box.screenshot({ path: file });
   else await page.screenshot({ path: file });
@@ -266,6 +320,7 @@ async function shotRscaps(page, file) {
 try {
   const pageA = await browser.newPage(); // tscaps
   pageA.setDefaultTimeout(20000);
+  await pageA.setViewport({ width: 1720, height: 1075 });
   const pageB = await browser.newPage(); // rscaps
   pageB.setDefaultTimeout(20000);
   pageA.on("pageerror", (e) => console.log("[A pageerror]", e.message));
@@ -297,7 +352,7 @@ try {
     try {
       // Halaman aktif bergantian supaya tidak kena throttle background page.
       await pageA.bringToFront();
-      await selectTscaps(pageA, t.id);
+      await selectTscaps(pageA, t.id, t.label);
       await pageB.bringToFront();
       await selectRscaps(pageB, t.label);
       for (const sec of TIMES) {

@@ -21,7 +21,7 @@ if (!existsSync(DIR)) {
 }
 
 const files = new Set(readdirSync(DIR));
-const goldens = [...files].filter((f) => f.endsWith("__tscaps.png")).sort();
+const goldens = [...files].filter((f) => f.endsWith("__tscaps.png") && !f.includes("@")).sort();
 const results = [];
 
 function dimensions(file) {
