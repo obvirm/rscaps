@@ -30,7 +30,7 @@ $cliFeatureMap = @{
   cpu      = @()
   cuda     = @("gpu-nvidia")
   directml = @()
-  vulkan   = @("gpu-vulkan", "wgpu-lyon")
+  vulkan   = @("wgpu-lyon")
 }
 
 function Build-Variant([string]$variant) {
