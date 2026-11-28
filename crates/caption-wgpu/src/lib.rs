@@ -16,7 +16,7 @@ use lyon::tessellation::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use svgr::usvgr::{
-    self, filter, fontdb::Database, Color, Group, ImageKind, Node, Paint, Path as SvgPath,
+    self, filter, fontdb::Database, Color, Group, ImageKind, Mask, Node, Paint, Path as SvgPath,
     PreloadedImageData, Visibility,
 };
 
@@ -38,6 +38,7 @@ struct ImageVertex {
 
 struct ImageDraw {
     data: Arc<PreloadedImageData>,
+    mask: Option<Arc<PreloadedImageData>>,
     vertices: Vec<ImageVertex>,
     indices: Vec<u32>,
 }
@@ -48,6 +49,8 @@ pub struct WgpuLyonRenderer {
     pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
     image_layout: wgpu::BindGroupLayout,
+    masked_pipeline: wgpu::RenderPipeline,
+    masked_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     width: u32,
     height: u32,
@@ -200,6 +203,81 @@ impl WgpuLyonRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let masked_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rscaps-caption-masked-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let masked_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rscaps-caption-masked-pipeline"),
+            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("rscaps-caption-masked-pipeline-layout"),
+                bind_group_layouts: &[Some(&masked_layout)],
+                immediate_size: 0,
+            })),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ImageVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                    ],
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_image_mask"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("rscaps-caption-image-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -213,6 +291,8 @@ impl WgpuLyonRenderer {
             pipeline,
             image_pipeline,
             image_layout,
+            masked_pipeline,
+            masked_layout,
             sampler,
             width: width.max(1),
             height: height.max(1),
@@ -332,20 +412,77 @@ impl WgpuLyonRenderer {
                 },
             );
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("rscaps-caption-image-bind"),
-                layout: &self.image_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
+            let (bind_group, masked) = if let Some(mask) = &draw.mask {
+                let mask_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("rscaps-caption-mask"),
+                    size: wgpu::Extent3d {
+                        width: mask.width.max(1),
+                        height: mask.height.max(1),
+                        depth_or_array_layers: 1,
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &mask_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
                     },
-                ],
-            });
+                    &mask.data.as_ref(),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(mask.width.max(1) * 4),
+                        rows_per_image: Some(mask.height.max(1)),
+                    },
+                    wgpu::Extent3d {
+                        width: mask.width.max(1),
+                        height: mask.height.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let mask_view = mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("rscaps-caption-masked-bind"),
+                    layout: &self.masked_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&mask_view),
+                        },
+                    ],
+                });
+                (bind_group, true)
+            } else {
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("rscaps-caption-image-bind"),
+                    layout: &self.image_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+                (bind_group, false)
+            };
             let vbytes = bytemuck::cast_slice(&draw.vertices);
             let vbuf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("rscaps-caption-image-vertices"),
@@ -366,7 +503,7 @@ impl WgpuLyonRenderer {
             if !ibytes.is_empty() {
                 self.queue.write_buffer(&ibuf, 0, ibytes);
             }
-            image_resources.push((bind_group, vbuf, ibuf, draw.indices.len()));
+            image_resources.push((bind_group, vbuf, ibuf, draw.indices.len(), masked));
         }
 
         let mut encoder = self
@@ -397,11 +534,15 @@ impl WgpuLyonRenderer {
                 pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
             }
-            for (bind_group, vbuf, ibuf, count) in &image_resources {
+            for (bind_group, vbuf, ibuf, count, masked) in &image_resources {
                 if *count == 0 {
                     continue;
                 }
-                pass.set_pipeline(&self.image_pipeline);
+                pass.set_pipeline(if *masked {
+                    &self.masked_pipeline
+                } else {
+                    &self.image_pipeline
+                });
                 pass.set_bind_group(0, bind_group, &[]);
                 pass.set_vertex_buffer(0, vbuf.slice(..));
                 pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
@@ -546,12 +687,12 @@ fn walk_group(
     if !shadows.is_empty() {
         for shadow in shadows {
             walk_children(
-                group, opacity, vertices, indices, image_draws, width, height, Some(shadow),
+                group, opacity, vertices, indices, image_draws, width, height, Some(shadow), None,
             )?;
         }
     }
     walk_children(
-        group, opacity, vertices, indices, image_draws, width, height, None,
+        group, opacity, vertices, indices, image_draws, width, height, None, None,
     )
 }
 
@@ -564,23 +705,27 @@ fn walk_children(
     width: u32,
     height: u32,
     shadow: Option<Shadow>,
+    mask: Option<Arc<PreloadedImageData>>,
 ) -> Result<()> {
     for node in group.children() {
         match node {
             Node::Group(g) => {
                 let opacity = opacity * g.opacity().get();
+                let mask = mask_image(g.mask()).or_else(|| mask.clone());
                 if shadow.is_none() {
                     let nested = shadows_for(g.filters());
                     if !nested.is_empty() {
                         for s in nested {
                             walk_children(
                                 g, opacity, vertices, indices, image_draws, width, height, Some(s),
+                                mask.clone(),
                             )?;
                         }
                     }
                 }
                 walk_children(
                     g, opacity, vertices, indices, image_draws, width, height, shadow,
+                    mask,
                 )?;
             }
             Node::Path(p) => {
@@ -591,15 +736,38 @@ fn walk_children(
             }
             Node::Text(t) => walk_children(
                 t.flattened(), opacity, vertices, indices, image_draws, width, height, shadow,
+                mask.clone(),
             )?,
             Node::Image(img) => {
                 if shadow.is_none() {
-                    add_image(img, opacity, image_draws, width, height)?;
+                    add_image(img, opacity, image_draws, width, height, mask.clone())?;
                 }
             }
         }
     }
     Ok(())
+}
+
+fn mask_image(mask: Option<&Mask>) -> Option<Arc<PreloadedImageData>> {
+    fn first_data_image(group: &Group) -> Option<Arc<PreloadedImageData>> {
+        for node in group.children() {
+            match node {
+                Node::Image(img) => {
+                    if let ImageKind::DATA(data) = img.kind() {
+                        return Some(Arc::clone(data));
+                    }
+                }
+                Node::Group(g) => {
+                    if let Some(data) = first_data_image(g) {
+                        return Some(data);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    mask.and_then(|m| first_data_image(m.root()))
 }
 
 fn add_image(
@@ -608,6 +776,7 @@ fn add_image(
     image_draws: &mut Vec<ImageDraw>,
     width: u32,
     height: u32,
+    mask: Option<Arc<PreloadedImageData>>,
 ) -> Result<()> {
     if img.visibility() != Visibility::Visible {
         return Ok(());
@@ -634,6 +803,7 @@ fn add_image(
     ];
     image_draws.push(ImageDraw {
         data: Arc::clone(data),
+        mask,
         vertices: verts,
         indices: vec![0, 1, 2, 0, 2, 3],
     });
@@ -908,6 +1078,7 @@ struct ImageOut {
 };
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var mask_tex: texture_2d<f32>;
 
 @vertex
 fn vs_image(in: ImageIn) -> ImageOut {
@@ -920,5 +1091,12 @@ fn vs_image(in: ImageIn) -> ImageOut {
 @fragment
 fn fs_image(in: ImageOut) -> @location(0) vec4<f32> {
     return textureSample(tex, samp, in.uv);
+}
+
+@fragment
+fn fs_image_mask(in: ImageOut) -> @location(0) vec4<f32> {
+    let color = textureSample(tex, samp, in.uv);
+    let mask = textureSample(mask_tex, samp, in.uv);
+    return vec4<f32>(color.rgb, color.a * mask.a);
 }
 "#;
